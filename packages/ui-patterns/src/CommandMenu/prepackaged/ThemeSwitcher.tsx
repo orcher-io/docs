@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 import { Monitor, MonitorDot, Moon, Sun } from 'lucide-react'
 import { useTheme } from 'next-themes'
 

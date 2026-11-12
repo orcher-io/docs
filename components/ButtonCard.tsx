@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 import React, { FC } from 'react'
 import Image from 'next/legacy/image'
 import Link from 'next/link'

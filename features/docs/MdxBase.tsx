@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 import { MDXRemote } from 'next-mdx-remote/rsc'
 import { type ComponentProps } from 'react'
 import rehypeKatex from 'rehype-katex'

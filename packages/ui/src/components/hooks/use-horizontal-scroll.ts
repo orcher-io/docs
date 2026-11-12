@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 import * as React from 'react'
 
 export const useHorizontalScroll = (ref: React.RefObject<HTMLDivElement | null>) => {

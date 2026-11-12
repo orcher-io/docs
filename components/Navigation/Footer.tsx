@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 import { cn, IconGitHubSolid } from 'ui'
 
 import { GITHUB_DISCUSSIONS_URL, GITHUB_DOCS_ISSUES_URL, GITHUB_ORG_URL } from '~/lib/constants'
@@ -18,6 +19,12 @@ const Footer = ({ className }: { className?: string }) => (
           <a href={GITHUB_DOCS_ISSUES_URL} className={linkClassName}>
             Report a docs issue
           </a>
+          <span className="text-xs text-foreground-lighter">
+            Site built on{' '}
+            <a href="https://github.com/supabase/supabase" className="hover:underline">
+              Supabase&apos;s open-source docs
+            </a>
+          </span>
         </div>
         <div className="flex items-center gap-4">
           <a

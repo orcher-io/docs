@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 import Layout from '~/layouts/guides'
 
 export default async function ApiLayout({ children }: { children: React.ReactNode }) {

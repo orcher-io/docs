@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 import { join } from 'node:path'
 
 // MUST be process.cwd() here, not import.meta.url, or files that are added

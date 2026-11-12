@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 /**
  * Where the site is served. Both are read at build time (NEXT_PUBLIC_*), so
  * set them before `next build`.

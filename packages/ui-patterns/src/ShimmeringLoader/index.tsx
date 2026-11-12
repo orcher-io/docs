@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 import { forwardRef, type CSSProperties } from 'react'
 import { Card, cn, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from 'ui'
 

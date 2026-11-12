@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 import { SVGProps, forwardRef } from 'react'
 import { cn } from '../lib/utils'
 import { Check } from 'lucide-react'

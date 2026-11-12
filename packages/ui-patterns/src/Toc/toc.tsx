@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 'use client'
 
 import { type ComponentProps, Fragment, type HTMLAttributes, type ReactNode, useRef } from 'react'

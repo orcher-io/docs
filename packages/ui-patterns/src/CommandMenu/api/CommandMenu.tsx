@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 'use client'
 import { VisuallyHidden } from '@radix-ui/react-visually-hidden'
 import { AlertTriangle, ArrowLeft, Command, Search } from 'lucide-react'

@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 export const HIDDEN_PLACEHOLDER = '**** **** **** ****'
 export const COLORS = [
   'brand',

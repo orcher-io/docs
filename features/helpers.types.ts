@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 export type Json = string | number | boolean | { [key: string]: Json } | Json[]
 
 export type OrPromise<T> = T | Promise<T>
