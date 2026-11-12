@@ -1,6 +1,7 @@
 import { type Metadata, type ResolvingMetadata } from 'next'
 import Link from 'next/link'
-import { ArrowRight, ArrowUpRight } from 'lucide-react'
+import { ArrowRight, ArrowUpRight, Check, RotateCw, Timer, X } from 'lucide-react'
+import { cn } from 'ui'
 
 import HomeLayout from '~/layouts/HomeLayout'
 import { StatsBar } from '~/components/HomePageCover'
@@ -226,6 +227,78 @@ function PlatformColumn({
   )
 }
 
+const RUN_STEPS: { title: string; body: string; links: { label: string; href: string }[] }[] = [
+  {
+    title: 'Your workflow calls a task',
+    body: 'order runs charge. A workflow is an ordinary async function; tasks are where its side effects go.',
+    links: [
+      { label: 'Workflows', href: '/guides/core/workflows' },
+      { label: 'Tasks', href: '/guides/core/tasks' },
+    ],
+  },
+  {
+    title: 'The engine journals the result',
+    body: 'When charge returns, its result is recorded in PostgreSQL before the workflow moves on.',
+    links: [{ label: 'Journaling', href: '/guides/core/journaling' }],
+  },
+  {
+    title: 'The worker dies',
+    body: 'A deploy or a crash during the ten-second timer loses nothing: the engine keeps the timer, not the worker.',
+    links: [],
+  },
+  {
+    title: 'Another worker resumes the run',
+    body: 'It replays the journal, reuses the recorded charge result without running the task again, and continues at ship.',
+    links: [],
+  },
+]
+
+const JOURNAL_ROWS: { icon: typeof Check; step: string; note: string; tone?: 'lost' | 'done' }[] = [
+  { icon: Check, step: 'charge', note: 'recorded · "charged 1042"' },
+  { icon: Timer, step: 'timer 10s', note: 'started' },
+  { icon: X, step: 'worker lost', note: 'nothing to redo', tone: 'lost' },
+  { icon: RotateCw, step: 'replay', note: 'charge reused, not run again' },
+  { icon: Check, step: 'ship', note: 'recorded · "shipped 1042"' },
+  { icon: Check, step: 'completed', note: '"charged 1042, then shipped 1042"', tone: 'done' },
+]
+
+/** The run's journal, as the steps beside it describe it. An illustration, not a screenshot. */
+function JournalView() {
+  return (
+    <figure className="m-0 border border-default bg-background">
+      <figcaption className="flex items-center justify-between gap-3 border-b border-default bg-surface-75 px-5 py-2.5 font-mono text-xs">
+        <span className="text-foreground">order-1042</span>
+        <span className="text-foreground-lighter">journal</span>
+      </figcaption>
+      <ul className="m-0 p-0 list-none">
+        {JOURNAL_ROWS.map(({ icon: Icon, step, note, tone }, i) => (
+          <li
+            key={step}
+            className={cn(
+              'flex items-start sm:items-center gap-3 px-5 py-3 font-mono text-xs',
+              i > 0 && 'border-t border-default',
+              tone === 'lost' && 'bg-surface-75'
+            )}
+          >
+            <Icon
+              size={13}
+              strokeWidth={1.75}
+              className={cn(
+                'shrink-0 mt-0.5 sm:mt-0',
+                tone === 'lost' ? 'text-destructive' : tone === 'done' ? 'text-brand' : 'text-foreground-light'
+              )}
+            />
+            <span className={cn('w-24 shrink-0', tone === 'lost' ? 'text-destructive' : 'text-foreground')}>
+              {step}
+            </span>
+            <span className="min-w-0 text-foreground-lighter sm:truncate">{note}</span>
+          </li>
+        ))}
+      </ul>
+    </figure>
+  )
+}
+
 // ─── Page ────────────────────────────────────────────────────────────────────
 
 const HomePage = () => (
@@ -238,23 +311,55 @@ const HomePage = () => (
         </div>
       </section>
 
-      {/* ── 01 · Concepts ─────────────────────────────────────────── */}
+      {/* ── How a run survives a crash ────────────────────────────── */}
       <section>
         <div className="max-w-7xl mx-auto px-5 py-14 sm:py-16">
           <SectionIntro
-            kicker="Concepts"
-            title="The core model"
-            description="Six building blocks of a durable workflow."
+            kicker="How it works"
+            title="How a run survives a crash"
+            description="The order workflow above, when its worker dies halfway through."
             id="core-concepts"
-            action={{ label: 'Overview', href: '/guides/core/understanding' }}
+            action={{ label: 'Try it in the quickstart', href: '/guides/getting-started/quickstart' }}
           />
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-px bg-border-default border border-default">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-10 lg:gap-14 items-start">
+            <ol className="m-0 p-0 list-none flex flex-col gap-7">
+              {RUN_STEPS.map((step, i) => (
+                <li key={step.title} className="flex gap-4">
+                  <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center border border-default font-mono text-[11px] text-foreground-light">
+                    {i + 1}
+                  </span>
+                  <div className="flex flex-col gap-1.5">
+                    <span className="text-sm font-medium text-foreground">{step.title}</span>
+                    <p className="m-0 text-sm text-foreground-light leading-relaxed">{step.body}</p>
+                    {step.links.length > 0 && (
+                      <div className="flex flex-wrap gap-x-4 gap-y-1 pt-0.5">
+                        {step.links.map((link) => (
+                          <Link
+                            key={link.href}
+                            href={link.href}
+                            className="no-underline font-mono text-xs text-foreground-lighter hover:text-foreground transition-colors flex items-center gap-1"
+                          >
+                            {link.label}
+                            <ArrowRight size={10} />
+                          </Link>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ol>
+
+            <JournalView />
+          </div>
+
+          <h3 className="m-0 mt-14 mb-4 font-mono text-[10px] uppercase tracking-widest text-foreground-lighter font-normal">
+            Also in the model
+          </h3>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-px bg-border-default border border-default">
             {[
-              { title: 'Workflows', href: '/guides/core/workflows', description: 'Ordinary async functions whose progress survives crashes and restarts. Code-first, no YAML.' },
-              { title: 'Tasks', href: '/guides/core/tasks', description: 'Where side effects go: each task has its own retries and timeouts, and its result is journaled.' },
-              { title: 'Journaling', href: '/guides/core/journaling', description: 'Every step is recorded, so a run replays to where it stopped without repeating completed steps.' },
-              { title: 'Events', href: '/guides/core/events', description: 'Send an event to a running workflow, and have a workflow wait for one, with or without a timeout.' },
-              { title: 'State', href: '/guides/core/state-management', description: 'State a workflow keeps as it runs, and how callers read it from outside.' },
+              { title: 'Events', href: '/guides/core/events', description: 'Send data to a running workflow, or have it wait for some, with or without a timeout.' },
+              { title: 'State', href: '/guides/core/state-management', description: 'What a workflow keeps as it runs, and how callers read it from outside.' },
               { title: 'Actors', href: '/guides/core/actors', description: 'Long-lived entities with their own state, exclusive and shared operations.' },
             ].map((item) => (
               <ConceptCell key={item.title} {...item} />
