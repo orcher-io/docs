@@ -1,0 +1,45 @@
+---
+title: 'Resources'
+description: 'Resources for getting started building with Orcher.'
+hideToc: true
+---
+
+{/* <!-- vale off --> */}
+
+<div className="flex flex-col gap-12 my-12">
+
+<div>
+
+  <div className="grid grid-cols-12 gap-6 not-prose">
+    {
+    [
+      {
+        title: 'Glossary',
+        hasLightIcon: true,
+        href: '/guides/resources/glossary',
+        description: 'Definitions for terminology and acronyms used in the Orcher documentation.',
+      }
+    ]
+.map((resource) => {
+      return (
+        <Link
+          href={`${resource.href}`}
+          key={resource.title}
+          className={'col-span-12 md:col-span-4'}
+          passHref
+        >
+          <GlassPanel {...resource} background={false} showIconBg={true}>
+            {resource.description}
+          </GlassPanel>
+        </Link>
+      )
+
+})}
+
+  </div>
+
+</div>
+
+{/* end of container */}
+
+</div>

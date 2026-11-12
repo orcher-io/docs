@@ -1,0 +1,491 @@
+---
+id: 'saga-coordinator'
+title: 'Saga Coordinator Pattern'
+sidebar_label: 'Coordinator Pattern'
+---
+
+## Saga Coordinator Pattern
+
+For complex sagas with many steps, a dedicated coordinator encapsulates the state tracking and compensation logic into separate functions. The coordinator maintains a `SagaState` struct that records which steps have completed and stores the IDs needed for compensation. If any step fails, the coordinator hands the current state to a `compensate` function that walks through completed steps in reverse order. This separation makes the saga easier to test, extend with new steps, and audit.
+
+<div className="not-prose my-8 max-w-md mx-auto">
+  <div className="flex flex-col items-center">
+    {/* Coordinator */}
+    <div className="border bg-surface-100 px-5 py-2.5 text-center w-full">
+      <div className="text-xs font-medium text-foreground">Saga Coordinator</div>
+      <div className="text-[10px] text-foreground-muted mt-0.5">tracks state · manages compensation</div>
+    </div>
+    <div className="w-px h-3 bg-border-strong" />
+    {/* Steps with state tracking */}
+    <div className="border border-dashed w-full p-3">
+      <div className="text-[10px] font-mono uppercase tracking-wider text-foreground-muted mb-2">execute steps</div>
+      {[
+        { step: 'validate_order', saves: 'order_id' },
+        { step: 'reserve_inventory', saves: 'reservation_id' },
+        { step: 'process_payment', saves: 'payment_id' },
+        { step: 'arrange_shipping', saves: 'shipment_id' },
+      ].map((s, i, arr) => (
+        <div key={s.step} className="flex flex-col items-center">
+          <div className="border bg-background w-full px-4 py-2 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="w-4 h-4 flex items-center justify-center text-[9px] font-mono text-foreground-muted border bg-surface-75 shrink-0">{i + 1}</span>
+              <code className="text-[11px] text-foreground">{s.step}</code>
+            </div>
+            <span className="text-[9px] font-mono text-foreground-muted">state.{s.saves}</span>
+          </div>
+          {i < arr.length - 1 && <div className="w-px h-1.5 bg-border-strong" />}
+        </div>
+      ))}
+    </div>
+    <div className="w-px h-3 bg-border-strong" />
+    {/* On failure */}
+    <div className="relative w-full">
+      <div className="absolute top-0 h-px bg-border-strong" style={{ left: 'calc(25% - 0.30rem)', right: 'calc(25% - 0.30rem)' }} />
+      <div className="flex gap-4">
+        <div className="flex-1 flex flex-col items-center">
+          <div className="w-px h-4 bg-border-strong" />
+          <div className="text-[10px] font-mono text-foreground-muted mb-1">success</div>
+          <div className="border bg-background w-full p-2.5 text-center flex flex-col justify-center min-h-[3.5rem]">
+            <div className="text-[10px] font-medium text-foreground">Commit</div>
+            <div className="text-[10px] text-foreground-muted mt-0.5">Return result</div>
+          </div>
+        </div>
+        <div className="flex-1 flex flex-col items-center">
+          <div className="w-px h-4 bg-border-strong" />
+          <div className="text-[10px] font-mono text-red-400 mb-1">any step fails</div>
+          <div className="border border-red-400/30 bg-red-500/5 w-full p-2.5 text-center flex flex-col justify-center min-h-[3.5rem]">
+            <div className="text-[10px] font-medium text-foreground">compensate(state)</div>
+            <div className="text-[10px] text-foreground-muted mt-0.5">Undo in reverse order</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SagaState {
+    saga_id: String,
+    current_step: u32,
+    completed_steps: Vec<String>,
+    inventory_reserved: bool,
+    inventory_id: Option<String>,
+    payment_captured: bool,
+    payment_id: Option<String>,
+    shipment_created: bool,
+    shipment_id: Option<String>,
+    failed: bool,
+}
+
+impl SagaState {
+    fn new(saga_id: String) -> Self {
+        Self {
+            saga_id,
+            current_step: 0,
+            completed_steps: Vec::new(),
+            inventory_reserved: false,
+            inventory_id: None,
+            payment_captured: false,
+            payment_id: None,
+            shipment_created: false,
+            shipment_id: None,
+            failed: false,
+        }
+    }
+}
+
+// Saga coordinator workflow
+#[workflow(name = "saga_coordinator", version = "1.0.0")]
+pub async fn saga_coordinator(
+    ctx: WorkflowContext,
+    order: OrderData,
+) -> Result<OrderResult> {
+    let saga_id = format!("saga-{}", order.order_id);
+    let mut state = SagaState::new(saga_id.clone());
+
+    println!("Saga {} started", saga_id);
+
+    // Execute saga steps
+    match execute_saga_steps(&ctx, &mut state, &order).await {
+        Ok(_) => {
+            println!("Saga {} completed successfully", saga_id);
+            Ok(OrderResult {
+                order_id: order.order_id,
+                success: true,
+                payment_id: state.payment_id,
+                inventory_id: state.inventory_id,
+                shipment_id: state.shipment_id,
+            })
+        }
+        Err(e) => {
+            println!("Saga {} failed: {}, starting compensation", saga_id, e);
+            state.failed = true;
+
+            // Execute compensation
+            compensate_saga(&ctx, &state).await?;
+
+            Ok(OrderResult {
+                order_id: order.order_id,
+                success: false,
+                payment_id: None,
+                inventory_id: None,
+                shipment_id: None,
+            })
+        }
+    }
+}
+
+async fn execute_saga_steps(
+    ctx: &WorkflowContext,
+    state: &mut SagaState,
+    order: &OrderData,
+) -> Result<()> {
+    // Step 1: Reserve inventory
+    state.current_step = 1;
+    let inventory_id: String = ctx
+        .execute_task(reserve_inventory, order.items.clone())
+        .await?;
+
+    state.inventory_reserved = true;
+    state.inventory_id = Some(inventory_id);
+    state.completed_steps.push("inventory_reserved".to_string());
+
+    // Step 2: Charge payment
+    state.current_step = 2;
+    let payment_id: String = ctx
+        .execute_task(charge_payment, order.amount)
+        .await?;
+
+    state.payment_captured = true;
+    state.payment_id = Some(payment_id);
+    state.completed_steps.push("payment_captured".to_string());
+
+    // Step 3: Create shipment
+    state.current_step = 3;
+    let shipment_id: String = ctx
+        .execute_task(create_shipment, order.order_id.clone())
+        .await?;
+
+    state.shipment_created = true;
+    state.shipment_id = Some(shipment_id);
+    state.completed_steps.push("shipment_created".to_string());
+
+    Ok(())
+}
+
+async fn compensate_saga(ctx: &WorkflowContext, state: &SagaState) -> Result<()> {
+    println!("Compensating saga {}", state.saga_id);
+
+    // Compensate in reverse order
+    if state.shipment_created {
+        if let Some(ref shipment_id) = state.shipment_id {
+            println!("Canceling shipment");
+            ctx.execute_task(cancel_shipment, shipment_id.clone()).await?;
+        }
+    }
+
+    if state.payment_captured {
+        if let Some(ref payment_id) = state.payment_id {
+            println!("Refunding payment");
+            ctx.execute_task(refund_payment, payment_id.clone()).await?;
+        }
+    }
+
+    if state.inventory_reserved {
+        if let Some(ref inventory_id) = state.inventory_id {
+            println!("Releasing inventory");
+            ctx.execute_task(release_inventory, inventory_id.clone()).await?;
+        }
+    }
+
+    println!("Compensation completed for saga {}", state.saga_id);
+    Ok(())
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import {
+  Workflow, Tasks, Task, WorkflowContext, TaskContext, createTaskRefs
+} from '@orcher/sdk';
+
+interface SagaState {
+  sagaId: string;
+  currentStep: number;
+  completedSteps: string[];
+  inventoryReserved: boolean;
+  inventoryId?: string;
+  paymentCaptured: boolean;
+  paymentId?: string;
+  shipmentCreated: boolean;
+  shipmentId?: string;
+  failed: boolean;
+}
+
+function createSagaState(sagaId: string): SagaState {
+  return {
+    sagaId,
+    currentStep: 0,
+    completedSteps: [],
+    inventoryReserved: false,
+    paymentCaptured: false,
+    shipmentCreated: false,
+    failed: false,
+  };
+}
+
+@Tasks()
+class SagaTasks {
+  @Task({ name: 'reserveInventory' })
+  async reserveInventory(ctx: TaskContext, items: string[]): Promise<string> { /* ... */ }
+
+  @Task({ name: 'releaseInventory' })
+  async releaseInventory(ctx: TaskContext, inventoryId: string): Promise<void> { /* ... */ }
+
+  @Task({ name: 'chargePayment' })
+  async chargePayment(ctx: TaskContext, amount: number): Promise<string> { /* ... */ }
+
+  @Task({ name: 'refundPayment' })
+  async refundPayment(ctx: TaskContext, paymentId: string): Promise<void> { /* ... */ }
+
+  @Task({ name: 'createShipment' })
+  async createShipment(ctx: TaskContext, orderId: string): Promise<string> { /* ... */ }
+
+  @Task({ name: 'cancelShipment' })
+  async cancelShipment(ctx: TaskContext, shipmentId: string): Promise<void> { /* ... */ }
+}
+
+const tasks = createTaskRefs(SagaTasks);
+
+async function executeSagaSteps(
+  ctx: WorkflowContext,
+  state: SagaState,
+  order: OrderData,
+): Promise<void> {
+  // Step 1: Reserve inventory
+  state.currentStep = 1;
+  const inventoryId = await ctx.executeTask(tasks.reserveInventory, order.items);
+
+  state.inventoryReserved = true;
+  state.inventoryId = inventoryId;
+  state.completedSteps.push('inventory_reserved');
+
+  // Step 2: Charge payment
+  state.currentStep = 2;
+  const paymentId = await ctx.executeTask(tasks.chargePayment, order.amount);
+
+  state.paymentCaptured = true;
+  state.paymentId = paymentId;
+  state.completedSteps.push('payment_captured');
+
+  // Step 3: Create shipment
+  state.currentStep = 3;
+  const shipmentId = await ctx.executeTask(tasks.createShipment, order.orderId);
+
+  state.shipmentCreated = true;
+  state.shipmentId = shipmentId;
+  state.completedSteps.push('shipment_created');
+}
+
+async function compensateSaga(
+  ctx: WorkflowContext,
+  state: SagaState,
+): Promise<void> {
+  console.log(`Compensating saga ${state.sagaId}`);
+
+  // Compensate in reverse order
+  if (state.shipmentCreated && state.shipmentId) {
+    console.log('Canceling shipment');
+    await ctx.executeTask(tasks.cancelShipment, state.shipmentId);
+  }
+
+  if (state.paymentCaptured && state.paymentId) {
+    console.log('Refunding payment');
+    await ctx.executeTask(tasks.refundPayment, state.paymentId);
+  }
+
+  if (state.inventoryReserved && state.inventoryId) {
+    console.log('Releasing inventory');
+    await ctx.executeTask(tasks.releaseInventory, state.inventoryId);
+  }
+
+  console.log(`Compensation completed for saga ${state.sagaId}`);
+}
+
+// Saga coordinator workflow
+@Workflow()
+class SagaCoordinator {
+  async execute(ctx: WorkflowContext, order: OrderData): Promise<OrderResult> {
+    const sagaId = `saga-${order.orderId}`;
+    const state = createSagaState(sagaId);
+
+    console.log(`Saga ${sagaId} started`);
+
+    try {
+      await executeSagaSteps(ctx, state, order);
+
+      console.log(`Saga ${sagaId} completed successfully`);
+      return {
+        orderId: order.orderId,
+        success: true,
+        paymentId: state.paymentId,
+        inventoryId: state.inventoryId,
+        shipmentId: state.shipmentId,
+      };
+    } catch (e) {
+      console.log(`Saga ${sagaId} failed: ${e}, starting compensation`);
+      state.failed = true;
+
+      await compensateSaga(ctx, state);
+
+      return {
+        orderId: order.orderId,
+        success: false,
+      };
+    }
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext, TaskContext
+
+@task(name="cancel_shipment")
+async def cancel_shipment(ctx: TaskContext, shipment_id: str) -> None:
+    # ... cancel a previously created shipment
+    pass
+
+# Saga coordinator workflow
+@workflow(name="saga_coordinator", version="1.0.0")
+async def saga_coordinator(ctx: WorkflowContext, order: dict) -> dict:
+    saga_id = f"saga-{order['order_id']}"
+    state = {
+        "saga_id": saga_id,
+        "current_step": 0,
+        "completed_steps": [],
+        "inventory_reserved": False,
+        "inventory_id": None,
+        "payment_captured": False,
+        "payment_id": None,
+        "shipment_created": False,
+        "shipment_id": None,
+    }
+
+    print(f"Saga {saga_id} started")
+
+    try:
+        await execute_saga_steps(ctx, state, order)
+
+        print(f"Saga {saga_id} completed successfully")
+        return {
+            "order_id": order["order_id"],
+            "success": True,
+            "payment_id": state["payment_id"],
+            "inventory_id": state["inventory_id"],
+            "shipment_id": state["shipment_id"],
+        }
+    except Exception as e:
+        print(f"Saga {saga_id} failed: {e}, starting compensation")
+
+        await compensate_saga(ctx, state)
+
+        return {
+            "order_id": order["order_id"],
+            "success": False,
+            "payment_id": None,
+            "inventory_id": None,
+            "shipment_id": None,
+        }
+
+
+async def execute_saga_steps(ctx, state, order):
+    # Step 1: Reserve inventory
+    state["current_step"] = 1
+    inventory_id = await ctx.execute_task(reserve_inventory, order["items"])
+    state["inventory_reserved"] = True
+    state["inventory_id"] = inventory_id
+    state["completed_steps"].append("inventory_reserved")
+
+    # Step 2: Charge payment
+    state["current_step"] = 2
+    payment_id = await ctx.execute_task(charge_payment, order["amount"])
+    state["payment_captured"] = True
+    state["payment_id"] = payment_id
+    state["completed_steps"].append("payment_captured")
+
+    # Step 3: Create shipment
+    state["current_step"] = 3
+    shipment_id = await ctx.execute_task(create_shipment, order["order_id"])
+    state["shipment_created"] = True
+    state["shipment_id"] = shipment_id
+    state["completed_steps"].append("shipment_created")
+
+
+async def compensate_saga(ctx, state):
+    print(f"Compensating saga {state['saga_id']}")
+
+    # Compensate in reverse order
+    if state["shipment_created"] and state["shipment_id"]:
+        print("Canceling shipment")
+        await ctx.execute_task(cancel_shipment, state["shipment_id"])
+
+    if state["payment_captured"] and state["payment_id"]:
+        print("Refunding payment")
+        await ctx.execute_task(refund_payment, state["payment_id"])
+
+    if state["inventory_reserved"] and state["inventory_id"]:
+        print("Releasing inventory")
+        await ctx.execute_task(release_inventory, state["inventory_id"])
+
+    print(f"Compensation completed for saga {state['saga_id']}")
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/patterns/saga/parallel" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Parallel Saga</h3>
+      <p className="text-sm text-foreground-light">
+        Execute independent saga steps in parallel to reduce total execution time
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/saga/forward-recovery" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Forward Recovery</h3>
+      <p className="text-sm text-foreground-light">
+        Retry failed steps with increasing delays instead of compensating
+      </p>
+    </div>
+  </Link>
+</div>

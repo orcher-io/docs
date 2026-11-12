@@ -1,0 +1,639 @@
+---
+id: 'tasks-idempotency'
+title: 'Idempotency Patterns'
+description: 'Learn how to design tasks that are safe to retry using idempotency keys, database upserts, check-before-execute patterns, and proper error handling.'
+sidebar_label: 'Idempotency'
+---
+
+Tasks should be designed to be safely retried without causing duplicate side effects.
+
+### Using Idempotency Keys
+
+Pass a unique idempotency key with external API calls so that retries don't create duplicate side effects. The `TaskContext` provides a task token and attempt number that you can combine to build a stable key for each execution attempt.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task(
+name = "charge_card",
+retry = 3  // ← Task may be retried up to 3 times
+)]
+pub async fn charge_card(
+_ctx: TaskContext,
+input: PaymentInput,
+) -> Result<ChargeResult> {
+// Get Stripe API client
+let stripe_client = get_stripe_client();
+
+// Create charge with idempotency key
+let charge = stripe::Charge::create(
+    &stripe_client,
+    ChargeParams {
+        amount: input.amount,        // e.g., 5000 (= $50.00)
+        currency: "usd",              // USD currency
+        source: input.card_token,     // Customer's card token
+
+        // ⭐ THE KEY LINE: Idempotency key prevents duplicate charges
+        // Format: "order_12345"
+        // If Stripe sees this key again, it returns the original charge
+        // without creating a new one
+        idempotency_key: Some(format!("order_{}", input.order_id)),
+        ..Default::default()
+    }
+).await?;
+
+// Return charge details
+Ok(ChargeResult {
+    charge_id: charge.id,         // e.g., "ch_abc123"
+    amount: charge.amount,         // 5000
+    status: "succeeded".to_string(),
+})
+}
+```
+
+**What happens on retry:**
+```rust
+// First execution (workflow run #1):
+// 1. Orcher executes task
+// 2. Stripe receives request with idempotency_key="order_12345"
+// 3. Stripe creates charge, stores key
+// 4. Returns charge_id="ch_abc123"
+// 5. Orcher saves result to journal
+
+// Second execution (if workflow retried):
+// 1. Orcher checks journal first
+// 2. Finds cached result: charge_id="ch_abc123"
+// 3. Returns cached result immediately (NO API call to Stripe)
+// 4. Customer charged only once ✓
+
+// Third execution (if task manually re-run outside workflow):
+// 1. Task executes again
+// 2. Stripe receives request with same idempotency_key="order_12345"
+// 3. Stripe recognizes the key
+// 4. Returns original charge_id="ch_abc123" (NO new charge created)
+// 5. Customer still charged only once ✓
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Inside a @Tasks() class:
+@Task({
+  name: 'chargeCard',
+  retryPolicy: { maxAttempts: 3 },  // ← Task may be retried up to 3 times
+})
+async chargeCard(
+  _ctx: TaskContext,
+  input: PaymentInput
+): Promise<ChargeResult> {
+  // Get Stripe API client
+  const stripe = getStripeClient();
+
+  // Create charge with idempotency key
+  const charge = await stripe.charges.create({
+amount: input.amount,        // e.g., 5000 (= $50.00)
+currency: 'usd',              // USD currency
+source: input.cardToken,      // Customer's card token
+  }, {
+// ⭐ THE KEY LINE: Idempotency key prevents duplicate charges
+// Format: "order_12345"
+// If Stripe sees this key again, it returns the original charge
+// without creating a new one
+idempotencyKey: `order_${input.orderId}`,
+  });
+
+  // Return charge details
+  return {
+chargeId: charge.id,     // e.g., "ch_abc123"
+amount: charge.amount,    // 5000
+status: 'succeeded',
+  };
+}
+```
+
+**What happens on retry:**
+```typescript
+// First execution (workflow run #1):
+// 1. Orcher executes task
+// 2. Stripe receives request with idempotencyKey="order_12345"
+// 3. Stripe creates charge, stores key
+// 4. Returns chargeId="ch_abc123"
+// 5. Orcher saves result to journal
+
+// Second execution (if workflow retried):
+// 1. Orcher checks journal first
+// 2. Finds cached result: chargeId="ch_abc123"
+// 3. Returns cached result immediately (NO API call to Stripe)
+// 4. Customer charged only once ✓
+
+// Third execution (if task manually re-run outside workflow):
+// 1. Task executes again
+// 2. Stripe receives request with same idempotencyKey="order_12345"
+// 3. Stripe recognizes the key
+// 4. Returns original chargeId="ch_abc123" (NO new charge created)
+// 5. Customer still charged only once ✓
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+import stripe
+from orcher import task, TaskContext
+from dataclasses import dataclass
+
+@dataclass
+class PaymentInput:
+amount: int
+card_token: str
+order_id: str
+
+@dataclass
+class ChargeResult:
+charge_id: str
+amount: int
+status: str
+
+@task(
+name="charge_card",
+retry_policy={"max_attempts": 3},  # Task may be retried up to 3 times
+)
+async def charge_card(ctx: TaskContext, input: PaymentInput) -> ChargeResult:
+# Create charge with idempotency key
+charge = stripe.Charge.create(
+    amount=input.amount,           # e.g., 5000 (= $50.00)
+    currency="usd",                # USD currency
+    source=input.card_token,       # Customer's card token
+    # THE KEY LINE: Idempotency key prevents duplicate charges
+    # Format: "order_12345"
+    # If Stripe sees this key again, it returns the original charge
+    # without creating a new one
+    idempotency_key=f"order_{input.order_id}",
+)
+
+# Return charge details
+return ChargeResult(
+    charge_id=charge.id,       # e.g., "ch_abc123"
+    amount=charge.amount,      # 5000
+    status="succeeded",
+)
+```
+
+**What happens on retry:**
+```python
+# First execution (workflow run #1):
+# 1. Orcher executes task
+# 2. Stripe receives request with idempotency_key="order_12345"
+# 3. Stripe creates charge, stores key
+# 4. Returns charge_id="ch_abc123"
+# 5. Orcher saves result to journal
+
+# Second execution (if workflow retried):
+# 1. Orcher checks journal first
+# 2. Finds cached result: charge_id="ch_abc123"
+# 3. Returns cached result immediately (NO API call to Stripe)
+# 4. Customer charged only once
+
+# Third execution (if task manually re-run outside workflow):
+# 1. Task executes again
+# 2. Stripe receives request with same idempotency_key="order_12345"
+# 3. Stripe recognizes the key
+# 4. Returns original charge_id="ch_abc123" (NO new charge created)
+# 5. Customer still charged only once
+```
+
+</TabPanel>
+
+</Tabs>
+
+**Key Takeaways:**
+- Idempotency key should be based on workflow/order ID, not timestamps
+- Use same key format consistently: `order_{orderId}`, `payment_{paymentId}`
+- External system (Stripe) deduplicates based on key
+- Orcher's journal provides first layer of deduplication
+- Idempotency key provides second layer (if task runs outside workflow)
+
+---
+
+### Strategy 2: Database Upsert Pattern
+
+**Concept:** Use database operations that are naturally idempotent (INSERT ON CONFLICT, UPSERT, atomic UPDATE).
+
+**When to Use:**
+- Database writes
+- Inventory management
+- Counter updates
+- Status changes
+
+**How It Works:**
+
+Instead of read-modify-write (which is NOT idempotent), use atomic database operations that produce the same result when run multiple times.
+
+**Complete Example with Breakdown:**
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task(name = "update_inventory")]
+pub async fn update_inventory(
+_ctx: TaskContext,
+input: InventoryUpdate,
+) -> Result<()> {
+let db = get_database();
+
+// Use UPSERT (INSERT ... ON CONFLICT) for idempotency
+db.execute(
+    "INSERT INTO inventory (product_id, quantity, updated_at)
+     VALUES ($1, $2, NOW())
+     ON CONFLICT (product_id)
+     DO UPDATE SET
+       quantity = $2,
+       updated_at = NOW()",
+    &[&input.product_id, &input.quantity]
+).await?;
+
+Ok(())
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Inside a @Tasks() class:
+@Task({ name: 'updateInventory' })
+async updateInventory(
+  _ctx: TaskContext,
+  input: InventoryUpdate
+): Promise<void> {
+  const db = getDatabase();
+
+  // Use UPSERT for idempotency
+  await db.query(`
+INSERT INTO inventory (product_id, quantity, updated_at)
+VALUES ($1, $2, NOW())
+ON CONFLICT (product_id)
+DO UPDATE SET
+  quantity = $2,
+  updated_at = NOW()
+  `, [input.productId, input.quantity]);
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import task, TaskContext
+from dataclasses import dataclass
+
+@dataclass
+class InventoryUpdate:
+product_id: str
+quantity: int
+
+@task(name="update_inventory")
+async def update_inventory(ctx: TaskContext, input: InventoryUpdate) -> None:
+db = get_database()
+
+# Use UPSERT (INSERT ... ON CONFLICT) for idempotency
+await db.execute(
+    """
+    INSERT INTO inventory (product_id, quantity, updated_at)
+    VALUES ($1, $2, NOW())
+    ON CONFLICT (product_id)
+    DO UPDATE SET
+      quantity = $2,
+      updated_at = NOW()
+    """,
+    input.product_id,
+    input.quantity,
+)
+```
+
+</TabPanel>
+
+</Tabs>
+
+### Check-Before-Execute Pattern
+
+Before performing a non-idempotent operation, check whether it has already been done. This pattern is useful when the external system doesn't support idempotency keys — you query the current state first and skip the operation if it was already applied.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task(name = "send_welcome_email")]
+pub async fn send_welcome_email(
+_ctx: TaskContext,
+user_id: String,
+) -> Result<EmailResult> {
+let db = get_database();
+
+// Check if email was already sent
+let already_sent: bool = db.query_one(
+    "SELECT EXISTS(
+       SELECT 1 FROM sent_emails
+       WHERE user_id = $1 AND email_type = 'welcome'
+     )",
+    &[&user_id]
+).await?;
+
+if already_sent {
+    tracing::info!("Email already sent to user {}", user_id);
+    return Ok(EmailResult {
+        message_id: "already_sent".to_string(),
+        sent: false,
+    });
+}
+
+// Send email
+let result = email_service::send_welcome(&user_id).await?;
+
+// Record that email was sent
+db.execute(
+    "INSERT INTO sent_emails (user_id, email_type, message_id)
+     VALUES ($1, 'welcome', $2)",
+    &[&user_id, &result.message_id]
+).await?;
+
+Ok(result)
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Inside a @Tasks() class:
+@Task({ name: 'sendWelcomeEmail' })
+async sendWelcomeEmail(
+  _ctx: TaskContext,
+  userId: string
+): Promise<EmailResult> {
+  const db = getDatabase();
+
+  // Check if email was already sent
+  const result = await db.query(
+`SELECT EXISTS(
+   SELECT 1 FROM sent_emails
+   WHERE user_id = $1 AND email_type = 'welcome'
+ )`,
+[userId]
+  );
+
+  const alreadySent = result.rows[0].exists;
+
+  if (alreadySent) {
+console.log(`Email already sent to user ${userId}`);
+return {
+  messageId: 'already_sent',
+  sent: false,
+};
+  }
+
+  // Send email
+  const emailResult = await emailService.sendWelcome(userId);
+
+  // Record that email was sent
+  await db.query(
+`INSERT INTO sent_emails (user_id, email_type, message_id)
+ VALUES ($1, 'welcome', $2)`,
+[userId, emailResult.messageId]
+  );
+
+  return emailResult;
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import task, TaskContext
+from dataclasses import dataclass
+
+@dataclass
+class EmailResult:
+message_id: str
+sent: bool
+
+@task(name="send_welcome_email")
+async def send_welcome_email(ctx: TaskContext, user_id: str) -> EmailResult:
+db = get_database()
+
+# Check if email was already sent
+already_sent = await db.fetchval(
+    """
+    SELECT EXISTS(
+      SELECT 1 FROM sent_emails
+      WHERE user_id = $1 AND email_type = 'welcome'
+    )
+    """,
+    user_id,
+)
+
+if already_sent:
+    print(f"Email already sent to user {user_id}")
+    return EmailResult(message_id="already_sent", sent=False)
+
+# Send email
+result = await email_service.send_welcome(user_id)
+
+# Record that email was sent
+await db.execute(
+    """
+    INSERT INTO sent_emails (user_id, email_type, message_id)
+    VALUES ($1, 'welcome', $2)
+    """,
+    user_id,
+    result.message_id,
+)
+
+return result
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+### Error Handling
+
+Tasks should handle errors appropriately and return meaningful error messages.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use anyhow::{Context, Result};
+
+#[task(
+name = "fetch_external_data",
+retry = 5
+)]
+pub async fn fetch_external_data(
+ctx: TaskContext,
+url: String,
+) -> Result<ApiResponse> {
+let response = reqwest::get(&url)
+    .await
+    .context("Failed to connect to API")?;
+
+match response.status() {
+    status if status.is_success() => {
+        let data = response.json().await?;
+        Ok(data)
+    }
+    status if status.is_server_error() => {
+        // 5xx errors are transient - should retry
+        Err(anyhow::anyhow!(
+            "Server error (will retry): HTTP {}",
+            status
+        ))
+    }
+    status => {
+        // 4xx errors are permanent - don't retry
+        Err(anyhow::anyhow!(
+            "Client error (permanent): HTTP {}",
+            status
+        ))
+    }
+}
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Inside a @Tasks() class:
+@Task({
+  name: 'fetchExternalData',
+  retryPolicy: {
+    maxAttempts: 5,
+    nonRetryableErrorTypes: ['ClientError'],
+  },
+})
+async fetchExternalData(
+  _ctx: TaskContext,
+  url: string
+): Promise<ApiResponse> {
+  const response = await fetch(url);
+
+  if (response.ok) {
+return response.json();
+  }
+
+  if (response.status >= 500) {
+// 5xx errors are transient - should retry
+throw new Error(`Server error (will retry): HTTP ${response.status}`);
+  }
+
+  // 4xx errors are permanent - mark as non-retryable
+  const error = new Error(`Client error: HTTP ${response.status}`);
+  error.name = 'ClientError';
+  throw error;
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+import httpx
+from orcher import task, TaskContext
+from orcher.errors import ApplicationFailure
+
+@task(
+name="fetch_external_data",
+retry_policy={"max_attempts": 5},
+)
+async def fetch_external_data(ctx: TaskContext, url: str) -> dict:
+async with httpx.AsyncClient() as client:
+    response = await client.get(url)
+
+if response.is_success:
+    return response.json()
+
+if response.status_code >= 500:
+    # 5xx errors are transient - should retry
+    raise RuntimeError(
+        f"Server error (will retry): HTTP {response.status_code}"
+    )
+
+# 4xx errors are permanent - mark as non-retryable
+raise ApplicationFailure(
+    message=f"Client error: HTTP {response.status_code}",
+    error_type="ClientError",
+    retryable=False,
+)
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+### Next Steps
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/tasks/testing" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Testing Tasks →</h3>
+      <p className="text-sm text-foreground-light">
+        Learn how to test tasks independently and common task patterns
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/tasks/configuration" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">← Configuration</h3>
+      <p className="text-sm text-foreground-light">
+        Task macros, retry policies, timeouts, and task context
+      </p>
+    </div>
+  </Link>
+</div>

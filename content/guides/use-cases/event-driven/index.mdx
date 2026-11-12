@@ -1,0 +1,95 @@
+---
+id: 'event-driven'
+title: 'Event Processing & Actors'
+description: 'Build event-driven systems and stateful actors with Orcher. Process event streams, manage per-entity state with single-writer guarantees, detect patterns with correlated events, and aggregate streams — all backed by durable execution.'
+sidebar_label: 'Event Processing & Actors'
+---
+
+This guide covers two complementary patterns. **Event-driven workflows** react to things that happen — orders placed, payments received, sensors reporting — by executing durable task chains. **Actors** maintain per-entity state — shopping carts, counters, device twins — with single-writer guarantees. Both are backed by PostgreSQL: every event processed and every state change is journaled.
+
+### An event becomes a durable reaction
+
+A plain event handler is fire-and-forget: if the process dies partway through reacting, the half-done work is gone and the event is often lost with it. When the reaction is a workflow, the event is durable — the chain resumes at the step it reached, and the event is acknowledged only once its handler is safely journaled.
+
+<div className="not-prose my-8 max-w-lg mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Handler vs. Durable Reaction</div>
+  </div>
+  <div className="grid grid-cols-2 gap-px bg-border-default">
+    <div className="bg-background px-4 py-3">
+      <div className="text-[10px] font-mono uppercase tracking-widest text-foreground-muted mb-2">Plain handler</div>
+      <div className="text-xs font-medium text-foreground mb-1">Fire-and-forget</div>
+      <p className="m-0 text-[10px] text-foreground-muted leading-relaxed">Crash mid-reaction loses the in-flight work — and often the event. At-least-once delivery means the retry re-runs everything, duplicates included.</p>
+    </div>
+    <div className="bg-background px-4 py-3">
+      <div className="text-[10px] font-mono uppercase tracking-widest text-foreground-muted mb-2">Event → workflow</div>
+      <div className="text-xs font-medium text-foreground mb-1">Journaled task chain</div>
+      <p className="m-0 text-[10px] text-foreground-muted leading-relaxed">Crash resumes at the reached step; completed steps replay from the journal. Delivery is at-least-once; completed steps are never repeated.</p>
+    </div>
+  </div>
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">No manual offset management, no lost events, no double-processing.</span>
+  </div>
+</div>
+
+### One writer per entity
+
+The hardest part of stateful event processing is concurrency: two events for the same cart arriving at once can interleave and corrupt the state. Actors remove the problem by construction — all operations for one entity are serialized through a single writer, so each operation sees the previous one's committed result. No locks, no lost updates.
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Concurrent Ops on cart:42, Serialized</div>
+  </div>
+  {[
+    { label: 'add_item(A)', detail: 'arrives 10:00:00.000 → applied first · total = 1', icon: '1' },
+    { label: 'add_item(B)', detail: 'arrives 10:00:00.001 → waits, then applied · total = 2', icon: '2' },
+    { label: 'checkout()', detail: 'arrives 10:00:00.002 → sees total = 2, not a race', icon: '3' },
+  ].map((row, i, arr) => (
+    <div key={i}>
+      <div className="px-4 py-2 flex items-center gap-3">
+        <span className="w-5 h-5 flex items-center justify-center text-[10px] font-mono text-foreground-muted border border-default shrink-0">{row.icon}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{row.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{row.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Different entities (cart:42, cart:99) still run fully in parallel — only same-entity ops serialize.</span>
+  </div>
+</div>
+
+The two patterns compose: an actor operation can start a child workflow, and an event-driven workflow can invoke actor operations.
+
+---
+
+## Patterns
+
+<div className="grid md:grid-cols-2 gap-4 mt-4 not-prose">
+  <Link href="/guides/use-cases/event-driven/order-processing" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Order Processing</h3>
+    <p className="text-sm text-foreground-light">React to domain events — orders created, payments received, cancellations — with durable task chains.</p>
+  </Link>
+  <Link href="/guides/use-cases/event-driven/stateful-actors" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Stateful Actors</h3>
+    <p className="text-sm text-foreground-light">Maintain per-entity state with single-writer guarantees and event sourcing.</p>
+  </Link>
+  <Link href="/guides/use-cases/event-driven/stream-aggregation" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Stream Aggregation</h3>
+    <p className="text-sm text-foreground-light">Aggregate high-volume event streams over time windows with durable timers.</p>
+  </Link>
+  <Link href="/guides/use-cases/event-driven/pattern-detection" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Pattern Detection</h3>
+    <p className="text-sm text-foreground-light">Correlate multiple events over time for fraud detection, abandoned carts, and SLA monitoring.</p>
+  </Link>
+  <Link href="/guides/use-cases/event-driven/best-practices" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Best Practices</h3>
+    <p className="text-sm text-foreground-light">Design guidelines, performance characteristics, and next steps.</p>
+  </Link>
+</div>

@@ -1,0 +1,126 @@
+---
+id: 'kubernetes-autoscaling'
+title: 'Kubernetes Autoscaling'
+description: 'HorizontalPodAutoscaler, PodDisruptionBudget, and Kustomize configuration for Orcher on Kubernetes'
+sidebar_label: 'Autoscaling'
+---
+
+## HorizontalPodAutoscaler
+
+Scales between 3 and 10 replicas based on CPU (70%) and memory (80%) utilization:
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: orchestrator
+  namespace: orcher
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: orchestrator
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 60
+      selectPolicy: Min
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+        - type: Pods
+          value: 2
+          periodSeconds: 30
+      selectPolicy: Max
+```
+
+Scale-down is conservative (5-minute stabilization, removes at most 50% per minute) to prevent flapping. Scale-up is aggressive (1-minute stabilization, up to 2 pods per 30 seconds) to handle traffic spikes.
+
+## PodDisruptionBudget
+
+Ensures at least 2 pods remain available during voluntary disruptions (node drain, rolling updates):
+
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: orchestrator
+  namespace: orcher
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: orchestrator
+  unhealthyPodEvictionPolicy: AlwaysAllow
+```
+
+---
+
+## Kustomize
+
+The `kustomization.yaml` ties all resources together and provides override points:
+
+```yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: orcher
+
+commonLabels:
+  app.kubernetes.io/name: orchestrator
+  app.kubernetes.io/component: coordination
+  app.kubernetes.io/part-of: orcher
+
+resources:
+  - configmap.yaml
+  - deployment.yaml
+  - service.yaml
+  - rbac.yaml
+  - hpa.yaml
+  - pdb.yaml
+
+images:
+  - name: orcher/orchestrator
+    newTag: latest
+
+replicas:
+  - name: orchestrator
+    count: 3
+```
+
+Override the image tag for a specific release:
+
+```bash
+cd services/orchestrator/k8s
+kustomize edit set image orcher/orchestrator=your-registry/orcher/orchestrator:v1.0.0
+kubectl apply -k .
+```
+
+---
+
+## Next Steps
+
+- [Production](/guides/deployment/kubernetes/production) — Monitoring, scaling, security, and troubleshooting
+- [Manifests](/guides/deployment/kubernetes/manifests) — Deployment, Service, ConfigMap, and RBAC manifests
+- [Kubernetes Overview](/guides/deployment/kubernetes) — Prerequisites and quick start

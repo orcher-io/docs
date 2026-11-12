@@ -1,0 +1,128 @@
+---
+id: cli-project
+title: Project & Development Commands
+sidebar_label: Project & Dev
+---
+
+## `orcher new` (alias: `n`)
+
+Create new projects, workflows, or tasks from templates.
+
+### `new project`
+
+```bash
+orcher new project <name> [OPTIONS]
+
+# Examples
+orcher new project my-app
+orcher new project my-app --template microservices --dir ./projects
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-t, --template` | `basic-workflow` | Template: basic-workflow, microservices, data-pipeline, batch-processing |
+| `-d, --dir` | current directory | Output directory |
+
+### `new workflow`
+
+```bash
+orcher new workflow <name> [OPTIONS]
+
+# Examples
+orcher new workflow process-order
+orcher new workflow process-order --type dag --output src/workflows/
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-t, --type` | `sequential` | Workflow type: sequential, parallel, dag, conditional |
+| `-o, --output` | — | Output file path |
+
+---
+
+## `orcher run`
+
+Run a workflow locally or remotely.
+
+```bash
+orcher run <workflow_type[@task_queue]> [OPTIONS]
+
+# Examples
+orcher run process-order --param order_id=123 --param amount=99.99
+orcher run payment-workflow@payment-tasks --param data='{"foo":"bar"}'
+orcher run batch-job --local --env staging
+```
+
+The workflow identifier format is `workflow_type[@task_queue]`. If `@task_queue` is omitted, the workflow type is used as the queue name.
+
+| Option | Description |
+|--------|-------------|
+| `--local` | Run locally instead of on cluster |
+| `-e, --env` | Environment to run against |
+| `-p, --param` | Parameters as key=value (repeatable; supports JSON values) |
+
+**Parameter types:** The `--param` flag auto-detects types. Integers, floats, booleans, strings, JSON objects, and JSON arrays are all supported:
+
+```bash
+orcher run my-workflow \
+  --param count=42 \
+  --param price=9.99 \
+  --param active=true \
+  --param name=hello \
+  --param config='{"key":"value"}' \
+  --param items='[1,2,3]'
+```
+
+---
+
+## `orcher test`
+
+Test workflows locally.
+
+```bash
+orcher test <workflow_file> [OPTIONS]
+
+# Examples
+orcher test src/workflows/order.rs
+orcher test src/workflows/order.rs --dry-run
+orcher test src/workflows/ --watch --env staging
+```
+
+| Option | Description |
+|--------|-------------|
+| `--dry-run` | Validate without executing |
+| `-e, --env` | Environment to test against |
+| `-w, --watch` | Watch for file changes and re-test |
+
+---
+
+## `orcher dev`
+
+Development mode commands.
+
+### `dev start`
+
+```bash
+orcher dev start [OPTIONS]
+
+# Examples
+orcher dev start
+orcher dev start --port 9090 --host 0.0.0.0
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--port` | `8080` | Dev server port |
+| `--host` | `localhost` | Dev server host |
+
+### `dev stop`
+
+```bash
+orcher dev stop
+```
+
+### `dev logs`
+
+```bash
+orcher dev logs [--follow]
+```

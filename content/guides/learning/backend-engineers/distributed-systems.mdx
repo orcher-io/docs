@@ -1,0 +1,1939 @@
+---
+id: backend-engineers-distributed-systems
+title: "Distributed Systems Deep Dive"
+description: "CAP theorem trade-offs, consistency models, Saga vs 2PC, event sourcing, and advanced workflow patterns"
+sidebar_label: 'Distributed Systems'
+---
+
+Before we explore more patterns, let's understand the fundamental distributed systems challenges that Orcher addresses. This knowledge will help you make better architectural decisions.
+
+## The CAP Theorem and Orcher's Trade-offs
+
+**CAP Theorem states that a distributed system can provide at most two of:**
+
+- **Consistency (C)**: All nodes see the same data at the same time
+- **Availability (A)**: Every request receives a response (success or failure)
+- **Partition Tolerance (P)**: System continues operating despite network failures
+
+**Orcher's Position:**
+
+Orcher is built on PostgreSQL, which is a CP system (Consistency + Partition tolerance). Here's what that means for you:
+
+**What You Get:**
+- ✓ Strong consistency: Workflow state is always correct
+- ✓ ACID transactions: No lost or corrupted workflow data
+- ✓ Reliable journaling: Every step is durably recorded
+- ✓ Partition tolerance: Can handle network failures (with retries)
+
+**What You Trade:**
+- ✗ Not available during PostgreSQL outages
+- ✗ Requires database connectivity for all operations
+- ✗ Single database is a bottleneck (though horizontal scaling is possible)
+
+**Why This Trade-off Makes Sense:**
+
+For workflow orchestration, **correctness is more important than availability**. Consider:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+// Scenario: Processing a $10,000 payment
+let charge = ctx.execute_task(charge_stripe, payment).await?;
+ctx.execute_task(save_to_db, charge.id).await?;
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Scenario: Processing a $10,000 payment
+const charge = await ctx.executeTask(tasks.chargeStripe, payment);
+await ctx.executeTask(tasks.saveToDb, charge.id);
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+# Scenario: Processing a $10,000 payment
+charge = await ctx.execute_task(charge_stripe, payment=payment)
+await ctx.execute_task(save_to_db, charge_id=charge.id)
+```
+
+</TabPanel>
+</Tabs>
+
+**If we prioritized availability over consistency:**
+- We might accept the charge even though the database is down
+- We'd lose the payment record
+- Customer's money disappears
+
+**With Orcher's CP approach:**
+- If database is down, workflow fails immediately
+- No charge is created (no money is lost)
+- Workflow retries when database recovers
+- Customer gets consistent experience
+
+## Consistency Models Explained
+
+Understanding consistency models helps you reason about concurrent workflows and race conditions.
+
+#### Read Your Own Writes
+
+Orcher guarantees that a workflow always sees its own writes:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+// Workflow always sees its own task results
+let user_id = ctx.execute_task(create_user, user_data=user_data).await?;
+let balance = ctx.execute_task(get_balance, user_id=user_id).await?; // ✓ Sees created user
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Workflow always sees its own task results
+const userId = await ctx.executeTask(tasks.createUser, userData);
+const balance = await ctx.executeTask(tasks.getBalance, userId); // ✓ Sees created user
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+# Workflow always sees its own task results
+user_id = await ctx.execute_task(create_user, user_data=user_data)
+balance = await ctx.execute_task(get_balance, user_id=user_id)  # ✓ Sees created user
+```
+
+</TabPanel>
+</Tabs>
+
+#### Monotonic Reads
+
+Once a workflow reads a value, it never sees an older value:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+let balance1 = ctx.execute_task(get_balance, user_id=user_id).await?; // Returns 100
+ctx.execute_task(add_credits, (user_id, 50)).await?; // Balance now 150
+let balance2 = ctx.execute_task(get_balance, user_id=user_id).await?; // Returns 150 (never goes back to 100)
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+const balance1 = await ctx.executeTask(tasks.getBalance, userId); // Returns 100
+await ctx.executeTask(tasks.addCredits, { userId, amount: 50 }); // Balance now 150
+const balance2 = await ctx.executeTask(tasks.getBalance, userId); // Returns 150 (never goes back to 100)
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+balance1 = await ctx.execute_task(get_balance, user_id=user_id)  # Returns 100
+await ctx.execute_task(add_credits, user_id=user_id, amount=50)  # Balance now 150
+balance2 = await ctx.execute_task(get_balance, user_id=user_id)  # Returns 150 (never goes back to 100)
+```
+
+</TabPanel>
+</Tabs>
+
+#### Causal Consistency
+
+If task B depends on task A, Orcher ensures B sees A's effects:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+// Task A causes task B
+let order_id = ctx.execute_task(create_order, order_data).await?;
+let inventory = ctx.execute_task(reserve_inventory, order_id).await?; // ✓ Sees the order
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Task A causes task B
+const orderId = await ctx.executeTask(tasks.createOrder, orderData);
+const inventory = await ctx.executeTask(tasks.reserveInventory, orderId); // ✓ Sees the order
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+# Task A causes task B
+order_id = await ctx.execute_task(create_order, order_data=order_data)
+inventory = await ctx.execute_task(reserve_inventory, order_id=order_id)  # ✓ Sees the order
+```
+
+</TabPanel>
+</Tabs>
+
+#### What Orcher Does NOT Guarantee
+
+**Isolation Between Workflows:**
+
+Two workflows running concurrently can see inconsistent state:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+// Workflow 1
+let balance = ctx.execute_task(get_balance, user_id="user_123").await?; // 100
+ctx.execute_task(add_credits, ("user_123", 50)).await?; // Balance = 150
+
+// Workflow 2 (running at same time)
+let balance = ctx.execute_task(get_balance, user_id="user_123").await?; // Might be 100 or 150
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Workflow 1
+const balance = await ctx.executeTask(tasks.getBalance, 'user_123'); // 100
+await ctx.executeTask(tasks.addCredits, { userId: 'user_123', amount: 50 }); // Balance = 150
+
+// Workflow 2 (running at same time)
+const balance = await ctx.executeTask(tasks.getBalance, 'user_123'); // Might be 100 or 150
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+# Workflow 1
+balance = await ctx.execute_task(get_balance, user_id="user_123")  # 100
+await ctx.execute_task(add_credits, user_id="user_123", amount=50)  # Balance = 150
+
+# Workflow 2 (running at same time)
+balance = await ctx.execute_task(get_balance, user_id="user_123")  # Might be 100 or 150
+```
+
+</TabPanel>
+</Tabs>
+
+**Solution: Use database-level locking:**
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task]
+async fn add_credits_atomic(user_id: String, amount: i64) -> Result<()> {
+    let mut tx = db.begin().await?;
+
+    // SELECT FOR UPDATE locks the row
+    tx.query("SELECT * FROM users WHERE id = $1 FOR UPDATE", user_id).await?;
+    tx.query("UPDATE users SET balance = balance + $1 WHERE id = $2", amount, user_id).await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Task()
+async addCreditsAtomic(ctx: TaskContext, input: { userId: string; amount: number }): Promise<void> {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        // SELECT FOR UPDATE locks the row
+        await client.query('SELECT * FROM users WHERE id = $1 FOR UPDATE', [input.userId]);
+        await client.query('UPDATE users SET balance = balance + $1 WHERE id = $2', [input.amount, input.userId]);
+        await client.query('COMMIT');
+    } catch (e) {
+        await client.query('ROLLBACK');
+        throw e;
+    } finally {
+        client.release();
+    }
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@task(name="add_credits_atomic")
+async def add_credits_atomic(ctx: TaskContext, user_id: str, amount: int) -> None:
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # SELECT FOR UPDATE locks the row
+            await conn.fetchrow("SELECT * FROM users WHERE id = $1 FOR UPDATE", user_id)
+            await conn.execute("UPDATE users SET balance = balance + $1 WHERE id = $2", amount, user_id)
+```
+
+</TabPanel>
+</Tabs>
+
+## Saga Pattern vs. Two-Phase Commit (2PC)
+
+Both handle distributed transactions, but with different trade-offs.
+
+#### Two-Phase Commit (2PC)
+
+**How it works:**
+
+1. **Prepare Phase**: Coordinator asks all participants: "Can you commit?"
+2. **Commit Phase**: If all say yes, coordinator tells everyone to commit
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">2PC: Two Round-Trips, Locks Held Throughout</div>
+  </div>
+  {[
+    { phase: 'prepare', label: 'coordinator → A, B', detail: '"can you commit?" — participants lock & vote', state: '' },
+    { phase: 'prepare', label: 'A, B → coordinator', detail: 'both reply "yes" — resources stay locked', state: '' },
+    { phase: 'commit', label: 'coordinator → A, B', detail: '"commit" — everyone finalizes, then unlocks', state: 'done' },
+    { phase: 'if crash', label: 'coordinator dies mid-commit', detail: 'A and B block indefinitely, still holding locks', state: 'crash' },
+  ].map((row, i, arr) => (
+    <div key={i}>
+      <div className={`px-4 py-2 flex items-center gap-3 ${row.state === 'crash' ? 'bg-red-500/5' : ''}`}>
+        <span className="text-[9px] font-mono uppercase tracking-wider text-foreground-muted w-[3.6rem] shrink-0 text-right">{row.phase}</span>
+        <div className="w-px self-stretch bg-border-strong" />
+        <div className="flex-1">
+          <span className={`text-xs font-medium font-mono ${row.state === 'crash' ? 'text-red-400' : 'text-foreground'}`}>{row.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{row.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-[4.2rem]">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Atomic, but the coordinator is a single point of failure and locks block progress.</span>
+  </div>
+</div>
+
+**Problems with 2PC:**
+
+1. **Blocking**: If coordinator crashes during commit phase, participants are stuck waiting
+2. **Single point of failure**: Coordinator is critical
+3. **Network partitions**: Can cause indefinite blocking
+4. **Performance**: Requires multiple round-trips
+5. **Lock contention**: Resources locked during entire protocol
+
+#### Saga Pattern (Orcher's Approach)
+
+**How it works:**
+
+1. Execute each step sequentially
+2. If step fails, execute compensating transactions for completed steps
+
+<div className="not-prose my-8 max-w-lg mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Saga: No Locks, Compensate on Failure</div>
+  </div>
+  <div className="grid grid-cols-2 gap-px bg-border-default">
+    <div className="bg-background px-4 py-3">
+      <div className="text-[10px] font-mono uppercase tracking-widest text-foreground-muted mb-2">Success path</div>
+      <div className="text-[11px] font-mono text-foreground-light leading-relaxed">step 1 → step 2 → step 3 → step 4</div>
+      <p className="m-0 mt-2 text-[10px] text-foreground-muted leading-relaxed">Each step commits independently — nothing held across the whole transaction.</p>
+    </div>
+    <div className="bg-background px-4 py-3">
+      <div className="text-[10px] font-mono uppercase tracking-widest text-foreground-muted mb-2">Failure path</div>
+      <div className="text-[11px] font-mono text-foreground-light leading-relaxed">step 3 ✗<br/>↺ compensate 2<br/>↺ compensate 1</div>
+      <p className="m-0 mt-2 text-[10px] text-foreground-muted leading-relaxed">Undo the completed steps in reverse. No coordinator to block on.</p>
+    </div>
+  </div>
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Trades 2PC's instant atomicity for availability: brief inconsistency, resolved by compensation.</span>
+  </div>
+</div>
+
+Orcher makes the saga the natural choice: the "completed steps" list and the compensations are just journaled tasks, so a crash mid-rollback resumes the rollback — the coordinator-crash problem that sinks 2PC simply doesn't exist.
+
+**Orcher's Saga Implementation:**
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[workflow]
+pub async fn order_saga(ctx: WorkflowContext, order: Order) -> Result<String> {
+    let mut completed_steps = Vec::new();
+
+    // Try each step, track what succeeded
+    match ctx.execute_task(reserve_inventory, order.items.clone()).await {
+        Ok(reservation) => {
+            completed_steps.push(CompensationStep::ReleaseInventory(reservation.id));
+
+            match ctx.execute_task(charge_payment, order.amount).await {
+                Ok(payment) => {
+                    completed_steps.push(CompensationStep::RefundPayment(payment.id));
+
+                    // Success! No compensation needed
+                    return Ok(order.id);
+                }
+                Err(e) => {
+                    // Compensate in reverse order
+                    for step in completed_steps.iter().rev() {
+                        compensate(ctx, step).await?;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        Err(e) => return Err(e),
+    }
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Workflow({ name: 'order_saga', version: '1.0.0' })
+class OrderSaga {
+    async run(ctx: WorkflowContext, order: Order): Promise<string> {
+        const completedSteps: CompensationStep[] = [];
+
+        // Try each step, track what succeeded
+        let reservation: Reservation;
+        try {
+            reservation = await ctx.executeTask(tasks.reserveInventory, order.items);
+            completedSteps.push({ type: 'releaseInventory', id: reservation.id });
+        } catch (e) {
+            throw e;
+        }
+
+        try {
+            const payment = await ctx.executeTask(tasks.chargePayment, order.amount);
+            completedSteps.push({ type: 'refundPayment', id: payment.id });
+
+            // Success! No compensation needed
+            return order.id;
+        } catch (e) {
+            // Compensate in reverse order
+            for (const step of completedSteps.reverse()) {
+                await compensate(ctx, step);
+            }
+            throw e;
+        }
+    }
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@workflow(name="order_saga", version="1.0.0")
+async def order_saga(ctx: WorkflowContext, order: dict) -> str:
+    completed_steps = []
+
+    # Try each step, track what succeeded
+    try:
+        reservation = await ctx.execute_task(reserve_inventory, order["items"])
+        completed_steps.append(("release_inventory", reservation["id"]))
+    except Exception:
+        raise
+
+    try:
+        payment = await ctx.execute_task(charge_payment, order["amount"])
+        completed_steps.append(("refund_payment", payment["id"]))
+
+        # Success! No compensation needed
+        return order["id"]
+    except Exception as e:
+        # Compensate in reverse order
+        for step in reversed(completed_steps):
+            await compensate(ctx, step)
+        raise
+```
+
+</TabPanel>
+</Tabs>
+
+**Saga vs. 2PC Comparison:**
+
+| Aspect | Two-Phase Commit | Saga Pattern |
+|--------|-----------------|--------------|
+| **Isolation** | Full (locks held) | None (eventual consistency) |
+| **Availability** | Low (blocking) | High (non-blocking) |
+| **Complexity** | Protocol complexity | Business logic complexity |
+| **Scalability** | Poor (coordinator bottleneck) | Good (independent steps) |
+| **Failure handling** | Automatic rollback | Manual compensation |
+| **Network partitions** | Deadlocks possible | Continues executing |
+| **Performance** | Slower (multiple round-trips) | Faster (single-direction flow) |
+
+**When to use each:**
+
+- **2PC**: Banking transfers between accounts (need atomicity)
+- **Saga**: E-commerce orders, booking systems, workflow orchestration
+
+**Why Orcher uses Sagas:**
+
+1. **Better availability**: Don't block on coordinator
+2. **Simpler infrastructure**: No distributed coordinator needed
+3. **Flexibility**: Compensation logic tailored to business needs
+4. **Observability**: Can see exactly where a saga is in its progression
+5. **Failure recovery**: Can retry individual steps
+
+## Event Sourcing and Orcher's Journal
+
+Orcher's workflow journal is similar to event sourcing, but optimized for workflows.
+
+#### What is Event Sourcing?
+
+Store all changes as a sequence of events instead of current state:
+
+```rust
+// Traditional (current state)
+struct Account {
+    id: String,
+    balance: i64,  // Current balance only
+}
+
+// Event sourcing (full history)
+enum AccountEvent {
+    Created { id: String },
+    Deposited { amount: i64 },
+    Withdrawn { amount: i64 },
+}
+
+// Rebuild state by replaying events
+let events = vec![
+    AccountEvent::Created { id: "acc_123" },
+    AccountEvent::Deposited { amount: 1000 },
+    AccountEvent::Withdrawn { amount: 200 },
+];
+
+let balance = events.iter().fold(0, |bal, event| {
+    match event {
+        AccountEvent::Deposited { amount } => bal + amount,
+        AccountEvent::Withdrawn { amount } => bal - amount,
+        _ => bal,
+    }
+}); // balance = 800
+```
+
+#### Orcher's Journal as Event Store
+
+The workflow journal is an event store for workflow execution:
+
+```sql
+-- Each journal entry is an event
+SELECT * FROM workflow_execution_journal WHERE workflow_id = 'wf_123' ORDER BY step_id;
+
+| step_id | task_name       | result                | created_at  |
+|---------|-----------------|----------------------|-------------|
+| 1       | create_user     | {"id": "user_456"}   | 10:00:00   |
+| 2       | send_email      | {"sent": true}       | 10:00:01   |
+| 3       | create_order    | {"id": "order_789"}  | 10:00:02   |
+```
+
+**Rebuilding workflow state:**
+
+When a workflow resumes after a crash, the **worker re-runs your workflow function from the top**. Replay is not a server-side loop over journal rows — instead, the orchestrator hands the journal to the worker, and each task call consults it: any step that already completed returns its recorded result without executing again.
+
+```rust
+// The worker re-executes your workflow function. Each task call
+// checks the journal before running:
+async fn process_order(ctx: WorkflowContext, order: Order) -> Result<Receipt> {
+    // Already in the journal → returns {"id": "user_123"}, does NOT run again
+    let user = ctx.execute_task(create_user, order.clone()).await?;
+
+    // Already in the journal → returns the cached result, email not re-sent
+    ctx.execute_task(send_email, user.id.clone()).await?;
+
+    // NOT in the journal → executes for the first time and is recorded
+    let receipt = ctx.execute_task(create_order, user.id).await?;
+    Ok(receipt)
+}
+```
+
+#### Benefits of Orcher's Approach
+
+**1. Time Travel Debugging**
+
+See exactly what happened at any point:
+
+```sql
+-- What did the workflow do before crashing?
+SELECT task_name, result, completed_at
+FROM workflow_execution_journal
+WHERE workflow_id = 'wf_failed_123'
+ORDER BY step_id;
+```
+
+**2. Audit Trail**
+
+Perfect record of all operations:
+
+```sql
+-- Did we charge this customer?
+SELECT * FROM workflow_execution_journal
+WHERE workflow_id = 'wf_payment_456'
+  AND task_name = 'charge_stripe';
+```
+
+**3. Deterministic Replay**
+
+Because the journal is an ordered, immutable record of what happened, re-running the workflow function against it always reproduces the same decisions in the same order. Replay happens automatically when a worker recovers an execution — there is no separate "replay this workflow" call. To exercise replay determinism in tests, use the [test environment](/guides/core/tasks/testing) to run a workflow and assert on its outcome.
+
+**4. Performance Analysis**
+
+Find bottlenecks:
+
+```sql
+SELECT
+    task_name,
+    AVG(EXTRACT(EPOCH FROM (completed_at - created_at))) as avg_seconds
+FROM workflow_execution_journal
+GROUP BY task_name
+ORDER BY avg_seconds DESC;
+```
+
+## Eventual Consistency in Practice
+
+Orcher workflows are eventually consistent—here's what that means and how to handle it.
+
+#### What is Eventual Consistency?
+
+A system guarantees that, given enough time without new updates, all replicas will converge to the same value.
+
+**Example in Orcher:**
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+// Workflow updates user balance
+ctx.execute_task(add_credits, ("user_123", 100)).await?;
+
+// Immediately after:
+// - Primary database has new balance (500)
+// - Read replica might still show old balance (400)
+// - Cache might show old balance (400)
+// - Eventually (seconds later), all show 500
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Workflow updates user balance
+await ctx.executeTask(tasks.addCredits, { userId: 'user_123', amount: 100 });
+
+// Immediately after:
+// - Primary database has new balance (500)
+// - Read replica might still show old balance (400)
+// - Cache might show old balance (400)
+// - Eventually (seconds later), all show 500
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+# Workflow updates user balance
+await ctx.execute_task(add_credits, user_id="user_123", amount=100)
+
+# Immediately after:
+# - Primary database has new balance (500)
+# - Read replica might still show old balance (400)
+# - Cache might show old balance (400)
+# - Eventually (seconds later), all show 500
+```
+
+</TabPanel>
+</Tabs>
+
+#### Patterns for Eventual Consistency
+
+**Pattern 1: Read After Write from Primary**
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task]
+async fn update_and_read(user_id: String, amount: i64) -> Result<i64> {
+    let mut tx = db.begin().await?;
+
+    // Write to primary
+    tx.query("UPDATE users SET balance = balance + $1 WHERE id = $2", amount, user_id).await?;
+
+    // Read from same transaction (sees own write)
+    let balance: i64 = tx.query_one(
+        "SELECT balance FROM users WHERE id = $1",
+        user_id
+    ).await?.get(0);
+
+    tx.commit().await?;
+    Ok(balance)
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Task()
+async updateAndRead(ctx: TaskContext, input: { userId: string; amount: number }): Promise<number> {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        // Write to primary
+        await client.query('UPDATE users SET balance = balance + $1 WHERE id = $2', [input.amount, input.userId]);
+
+        // Read from same transaction (sees own write)
+        const result = await client.query('SELECT balance FROM users WHERE id = $1', [input.userId]);
+        const balance = result.rows[0].balance;
+
+        await client.query('COMMIT');
+        return balance;
+    } catch (e) {
+        await client.query('ROLLBACK');
+        throw e;
+    } finally {
+        client.release();
+    }
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@task(name="update_and_read")
+async def update_and_read(ctx: TaskContext, user_id: str, amount: int) -> int:
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # Write to primary
+            await conn.execute("UPDATE users SET balance = balance + $1 WHERE id = $2", amount, user_id)
+
+            # Read from same transaction (sees own write)
+            balance = await conn.fetchval("SELECT balance FROM users WHERE id = $1", user_id)
+
+            return balance
+```
+
+</TabPanel>
+</Tabs>
+
+**Pattern 2: Conflict-Free Replicated Data Types (CRDTs)**
+
+Use data structures that converge without coordination:
+
+```rust
+// Instead of setting absolute values (conflicts possible)
+// Use operations that commute
+
+// ❌ Conflicting updates
+update_balance(user_id, 500);  // Set to 500
+update_balance(user_id, 600);  // Set to 600 (which wins?)
+
+// ✓ Commutative updates
+add_to_balance(user_id, 100);  // Add 100
+add_to_balance(user_id, 200);  // Add 200 (order doesn't matter)
+```
+
+**Pattern 3: Version Vectors**
+
+Detect and handle conflicts:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[derive(Serialize, Deserialize)]
+struct VersionedData {
+    value: String,
+    version: u64,
+}
+
+#[task]
+async fn update_with_version(key: String, new_value: String, expected_version: u64) -> Result<()> {
+    let current = db.get(key).await?;
+
+    if current.version != expected_version {
+        // Conflict! Handle it
+        return Err(anyhow::anyhow!("Version conflict"));
+    }
+
+    db.set(key, VersionedData {
+        value: new_value,
+        version: expected_version + 1,
+    }).await?;
+
+    Ok(())
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+interface VersionedData {
+    value: string;
+    version: number;
+}
+
+@Task()
+async updateWithVersion(ctx: TaskContext, input: { key: string; newValue: string; expectedVersion: number }): Promise<void> {
+    const current = await db.get(input.key);
+
+    if (current.version !== input.expectedVersion) {
+        // Conflict! Handle it
+        throw new Error('Version conflict');
+    }
+
+    await db.set(input.key, {
+        value: input.newValue,
+        version: input.expectedVersion + 1,
+    });
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@task(name="update_with_version")
+async def update_with_version(ctx: TaskContext, key: str, new_value: str, expected_version: int) -> None:
+    current = await db.get(key)
+
+    if current["version"] != expected_version:
+        # Conflict! Handle it
+        raise Exception("Version conflict")
+
+    await db.set(key, {
+        "value": new_value,
+        "version": expected_version + 1,
+    })
+```
+
+</TabPanel>
+</Tabs>
+
+## The Write-Ahead Log (WAL) Pattern
+
+Orcher's journal implements the WAL pattern used in databases.
+
+**How WAL Works:**
+
+1. **Before** executing operation, write intent to log
+2. **Execute** the operation
+3. **Mark** log entry as completed
+
+**Why It's Reliable:**
+
+```rust
+// Step 1: Write to journal (durable)
+journal.append(Entry {
+    step_id: 5,
+    task_name: "charge_stripe",
+    input: payment_data,
+    status: "pending",
+}).await?;
+
+// Step 2: Execute task
+let result = charge_stripe_api(payment_data).await?;
+
+// Step 3: Update journal (durable)
+journal.update(5, JournalUpdate {
+    result: result,
+    status: "completed",
+}).await?;
+
+// If crash happens between step 2 and 3:
+// - Journal shows "pending"
+// - On restart, can retry or check if it actually succeeded
+// - Never lose track of what was attempted
+```
+
+**Compare to non-WAL approach:**
+
+```rust
+// ❌ Without WAL
+let result = charge_stripe_api(payment_data).await?; // ← CRASH HERE = lost money
+db.save_payment(result).await?;
+```
+
+If crash happens after charging but before saving, the payment is lost forever.
+
+**With Orcher's WAL:**
+
+```rust
+// ✓ With WAL
+journal.append("charge_stripe", payment_data).await?; // ← Intent recorded
+let result = charge_stripe_api(payment_data).await?;  // ← CRASH HERE = can recover
+journal.complete("charge_stripe", result).await?;
+```
+
+Journal shows we attempted to charge. On recovery, check Stripe API to see if charge succeeded, then continue.
+
+---
+
+## Pattern 4: Long-Running Workflows with Human Approval
+
+Some workflows need to pause and wait for human input before continuing. Orcher handles this with durable sleeps and external signals.
+
+#### The Problem
+
+```typescript
+// Traditional approach - doesn't survive restarts
+async function processExpenseReport(report: ExpenseReport) {
+  await saveReport(report);
+  await sendApprovalEmail(report.managerId);
+
+  // ❌ Can't wait here - server will restart, lose state
+  await waitForApproval(); // How long? What if server crashes?
+
+  await processPayment(report);
+}
+```
+
+#### The Orcher Solution
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[workflow(name = "expense_approval")]
+pub async fn expense_approval_workflow(
+    ctx: WorkflowContext,
+    report: ExpenseReport,
+) -> Result<String> {
+    // Step 1: Save report
+    let report_id = ctx.execute_task(save_report, report.clone()).await?;
+
+    // Step 2: Send approval request
+    ctx.execute_task(send_approval_email, (report_id.clone(), report.manager_id.clone())).await?;
+
+    // Step 3: Wait for approval event (durable wait) - returns the deserialized payload
+    let approval_result: ApprovalDecision = ctx.wait_for_event("approval_decision").await?;
+
+    // Step 4: Process based on approval
+    match approval_result.approved {
+        true => {
+            let payment_id = ctx.execute_task(process_payment, report.amount).await?;
+            ctx.execute_task(notify_employee, (report.employee_id, "approved", payment_id)).await?;
+            Ok(format!("Approved and paid: {}", payment_id))
+        }
+        false => {
+            ctx.execute_task(notify_employee, (report.employee_id, "rejected", approval_result.reason)).await?;
+            Err(anyhow::anyhow!("Report rejected: {}", approval_result.reason))
+        }
+    }
+}
+
+// External API to send approval decision (via a workflow handle)
+async fn approve_expense(
+    orcher: Client,
+    workflow_id: String,
+    approved: bool,
+    reason: Option<String>,
+) -> Result<()> {
+    let handle = orcher.get_workflow_handle(workflow_id).await?;
+    handle.send_event(
+        "approval_decision",
+        ApprovalDecision { approved, reason },
+    ).await?;
+
+    Ok(())
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, TaskContext, WorkflowContext, createTaskRefs } from '@orcher/sdk';
+
+@Tasks()
+class ExpenseTasks {
+  @Task()
+  async saveReport(ctx: TaskContext, report: ExpenseReport): Promise<string> { /* ... */ }
+
+  @Task()
+  async sendApprovalEmail(ctx: TaskContext, input: { reportId: string; managerId: string }): Promise<void> { /* ... */ }
+
+  @Task()
+  async processPayment(ctx: TaskContext, amount: number): Promise<string> { /* ... */ }
+
+  @Task()
+  async notifyEmployee(ctx: TaskContext, input: { employeeId: string; status: string; paymentId?: string; reason?: string }): Promise<void> { /* ... */ }
+}
+
+const expenseTasks = createTaskRefs(ExpenseTasks);
+
+@Workflow({ name: 'expense_approval', version: '1.0.0' })
+class ExpenseApproval {
+  async run(ctx: WorkflowContext, report: ExpenseReport): Promise<string> {
+    // Step 1: Save report
+    const reportId = await ctx.executeTask(expenseTasks.saveReport, report);
+
+    // Step 2: Send approval request
+    await ctx.executeTask(expenseTasks.sendApprovalEmail, {
+      reportId,
+      managerId: report.managerId,
+    });
+
+    // Step 3: Wait for approval event (durable wait)
+    const approval = await ctx.waitForEvent('approval_decision') as ApprovalDecision;
+
+    // Step 4: Process based on approval
+    if (approval.approved) {
+      const paymentId = await ctx.executeTask(expenseTasks.processPayment, report.amount);
+      await ctx.executeTask(expenseTasks.notifyEmployee, {
+        employeeId: report.employeeId,
+        status: 'approved',
+        paymentId,
+      });
+      return 'Approved and paid: ' + paymentId;
+    } else {
+      await ctx.executeTask(expenseTasks.notifyEmployee, {
+        employeeId: report.employeeId,
+        status: 'rejected',
+        reason: approval.reason,
+      });
+      throw new Error('Report rejected: ' + approval.reason);
+    }
+  }
+}
+
+// External API to send approval decision
+async function approveExpense(
+  orcher: Client,
+  workflowId: string,
+  approved: boolean,
+  reason?: string,
+): Promise<void> {
+  const handle = orcher.getWorkflowHandle({ workflowId });
+  await handle.sendEvent('approval_decision', { approved, reason });
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, TaskContext, WorkflowContext
+
+@task(name="save_report")
+async def save_report(ctx: TaskContext, report: dict) -> str:
+    ...
+
+@task(name="send_approval_email")
+async def send_approval_email(ctx: TaskContext, report_id: str, manager_id: str) -> None:
+    ...
+
+@task(name="process_payment")
+async def process_payment(ctx: TaskContext, amount: int) -> str:
+    ...
+
+@task(name="notify_employee")
+async def notify_employee(ctx: TaskContext, employee_id: str, status: str, detail: str) -> None:
+    ...
+
+@workflow(name="expense_approval", version="1.0.0")
+async def expense_approval_workflow(ctx: WorkflowContext, report: dict) -> str:
+    # Step 1: Save report
+    report_id = await ctx.execute_task(save_report, report=report)
+
+    # Step 2: Send approval request
+    await ctx.execute_task(send_approval_email, report_id=report_id, manager_id=report["manager_id"])
+
+    # Step 3: Wait for approval event (durable wait) - returns the deserialized payload
+    approval = await ctx.wait_for_event("approval_decision")
+
+    # Step 4: Process based on approval
+    if approval["approved"]:
+        payment_id = await ctx.execute_task(process_payment, amount=report["amount"])
+        await ctx.execute_task(notify_employee, employee_id=report["employee_id"], status="approved", detail=payment_id)
+        return f"Approved and paid: {payment_id}"
+    else:
+        reason = approval.get("reason", "No reason given")
+        await ctx.execute_task(notify_employee, employee_id=report["employee_id"], status="rejected", detail=reason)
+        raise Exception(f"Report rejected: {reason}")
+
+# External API to send approval decision (via a workflow handle)
+async def approve_expense(orcher, workflow_id: str, approved: bool, reason: str = None):
+    handle = await orcher.get_workflow(workflow_id)
+    await handle.send_event(
+        "approval_decision",
+        {"approved": approved, "reason": reason},
+    )
+```
+
+</TabPanel>
+</Tabs>
+
+**How it works:**
+
+1. Workflow starts, saves report, sends email
+2. Workflow pauses at `wait_for_event()` (worker is freed)
+3. Days pass, servers restart, deployments happen (workflow survives)
+4. Manager clicks "Approve" in email → API call to `send_event()`
+5. Workflow resumes from exact position, processes payment
+
+**Key insight**: The workflow can wait for hours, days, or weeks. It's not consuming resources—it's just a row in PostgreSQL waiting for a signal.
+
+## Pattern 5: Child Workflows and Composition
+
+Break complex workflows into smaller, reusable pieces.
+
+#### When to Use Child Workflows
+
+Use child workflows when you have:
+- Reusable business processes
+- Long-running sub-processes that should be monitored independently
+- Need for parallel execution of complex workflows
+- Different retry policies for sub-processes
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+// Parent workflow: Onboard new customer
+#[workflow(name = "onboard_customer")]
+pub async fn onboard_customer(
+    ctx: WorkflowContext,
+    customer: NewCustomer,
+) -> Result<OnboardingResult> {
+    // Step 1: Create account
+    let account_id = ctx.execute_task(create_account, customer.clone()).await?;
+
+    // Step 2: Start child workflows by name (each returns a handle immediately)
+    let billing_handle = ctx.start_child_workflow(
+        "setup_billing",
+        BillingSetup {
+            account_id: account_id.clone(),
+            plan: customer.plan,
+            payment_method: customer.payment_method,
+        },
+    ).await?;
+    let provisioning_handle = ctx.start_child_workflow(
+        "provision_resources",
+        ResourceRequest {
+            account_id: account_id.clone(),
+            region: customer.region,
+            tier: customer.tier,
+        },
+    ).await?;
+    let notification_handle = ctx.start_child_workflow(
+        "welcome_sequence",
+        WelcomeSequence {
+            account_id: account_id.clone(),
+            email: customer.email,
+        },
+    ).await?;
+
+    // Await all three results in parallel
+    let (billing_result, provisioning_result, notification_result): (
+        BillingSetup,
+        ProvisioningResult,
+        NotificationResult,
+    ) = tokio::try_join!(
+        billing_handle.result(),
+        provisioning_handle.result(),
+        notification_handle.result(),
+    )?;
+
+    // Step 3: Finalize onboarding
+    ctx.execute_task(activate_account, account_id.clone()).await?;
+
+    Ok(OnboardingResult {
+        account_id,
+        billing_id: billing_result.billing_id,
+        resources: provisioning_result.resources,
+        welcome_emails_sent: notification_result.emails_sent,
+    })
+}
+
+// Child workflow: Setup billing (independent, reusable)
+#[workflow(name = "setup_billing")]
+pub async fn setup_billing_workflow(
+    ctx: WorkflowContext,
+    setup: BillingSetup,
+) -> Result<BillingSetup> {
+    // Create Stripe customer
+    let stripe_customer_id = ctx.execute_task(create_stripe_customer, setup.account_id.clone()).await?;
+
+    // Attach payment method
+    ctx.execute_task(attach_payment_method, (stripe_customer_id.clone(), setup.payment_method)).await?;
+
+    // Create subscription
+    let subscription_id = ctx.execute_task(create_subscription, (stripe_customer_id, setup.plan)).await?;
+
+    // Save billing info
+    let billing_id = ctx.execute_task(save_billing_info, (setup.account_id, subscription_id)).await?;
+
+    Ok(BillingSetup { billing_id })
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, TaskContext, WorkflowContext, createTaskRefs } from '@orcher/sdk';
+
+@Tasks()
+class OnboardingTasks {
+  @Task()
+  async createAccount(ctx: TaskContext, customer: NewCustomer): Promise<string> { /* ... */ }
+
+  @Task()
+  async activateAccount(ctx: TaskContext, accountId: string): Promise<void> { /* ... */ }
+
+  @Task()
+  async createStripeCustomer(ctx: TaskContext, accountId: string): Promise<string> { /* ... */ }
+
+  @Task()
+  async attachPaymentMethod(ctx: TaskContext, input: { stripeCustomerId: string; paymentMethod: string }): Promise<void> { /* ... */ }
+
+  @Task()
+  async createSubscription(ctx: TaskContext, input: { stripeCustomerId: string; plan: string }): Promise<string> { /* ... */ }
+
+  @Task()
+  async saveBillingInfo(ctx: TaskContext, input: { accountId: string; subscriptionId: string }): Promise<string> { /* ... */ }
+}
+
+const onboardTasks = createTaskRefs(OnboardingTasks);
+
+// Child workflow: Setup billing (independent, reusable)
+@Workflow({ name: 'setup_billing', version: '1.0.0' })
+class SetupBilling {
+  async run(ctx: WorkflowContext, setup: BillingSetup): Promise<BillingResult> {
+    const stripeCustomerId = await ctx.executeTask(
+      onboardTasks.createStripeCustomer,
+      setup.accountId
+    );
+
+    await ctx.executeTask(onboardTasks.attachPaymentMethod, {
+      stripeCustomerId,
+      paymentMethod: setup.paymentMethod,
+    });
+
+    const subscriptionId = await ctx.executeTask(onboardTasks.createSubscription, {
+      stripeCustomerId,
+      plan: setup.plan,
+    });
+
+    const billingId = await ctx.executeTask(onboardTasks.saveBillingInfo, {
+      accountId: setup.accountId,
+      subscriptionId,
+    });
+
+    return { billingId };
+  }
+}
+
+// Parent workflow: Onboard new customer
+@Workflow({ name: 'onboard_customer', version: '1.0.0' })
+class OnboardCustomer {
+  async run(ctx: WorkflowContext, customer: NewCustomer): Promise<OnboardingResult> {
+    // Step 1: Create account
+    const accountId = await ctx.executeTask(onboardTasks.createAccount, customer);
+
+    // Step 2: Start child workflows (each returns a handle immediately)
+    const billingHandle = await ctx.startChildWorkflow(SetupBilling, {
+      accountId,
+      plan: customer.plan,
+      paymentMethod: customer.paymentMethod,
+    });
+    const provisioningHandle = await ctx.startChildWorkflow(ProvisionResources, {
+      accountId,
+      region: customer.region,
+      tier: customer.tier,
+    });
+    const notificationHandle = await ctx.startChildWorkflow(WelcomeSequence, {
+      accountId,
+      email: customer.email,
+    });
+
+    // Await all three results in parallel
+    const [billingResult, provisioningResult, notificationResult] = await Promise.all([
+      billingHandle.result(),
+      provisioningHandle.result(),
+      notificationHandle.result(),
+    ]);
+
+    // Step 3: Finalize onboarding
+    await ctx.executeTask(onboardTasks.activateAccount, accountId);
+
+    return {
+      accountId,
+      billingId: billingResult.billingId,
+      resources: provisioningResult.resources,
+      welcomeEmailsSent: notificationResult.emailsSent,
+    };
+  }
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+import asyncio
+from orcher import workflow, task, TaskContext, WorkflowContext
+
+@task(name="create_account")
+async def create_account(ctx: TaskContext, customer: dict) -> str:
+    ...
+
+@task(name="activate_account")
+async def activate_account(ctx: TaskContext, account_id: str) -> None:
+    ...
+
+@task(name="create_stripe_customer")
+async def create_stripe_customer(ctx: TaskContext, account_id: str) -> str:
+    ...
+
+@task(name="attach_payment_method")
+async def attach_payment_method(ctx: TaskContext, stripe_customer_id: str, payment_method: str) -> None:
+    ...
+
+@task(name="create_subscription")
+async def create_subscription(ctx: TaskContext, stripe_customer_id: str, plan: str) -> str:
+    ...
+
+@task(name="save_billing_info")
+async def save_billing_info(ctx: TaskContext, account_id: str, subscription_id: str) -> str:
+    ...
+
+# Child workflow: Setup billing (independent, reusable)
+@workflow(name="setup_billing", version="1.0.0")
+async def setup_billing_workflow(ctx: WorkflowContext, setup: dict) -> dict:
+    stripe_customer_id = await ctx.execute_task(create_stripe_customer, account_id=setup["account_id"])
+    await ctx.execute_task(attach_payment_method, stripe_customer_id=stripe_customer_id, payment_method=setup["payment_method"])
+    subscription_id = await ctx.execute_task(create_subscription, stripe_customer_id=stripe_customer_id, plan=setup["plan"])
+    billing_id = await ctx.execute_task(save_billing_info, account_id=setup["account_id"], subscription_id=subscription_id)
+    return {"billing_id": billing_id}
+
+# Parent workflow: Onboard new customer
+@workflow(name="onboard_customer", version="1.0.0")
+async def onboard_customer(ctx: WorkflowContext, customer: dict) -> dict:
+    # Step 1: Create account
+    account_id = await ctx.execute_task(create_account, customer=customer)
+
+    # Step 2: Start child workflows by name (each returns a handle immediately)
+    billing_handle = await ctx.start_child_workflow("setup_billing", args=({
+        "account_id": account_id,
+        "plan": customer["plan"],
+        "payment_method": customer["payment_method"],
+    },))
+    provisioning_handle = await ctx.start_child_workflow("provision_resources", args=({
+        "account_id": account_id,
+        "region": customer["region"],
+        "tier": customer["tier"],
+    },))
+    notification_handle = await ctx.start_child_workflow("welcome_sequence", args=({
+        "account_id": account_id,
+        "email": customer["email"],
+    },))
+
+    # Await all three results in parallel
+    billing_result, provisioning_result, notification_result = await asyncio.gather(
+        billing_handle.result(),
+        provisioning_handle.result(),
+        notification_handle.result(),
+    )
+
+    # Step 3: Finalize onboarding
+    await ctx.execute_task(activate_account, account_id=account_id)
+
+    return {
+        "account_id": account_id,
+        "billing_id": billing_result["billing_id"],
+        "resources": provisioning_result["resources"],
+        "welcome_emails_sent": notification_result["emails_sent"],
+    }
+```
+
+</TabPanel>
+</Tabs>
+
+**Benefits of child workflows:**
+
+1. **Composition**: Build complex flows from simple, reusable pieces
+2. **Independent monitoring**: Each child workflow has its own ID, status, and logs
+3. **Parallel execution**: Multiple child workflows run concurrently
+4. **Isolated retries**: Child workflow failures don't affect siblings
+5. **Better testing**: Test child workflows independently
+
+## Pattern 6: Advanced Error Handling Strategies
+
+#### Retry Policies Per Task
+
+Different tasks need different retry strategies:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+// Retry policy is declared per task on the #[task] macro. Intervals are in
+// whole seconds; a backoff_coefficient of 1.0 means fixed (non-growing) delays.
+
+// Task 1: Quick retries for transient network issues
+#[task(retry_policy(max_attempts = 5, initial_interval = 1, max_interval = 5, backoff_coefficient = 2.0))]
+async fn fetch_data(url: String) -> Result<Data> { /* ... */ }
+
+// Task 2: Slow retries for rate-limited APIs (fixed 60s between attempts)
+#[task(retry_policy(max_attempts = 10, initial_interval = 60, max_interval = 60, backoff_coefficient = 1.0))]
+async fn enrich_data(data: Data) -> Result<Data> { /* ... */ }
+
+// Task 3: No retries for validation (fail fast)
+#[task(retry_policy(max_attempts = 1))]
+async fn validate_data(data: Data) -> Result<Data> { /* ... */ }
+
+#[workflow(name = "complex_workflow")]
+pub async fn complex_workflow(ctx: WorkflowContext, input: Input) -> Result<Output> {
+    let data = ctx.execute_task(fetch_data, input.url).await?;
+    let enriched = ctx.execute_task(enrich_data, data).await?;
+    let validated = ctx.execute_task(validate_data, enriched).await?;
+
+    Ok(validated)
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, TaskContext, WorkflowContext, createTaskRefs } from '@orcher/sdk';
+
+// Retry policy is declared per task on the @Task decorator. Intervals are in
+// milliseconds; a backoffCoefficient of 1.0 means fixed (non-growing) delays.
+@Tasks()
+class DataTasks {
+  // Task 1: Quick retries for transient network issues
+  @Task({ retryPolicy: { maxAttempts: 5, initialInterval: 100, maxInterval: 5000, backoffCoefficient: 2.0 } })
+  async fetchData(ctx: TaskContext, url: string): Promise<any> { /* ... */ }
+
+  // Task 2: Slow retries for rate-limited APIs (fixed 60s between attempts)
+  @Task({ retryPolicy: { maxAttempts: 10, initialInterval: 60000, maxInterval: 60000, backoffCoefficient: 1.0 } })
+  async enrichData(ctx: TaskContext, data: any): Promise<any> { /* ... */ }
+
+  // Task 3: No retries for validation (fail fast)
+  @Task({ retryPolicy: { maxAttempts: 1 } })
+  async validateData(ctx: TaskContext, data: any): Promise<any> { /* ... */ }
+}
+
+const dataTasks = createTaskRefs(DataTasks);
+
+@Workflow({ name: 'complex_workflow', version: '1.0.0' })
+class ComplexWorkflow {
+  async run(ctx: WorkflowContext, input: Input): Promise<Output> {
+    const data = await ctx.executeTask(dataTasks.fetchData, input.url);
+    const enriched = await ctx.executeTask(dataTasks.enrichData, data);
+    const validated = await ctx.executeTask(dataTasks.validateData, enriched);
+
+    return validated;
+  }
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+from datetime import timedelta
+from orcher import workflow, task, TaskContext, WorkflowContext, RetryPolicy
+
+# Retry policy can be declared per task on the @task decorator, or passed as a
+# per-call override to execute_task. A backoff_coefficient of 1.0 means fixed delays.
+
+# Task 1: Quick retries for transient network issues
+@task(
+    name="fetch_data",
+    retry_policy=RetryPolicy(
+        max_attempts=5,
+        initial_interval=timedelta(seconds=1),
+        max_interval=timedelta(seconds=5),
+        backoff_coefficient=2.0,
+    ),
+)
+async def fetch_data(ctx: TaskContext, url: str) -> dict:
+    ...
+
+# Task 2: Slow retries for rate-limited APIs (fixed 60s between attempts)
+@task(
+    name="enrich_data",
+    retry_policy=RetryPolicy(
+        max_attempts=10,
+        initial_interval=timedelta(seconds=60),
+        max_interval=timedelta(seconds=60),
+        backoff_coefficient=1.0,
+    ),
+)
+async def enrich_data(ctx: TaskContext, data: dict) -> dict:
+    ...
+
+# Task 3: No retries for validation (fail fast)
+@task(name="validate_data", retry_policy=RetryPolicy(max_attempts=1))
+async def validate_data(ctx: TaskContext, data: dict) -> dict:
+    ...
+
+@workflow(name="complex_workflow", version="1.0.0")
+async def complex_workflow(ctx: WorkflowContext, input: dict) -> dict:
+    data = await ctx.execute_task(fetch_data, url=input["url"])
+    enriched = await ctx.execute_task(enrich_data, data=data)
+    validated = await ctx.execute_task(validate_data, data=enriched)
+
+    return validated
+```
+
+</TabPanel>
+</Tabs>
+
+#### Error Classification and Handling
+
+Distinguish between different error types and handle them appropriately:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+use anyhow::Context;
+
+#[derive(Debug, thiserror::Error)]
+pub enum WorkflowError {
+    #[error("Transient error: {0}")]
+    Transient(String),
+
+    #[error("Permanent error: {0}")]
+    Permanent(String),
+
+    #[error("Business rule violation: {0}")]
+    BusinessRule(String),
+}
+
+#[workflow(name = "resilient_payment")]
+pub async fn resilient_payment_workflow(
+    ctx: WorkflowContext,
+    payment: Payment,
+) -> Result<Receipt> {
+    // Validate input (permanent failure if invalid)
+    if payment.amount <= 0 {
+        return Err(WorkflowError::Permanent("Invalid amount".to_string()).into());
+    }
+
+    // Check fraud (business rule)
+    let fraud_score = ctx.execute_task(check_fraud, payment.user_id.clone()).await?;
+    if fraud_score > 0.9 {
+        return Err(WorkflowError::BusinessRule("High fraud risk".to_string()).into());
+    }
+
+    // Charge payment (may be transient failure)
+    let charge = match ctx.execute_task(charge_stripe, payment.clone()).await {
+        Ok(charge) => charge,
+        Err(e) if is_transient_error(&e) => {
+            warn!("Transient payment error: {}", e);
+            return Err(WorkflowError::Transient(e.to_string()).into());
+        }
+        Err(e) => {
+            return Err(WorkflowError::Permanent(format!("Payment failed: {}", e)).into());
+        }
+    };
+
+    ctx.execute_task(save_payment, charge.id.clone())
+        .await
+        .context("Failed to save payment")?;
+
+    Ok(Receipt {
+        charge_id: charge.id,
+        amount: payment.amount,
+    })
+}
+
+fn is_transient_error(error: &anyhow::Error) -> bool {
+    let error_str = error.to_string().to_lowercase();
+    error_str.contains("timeout") ||
+    error_str.contains("connection") ||
+    error_str.contains("503") ||
+    error_str.contains("rate limit")
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, WorkflowContext, createTaskRefs } from '@orcher/sdk';
+
+class WorkflowError extends Error {
+    constructor(public kind: 'transient' | 'permanent' | 'business_rule', message: string) {
+        super(message);
+    }
+}
+
+@Workflow({ name: 'resilient_payment', version: '1.0.0' })
+class ResilientPayment {
+    async run(ctx: WorkflowContext, payment: Payment): Promise<Receipt> {
+        // Validate input (permanent failure if invalid)
+        if (payment.amount <= 0) {
+            throw new WorkflowError('permanent', 'Invalid amount');
+        }
+
+        // Check fraud (business rule)
+        const fraudScore = await ctx.executeTask(tasks.checkFraud, payment.userId);
+        if (fraudScore > 0.9) {
+            throw new WorkflowError('business_rule', 'High fraud risk');
+        }
+
+        // Charge payment (may be transient failure)
+        let charge: Charge;
+        try {
+            charge = await ctx.executeTask(tasks.chargeStripe, payment);
+        } catch (e: any) {
+            if (isTransientError(e)) {
+                console.warn('Transient payment error:', e.message);
+                throw new WorkflowError('transient', e.message);
+            }
+            throw new WorkflowError('permanent', `Payment failed: ${e.message}`);
+        }
+
+        await ctx.executeTask(tasks.savePayment, charge.id);
+
+        return { chargeId: charge.id, amount: payment.amount };
+    }
+}
+
+function isTransientError(error: Error): boolean {
+    const msg = error.message.toLowerCase();
+    return msg.includes('timeout') || msg.includes('connection') ||
+           msg.includes('503') || msg.includes('rate limit');
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, WorkflowContext
+
+class WorkflowError(Exception):
+    def __init__(self, kind: str, message: str):
+        self.kind = kind  # 'transient', 'permanent', 'business_rule'
+        super().__init__(message)
+
+@workflow(name="resilient_payment", version="1.0.0")
+async def resilient_payment_workflow(ctx: WorkflowContext, payment: dict) -> dict:
+    # Validate input (permanent failure if invalid)
+    if payment["amount"] <= 0:
+        raise WorkflowError("permanent", "Invalid amount")
+
+    # Check fraud (business rule)
+    fraud_score = await ctx.execute_task(check_fraud, user_id=payment["user_id"])
+    if fraud_score > 0.9:
+        raise WorkflowError("business_rule", "High fraud risk")
+
+    # Charge payment (may be transient failure)
+    try:
+        charge = await ctx.execute_task(charge_stripe, payment=payment)
+    except Exception as e:
+        if is_transient_error(e):
+            logger.warning(f"Transient payment error: {e}")
+            raise WorkflowError("transient", str(e))
+        raise WorkflowError("permanent", f"Payment failed: {e}")
+
+    await ctx.execute_task(save_payment, charge_id=charge["id"])
+
+    return {"charge_id": charge["id"], "amount": payment["amount"]}
+
+def is_transient_error(error: Exception) -> bool:
+    msg = str(error).lower()
+    return any(k in msg for k in ("timeout", "connection", "503", "rate limit"))
+```
+
+</TabPanel>
+</Tabs>
+
+#### Circuit Breaker Pattern
+
+Protect external services from being overwhelmed during outages:
+
+```rust
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+pub struct CircuitBreaker {
+    failure_threshold: u32,
+    success_threshold: u32,
+    timeout: Duration,
+    state: Arc<RwLock<CircuitState>>,
+}
+
+enum CircuitState {
+    Closed { failures: u32 },
+    Open { opened_at: Instant },
+    HalfOpen { successes: u32 },
+}
+
+impl CircuitBreaker {
+    pub async fn call<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce() -> Result<T>,
+    {
+        let mut state = self.state.write().await;
+
+        match *state {
+            CircuitState::Open { opened_at } => {
+                // Check if timeout elapsed
+                if opened_at.elapsed() > self.timeout {
+                    *state = CircuitState::HalfOpen { successes: 0 };
+                } else {
+                    return Err(anyhow::anyhow!("Circuit breaker is OPEN"));
+                }
+            }
+            _ => {}
+        }
+
+        drop(state); // Release lock before calling function
+
+        let result = f();
+
+        let mut state = self.state.write().await;
+        match result {
+            Ok(value) => {
+                match *state {
+                    CircuitState::HalfOpen { successes } => {
+                        if successes + 1 >= self.success_threshold {
+                            *state = CircuitState::Closed { failures: 0 };
+                        } else {
+                            *state = CircuitState::HalfOpen { successes: successes + 1 };
+                        }
+                    }
+                    CircuitState::Closed { .. } => {
+                        *state = CircuitState::Closed { failures: 0 };
+                    }
+                    _ => {}
+                }
+                Ok(value)
+            }
+            Err(e) => {
+                match *state {
+                    CircuitState::Closed { failures } => {
+                        if failures + 1 >= self.failure_threshold {
+                            *state = CircuitState::Open { opened_at: Instant::now() };
+                        } else {
+                            *state = CircuitState::Closed { failures: failures + 1 };
+                        }
+                    }
+                    CircuitState::HalfOpen { .. } => {
+                        *state = CircuitState::Open { opened_at: Instant::now() };
+                    }
+                    _ => {}
+                }
+                Err(e)
+            }
+        }
+    }
+}
+
+// Use in task
+#[task]
+async fn call_external_service(data: String) -> Result<String> {
+    static CIRCUIT_BREAKER: Lazy<CircuitBreaker> = Lazy::new(|| {
+        CircuitBreaker::new(5, 2, Duration::from_secs(60))
+    });
+
+    CIRCUIT_BREAKER.call(|| {
+        // Make actual API call
+        external_api::process(data)
+    }).await
+}
+```
+
+## Pattern 7: Scheduled and Recurring Workflows
+
+Orcher has no separate cron scheduler process. Instead, model recurrence as a long-running workflow that does its work, sleeps durably until the next run, then restarts with a fresh history. The durable workflow *is* the schedule — it survives restarts and frees the worker while it waits:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+use std::time::Duration;
+
+#[workflow(name = "daily_report")]
+pub async fn daily_report_workflow(
+    ctx: WorkflowContext,
+    input: DailyReportInput,
+) -> Result<()> {
+    // Generate report
+    let report_data = ctx.execute_task(generate_report, input.report_type.clone()).await?;
+
+    // Send to stakeholders
+    ctx.execute_task(send_report_email, report_data).await?;
+
+    // Durable sleep until the next run (survives restarts, frees the worker)
+    ctx.sleep(Duration::from_secs(24 * 60 * 60)).await?;
+
+    // Restart with a fresh history for the next cycle
+    ctx.restart_fresh_with(input, None)
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, WorkflowContext, Duration } from '@orcher/sdk';
+
+@Workflow({ name: 'daily_report', version: '1.0.0' })
+class DailyReport {
+    async run(ctx: WorkflowContext, input: { reportType: string }): Promise<void> {
+        // Generate report
+        const reportData = await ctx.executeTask(tasks.generateReport, input.reportType);
+
+        // Send to stakeholders
+        await ctx.executeTask(tasks.sendReportEmail, reportData);
+
+        // Durable sleep until the next run (survives restarts, frees the worker)
+        await ctx.sleep(Duration.fromHours(24));
+
+        // Restart with a fresh history for the next cycle
+        ctx.restartFresh(input);
+    }
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+from datetime import timedelta
+
+@workflow(name="daily_report", version="1.0.0")
+async def daily_report_workflow(ctx: WorkflowContext, input: dict) -> None:
+    # Generate report
+    report_data = await ctx.execute_task(generate_report, report_type=input["report_type"])
+
+    # Send to stakeholders
+    await ctx.execute_task(send_report_email, report_data=report_data)
+
+    # Durable sleep until the next run (survives restarts, frees the worker)
+    await ctx.sleep(timedelta(hours=24))
+
+    # Restart with a fresh history for the next cycle
+    ctx.restart_fresh(input)
+```
+
+</TabPanel>
+</Tabs>
+
+---
+
+## Next Steps
+
+- [Part 3: Production Excellence](/guides/learning/backend-engineers/production) — Monitoring, testing, and deployment
+- [Back to Overview](/guides/learning/backend-engineers) — Learning path overview

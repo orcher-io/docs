@@ -1,0 +1,206 @@
+---
+id: 'fan-out-rate-limiting'
+title: 'Rate-Limited Fan-Out'
+description: 'Control concurrency in fan-out operations to avoid overwhelming downstream systems'
+sidebar_label: 'Rate Limiting'
+---
+
+## Fan-Out with Rate Limiting
+
+When calling external APIs or databases, unbounded parallelism can overwhelm downstream systems — triggering rate limits, connection pool exhaustion, or service degradation. Rate-limited fan-out processes items in fixed-size batches, waiting for each batch to complete before starting the next. This gives you predictable resource usage while still benefiting from parallelism within each batch.
+
+<div className="not-prose my-8 max-w-sm mx-auto">
+  <div className="flex flex-col items-center">
+    <div className="border bg-surface-75 px-5 py-2 text-center w-full">
+      <div className="text-xs font-medium text-foreground">10 Items to Process</div>
+      <div className="text-[10px] text-foreground-muted">concurrency = 3</div>
+    </div>
+    {[
+      { batch: 1, items: ['Item 1', 'Item 2', 'Item 3'] },
+      { batch: 2, items: ['Item 4', 'Item 5', 'Item 6'] },
+      { batch: 3, items: ['Item 7', 'Item 8', 'Item 9'] },
+      { batch: 4, items: ['Item 10'] },
+    ].map((b) => (
+      <div key={b.batch} className="w-full flex flex-col items-center">
+        <div className="w-px h-3 bg-border-strong" />
+        <div className="border border-dashed w-full p-2">
+          <div className="text-[10px] font-mono text-foreground-muted mb-1.5">Batch {b.batch}</div>
+          <div className="grid grid-cols-3 gap-1.5">
+            {b.items.map((item) => (
+              <div key={item} className="border bg-background py-1.5 text-center">
+                <div className="text-[10px] font-medium text-foreground">{item}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+        {b.batch < 4 && (
+          <div className="text-[8px] font-mono text-foreground-muted mt-0.5">await all ✓</div>
+        )}
+      </div>
+    ))}
+    <div className="w-px h-3 bg-border-strong" />
+    <div className="border bg-surface-75 px-5 py-2 text-center w-full">
+      <div className="text-xs font-medium text-foreground">All Results</div>
+    </div>
+  </div>
+</div>
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use futures::stream::{self, StreamExt};
+
+// Fan-out with concurrency limit
+#[workflow(name = "rate_limited_processor", version = "1.0.0")]
+pub async fn rate_limited_processor(
+    ctx: WorkflowContext,
+    input: BatchInput,
+) -> Result<BatchResult> {
+    const MAX_CONCURRENT: usize = 10;
+
+    println!("Processing {} items with max {} concurrent",
+        input.items.len(), MAX_CONCURRENT);
+
+    // Fan-Out with rate limiting using buffered streams
+    let results: Vec<ItemResult> = stream::iter(input.items.iter())
+        .map(|item| async {
+            ctx.execute_task(process_item, item.clone()).await
+        })
+        .buffer_unordered(MAX_CONCURRENT)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+
+    // Fan-In: Aggregate results
+    let total_value = results.iter().map(|r| r.value).sum();
+
+    Ok(BatchResult {
+        job_id: input.job_id,
+        total_items: results.len(),
+        total_value,
+        results,
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, WorkflowContext, createTaskRefs } from '@orcher/sdk';
+
+// Fan-out with concurrency limit
+@Workflow()
+class RateLimitedProcessor {
+  async run(ctx: WorkflowContext, input: BatchInput): Promise<BatchResult> {
+    const MAX_CONCURRENT = 10;
+
+    console.log(
+      `Processing ${input.items.length} items with max ${MAX_CONCURRENT} concurrent`,
+    );
+
+    // Process in batches to control concurrency
+    const results: ItemResult[] = [];
+
+    for (let i = 0; i < input.items.length; i += MAX_CONCURRENT) {
+      const batch = input.items.slice(i, i + MAX_CONCURRENT);
+
+      // Fan-Out: Process batch in parallel
+      const batchPromises = batch.map((item) =>
+        ctx.executeTask(tasks.processItem, item),
+      );
+
+      // Fan-In: Wait for batch to complete before starting next
+      const batchResults = await Promise.all(batchPromises);
+      results.push(...batchResults);
+    }
+
+    const totalValue = results.reduce((sum, r) => sum + r.value, 0);
+
+    return {
+      jobId: input.jobId,
+      totalItems: results.length,
+      totalValue,
+      results,
+    };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, WorkflowContext
+
+# Fan-out with concurrency limit
+@workflow(name="rate_limited_processor", version="1.0.0")
+async def rate_limited_processor(ctx: WorkflowContext, input: dict) -> dict:
+    MAX_CONCURRENT = 10
+
+    print(f"Processing {len(input['items'])} items with max {MAX_CONCURRENT} concurrent")
+
+    results = []
+
+    # Process in batches to control concurrency
+    items = input["items"]
+    for i in range(0, len(items), MAX_CONCURRENT):
+        batch = items[i:i + MAX_CONCURRENT]
+
+        # Fan-Out: Process batch in parallel
+        batch_futures = [ctx.execute_task(process_item, item) for item in batch]
+
+        # Fan-In: Wait for batch to complete before starting next
+        for future in batch_futures:
+            results.append(await future)
+
+    total_value = sum(r["value"] for r in results)
+
+    return {
+        "job_id": input["job_id"],
+        "total_items": len(results),
+        "total_value": total_value,
+        "results": results,
+    }
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/patterns/fan-out-fan-in" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Overview & Basic Fan-Out</h3>
+      <p className="text-sm text-foreground-light">
+        Start with the basic fan-out/fan-in pattern
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/fan-out-fan-in/partial-failures" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Partial Failure Handling</h3>
+      <p className="text-sm text-foreground-light">
+        Continue processing when individual items fail
+      </p>
+    </div>
+  </Link>
+</div>

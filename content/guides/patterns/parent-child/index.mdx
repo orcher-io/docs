@@ -1,0 +1,444 @@
+---
+id: 'parent-child'
+title: 'Parent-Child Orchestration'
+description: 'Master the parent-child workflow pattern for composing complex distributed systems with Orcher'
+sidebar_label: 'Overview'
+---
+
+Parent-child orchestration is a hierarchical pattern where a parent workflow spawns and manages one or more child workflows. Each child runs independently with its own execution context, state, and lifecycle, while the parent coordinates their overall behavior. This pattern lets you build complex systems from simple, reusable building blocks — different teams can own different child workflows, each child has isolated error handling, and you can run hundreds of children in parallel. Use parent-child orchestration when you need to break down complexity, coordinate multiple services, process items in parallel, or enable independent versioning of workflow components.
+
+<div className="not-prose my-8 max-w-md mx-auto">
+  <div className="flex flex-col items-center">
+    {/* Parent */}
+    <div className="border bg-surface-100 px-5 py-2.5 text-center w-full">
+      <div className="text-xs font-medium text-foreground">Parent Workflow</div>
+      <div className="text-[10px] text-foreground-muted mt-0.5">coordinates · aggregates · manages lifecycle</div>
+    </div>
+    <div className="w-px h-3 bg-border-strong" />
+    <div className="text-[10px] font-mono uppercase tracking-wider text-foreground-muted mb-1">spawn children</div>
+    {/* Fan-out to children */}
+    <div className="relative w-full">
+      <div className="absolute top-0 h-px bg-border-strong" style={{ left: 'calc(16.6% - 0.30rem)', right: 'calc(16.6% - 0.30rem)' }} />
+      <div className="grid grid-cols-3 gap-3">
+        {[
+          { name: 'Child A', detail: 'validate' },
+          { name: 'Child B', detail: 'process' },
+          { name: 'Child C', detail: 'notify' },
+        ].map((child) => (
+          <div key={child.name} className="flex flex-col items-center">
+            <div className="w-px h-4 bg-border-strong" />
+            <div className="border border-dashed bg-background w-full py-3 px-2 text-center">
+              <div className="text-[10px] font-medium text-foreground">{child.name}</div>
+              <div className="text-[9px] text-foreground-muted mt-0.5">{child.detail}</div>
+              <div className="mt-2 border bg-surface-75 py-1 mx-1">
+                <div className="text-[8px] text-foreground-muted">own journal</div>
+              </div>
+              <div className="mt-1 border bg-surface-75 py-1 mx-1">
+                <div className="text-[8px] text-foreground-muted">own retries</div>
+              </div>
+            </div>
+            <div className="w-px h-4 bg-border-strong" />
+          </div>
+        ))}
+      </div>
+      <div className="absolute bottom-0 h-px bg-border-strong" style={{ left: 'calc(16.6% - 0.30rem)', right: 'calc(16.6% - 0.30rem)' }} />
+    </div>
+    <div className="text-[10px] font-mono uppercase tracking-wider text-foreground-muted mt-1">collect results</div>
+    <div className="w-px h-3 bg-border-strong" />
+    {/* Parent aggregates */}
+    <div className="border bg-surface-100 px-5 py-2 text-center w-full">
+      <div className="text-xs font-medium text-foreground">Aggregate & Complete</div>
+    </div>
+  </div>
+</div>
+
+---
+
+## Basic Parent-Child Communication
+
+The simplest parent-child pattern spawns a child workflow, passes input data, and waits for the result. The parent calls `start_child_workflow` (or `startChildWorkflow` in TypeScript) with the child's name and input, receiving a handle that can be awaited for the child's return value. This decouples the parent from the child's internal implementation — the parent only needs to know the child's name and its input/output types.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+
+// Child workflow - validates an order
+#[workflow(name = "validate_order", version = "1.0.0")]
+pub async fn validate_order(
+    ctx: WorkflowContext,
+    order: OrderData,
+) -> Result<ValidationResult> {
+    println!("Validating order {}", order.id);
+
+    // Validate customer
+    let customer = ctx.execute_task(check_customer, order.customer_id).await?;
+
+    // Validate inventory
+    let inventory = ctx.execute_task(check_inventory, order.items.clone()).await?;
+
+    // Validate pricing
+    let pricing = ctx.execute_task(check_pricing, order.total).await?;
+
+    Ok(ValidationResult {
+        valid: customer.valid && inventory.available && pricing.correct,
+        errors: vec![],
+    })
+}
+
+// Parent workflow - orchestrates order processing
+#[workflow(name = "process_order", version = "1.0.0")]
+pub async fn process_order(
+    ctx: WorkflowContext,
+    order: OrderData,
+) -> Result<OrderResult> {
+    println!("Processing order {}", order.id);
+
+    // Start validation child workflow
+    let validation_handle = ctx
+        .start_child_workflow("validate_order", order.clone())
+        .await?;
+
+    println!("Validation workflow started: {}", validation_handle.id());
+
+    // Wait for validation result
+    let validation = validation_handle.result::<ValidationResult>().await?;
+
+    if !validation.valid {
+        return Ok(OrderResult::rejected(order.id, validation.errors));
+    }
+
+    // Continue with payment processing
+    let payment = ctx.execute_task(process_payment, order.total).await?;
+
+    Ok(OrderResult::success(order.id, payment.transaction_id))
+}
+```
+
+**Start the parent workflow:**
+
+```rust
+use orcher::client::OrcherClient;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let client = OrcherClient::new("localhost:50051").await?;
+
+    let order = OrderData {
+        id: "ord-123".to_string(),
+        customer_id: "cust-456".to_string(),
+        items: vec!["item-1".to_string(), "item-2".to_string()],
+        total: 99.99,
+    };
+
+    let handle = client
+        .start_workflow("process_order", "ord-123", order)
+        .await?;
+
+    println!("Order processing started: {}", handle.id());
+
+    let result = handle.result::<OrderResult>().await?;
+    println!("Order result: {:?}", result);
+
+    Ok(())
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import {
+  Workflow, Tasks, Task, WorkflowContext, TaskContext, createTaskRefs
+} from '@orcher/sdk';
+
+interface OrderData {
+  id: string;
+  customerId: string;
+  items: string[];
+  total: number;
+}
+
+interface ValidationResult {
+  valid: boolean;
+  errors: string[];
+}
+
+interface OrderResult {
+  orderId: string;
+  status: 'success' | 'rejected';
+  transactionId?: string;
+  errors?: string[];
+}
+
+// Tasks used by the child workflow
+@Tasks()
+class ValidationTasks {
+  @Task({ name: 'checkCustomer' })
+  async checkCustomer(ctx: TaskContext, customerId: string): Promise<CustomerCheck> { /* ... */ }
+
+  @Task({ name: 'checkInventory' })
+  async checkInventory(ctx: TaskContext, items: string[]): Promise<InventoryCheck> { /* ... */ }
+
+  @Task({ name: 'checkPricing' })
+  async checkPricing(ctx: TaskContext, total: number): Promise<PricingCheck> { /* ... */ }
+
+  @Task({ name: 'processPayment' })
+  async processPayment(ctx: TaskContext, amount: number): Promise<PaymentResult> { /* ... */ }
+}
+
+const tasks = createTaskRefs(ValidationTasks);
+
+// Child workflow - validates an order
+@Workflow()
+class ValidateOrder {
+  async execute(ctx: WorkflowContext, order: OrderData): Promise<ValidationResult> {
+    console.log(`Validating order ${order.id}`);
+
+    const customer = await ctx.executeTask(tasks.checkCustomer, order.customerId);
+    const inventory = await ctx.executeTask(tasks.checkInventory, order.items);
+    const pricing = await ctx.executeTask(tasks.checkPricing, order.total);
+
+    return {
+      valid: customer.valid && inventory.available && pricing.correct,
+      errors: [],
+    };
+  }
+}
+
+// Parent workflow - orchestrates order processing
+@Workflow()
+class ProcessOrder {
+  async execute(ctx: WorkflowContext, order: OrderData): Promise<OrderResult> {
+    console.log(`Processing order ${order.id}`);
+
+    // Start validation child workflow
+    const validationHandle = await ctx.startChildWorkflow(
+      'validate_order',
+      order,
+    );
+
+    console.log(`Validation workflow started: ${validationHandle.id}`);
+
+    // Wait for validation result
+    const validation = await validationHandle.result<ValidationResult>();
+
+    if (!validation.valid) {
+      return {
+        orderId: order.id,
+        status: 'rejected',
+        errors: validation.errors,
+      };
+    }
+
+    // Continue with payment processing
+    const payment = await ctx.executeTask(tasks.processPayment, order.total);
+
+    return {
+      orderId: order.id,
+      status: 'success',
+      transactionId: payment.transactionId,
+    };
+  }
+}
+```
+
+**Start the parent workflow:**
+
+```typescript
+import { OrcherClient } from '@orcher/sdk';
+
+async function main() {
+  const client = new OrcherClient('localhost:50051');
+
+  const order: OrderData = {
+    id: 'ord-123',
+    customerId: 'cust-456',
+    items: ['item-1', 'item-2'],
+    total: 99.99,
+  };
+
+  const handle = await client.startWorkflow(
+    'process_order',
+    'ord-123',
+    order,
+  );
+
+  console.log(`Order processing started: ${handle.id}`);
+
+  const result = await handle.result<OrderResult>();
+  console.log('Order result:', result);
+}
+
+main().catch(console.error);
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext, TaskContext
+
+# Tasks used by the child workflow
+@task(name="check_customer")
+async def check_customer(ctx: TaskContext, customer_id: str) -> dict:
+    # ... validate customer
+    return {"valid": True}
+
+@task(name="check_inventory")
+async def check_inventory(ctx: TaskContext, items: list[str]) -> dict:
+    # ... check stock levels
+    return {"available": True}
+
+@task(name="check_pricing")
+async def check_pricing(ctx: TaskContext, total: float) -> dict:
+    # ... verify pricing
+    return {"correct": True}
+
+@task(name="process_payment")
+async def process_payment(ctx: TaskContext, amount: float) -> dict:
+    # ... charge payment
+    return {"transaction_id": "txn-789"}
+
+# Child workflow - validates an order
+@workflow(name="validate_order", version="1.0.0")
+async def validate_order(ctx: WorkflowContext, order: dict) -> dict:
+    print(f"Validating order {order['id']}")
+
+    customer = await ctx.execute_task(check_customer, order["customer_id"])
+    inventory = await ctx.execute_task(check_inventory, order["items"])
+    pricing = await ctx.execute_task(check_pricing, order["total"])
+
+    return {
+        "valid": customer["valid"] and inventory["available"] and pricing["correct"],
+        "errors": [],
+    }
+
+# Parent workflow - orchestrates order processing
+@workflow(name="process_order", version="1.0.0")
+async def process_order(ctx: WorkflowContext, order: dict) -> dict:
+    print(f"Processing order {order['id']}")
+
+    # Start validation child workflow
+    validation_handle = await ctx.start_child_workflow("validate_order", order)
+
+    print(f"Validation workflow started: {validation_handle.id}")
+
+    # Wait for validation result
+    validation = await validation_handle.result()
+
+    if not validation["valid"]:
+        return {
+            "order_id": order["id"],
+            "status": "rejected",
+            "errors": validation["errors"],
+        }
+
+    # Continue with payment processing
+    payment = await ctx.execute_task(process_payment, order["total"])
+
+    return {
+        "order_id": order["id"],
+        "status": "success",
+        "transaction_id": payment["transaction_id"],
+    }
+```
+
+**Start the parent workflow:**
+
+```python
+from orcher import OrcherClient
+
+async def main():
+    client = OrcherClient("localhost:50051")
+
+    order = {
+        "id": "ord-123",
+        "customer_id": "cust-456",
+        "items": ["item-1", "item-2"],
+        "total": 99.99,
+    }
+
+    handle = await client.start_workflow("process_order", "ord-123", order)
+
+    print(f"Order processing started: {handle.id}")
+
+    result = await handle.result()
+    print(f"Order result: {result}")
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/patterns/parent-child/dynamic-spawning" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Dynamic Spawning</h3>
+      <p className="text-sm text-foreground-light">
+        Spawn child workflows dynamically based on runtime data for fan-out patterns
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/parent-child/event-coordination" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Event Coordination</h3>
+      <p className="text-sm text-foreground-light">
+        Send events between parent and child workflows for runtime control
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/parent-child/hierarchical" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Hierarchical Workflows</h3>
+      <p className="text-sm text-foreground-light">
+        Build multi-level orchestration hierarchies for complex business processes
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/parent-child/error-handling" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Error Handling & Monitoring</h3>
+      <p className="text-sm text-foreground-light">
+        Strategies for handling child failures and monitoring execution trees
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/parent-child/map-reduce" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Map-Reduce Pattern</h3>
+      <p className="text-sm text-foreground-light">
+        Split large datasets into batches, process in parallel, and aggregate results
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/parent-child/best-practices" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Best Practices & Performance</h3>
+      <p className="text-sm text-foreground-light">
+        Guidelines for designing efficient parent-child hierarchies
+      </p>
+    </div>
+  </Link>
+</div>

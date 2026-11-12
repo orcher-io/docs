@@ -1,0 +1,1210 @@
+---
+id: 'tasks-configuration'
+title: 'Task Configuration'
+description: 'Configure task macro attributes, retry policies, timeouts, resource requirements, and task context APIs in Orcher.'
+sidebar_label: 'Configuration'
+---
+
+Task macros and decorators accept configuration attributes that control naming, routing, retries, timeouts, and resource requirements. These are set at definition time and apply to every invocation of the task.
+
+### Standalone vs Grouped Tasks
+
+Orcher supports two patterns for defining tasks:
+
+- **Standalone tasks** — individual functions decorated with `#[task]` (Rust), `@Task()` (TypeScript), or `@task` (Python)
+- **Task groups** (Rust) — multiple `#[task]` methods on an impl block via `#[tasks]`, with group-level defaults
+
+Both patterns produce the same runtime behavior. Task groups are purely an organizational and DX feature — they register tasks identically to standalone functions.
+
+### Basic Attributes
+
+Every task has a name and a task queue. The name identifies the task type for routing and observability. The task queue determines which workers receive the task.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task(
+name = "process_payment",           // Task identifier (required)
+description = "Charge credit card", // Human-readable description
+version = "1.0.0",                  // Task version (default: "1.0.0")
+namespace = "payments"              // Namespace for multi-tenancy
+)]
+pub async fn process_payment(
+ctx: TaskContext,
+input: PaymentInput,
+) -> Result<PaymentResult> {
+// Implementation
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Inside a @Tasks() class:
+@Task({
+  name: 'processPayment',           // Task identifier
+})
+async processPayment(
+  _ctx: TaskContext,
+  input: PaymentInput
+): Promise<PaymentResult> {
+  // Implementation
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import task, TaskContext
+
+@task(
+name="process_payment",           # Task identifier (required)
+)
+async def process_payment(
+ctx: TaskContext,
+input: PaymentInput,
+) -> PaymentResult:
+# Implementation
+...
+```
+
+</TabPanel>
+
+</Tabs>
+
+### Retry Configuration
+
+Configure how many times a task is retried on failure and the delay strategy between attempts. You can set a maximum number of attempts, initial and maximum backoff intervals, and a backoff coefficient for exponential delay growth.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+// Simple retry (exponential backoff)
+#[task(
+name = "fetch_data",
+retry = 5  // Retry up to 5 times with exponential backoff
+)]
+pub async fn fetch_data(
+_ctx: TaskContext,
+url: String,
+) -> Result<String> {
+let response = reqwest::get(&url).await?.text().await?;
+Ok(response)
+}
+
+// Advanced retry policy
+#[task(
+name = "flaky_operation",
+retry_policy(
+    max_attempts = 5,
+    initial_interval = 1,        // Start with 1 second delay
+    max_interval = 60,           // Cap at 60 seconds
+    backoff_coefficient = 2.0    // Double delay each retry
+)
+)]
+pub async fn flaky_operation(
+ctx: TaskContext,
+input: OperationInput,
+) -> Result<OperationResult> {
+// Will retry with delays: 1s, 2s, 4s, 8s, 16s
+if ctx.is_retry() {
+    tracing::warn!("Retrying operation (attempt {})", ctx.attempt());
+}
+
+// Implementation
+Ok(result)
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Inside a @Tasks() class:
+
+// Simple retry with exponential backoff
+@Task({
+  name: 'fetchData',
+  retryPolicy: {
+    maxAttempts: 5,
+  },
+})
+async fetchData(
+  _ctx: TaskContext,
+  url: string
+): Promise<string> {
+  const response = await fetch(url);
+  return response.text();
+}
+
+// Advanced retry policy
+@Task({
+  name: 'flakyOperation',
+  retryPolicy: {
+    maxAttempts: 5,
+    initialInterval: 1000,      // 1 second
+    maxInterval: 60000,         // 60 seconds
+    backoffCoefficient: 2.0,    // Double delay each retry
+    nonRetryableErrorTypes: ['ValidationError'],
+  },
+})
+async flakyOperation(
+  ctx: TaskContext,
+  input: OperationInput
+): Promise<OperationResult> {
+  // Will retry with delays: 1s, 2s, 4s, 8s, 16s
+  if (ctx.isRetry()) {
+    console.warn(`Retrying operation (attempt ${ctx.attempt()})`);
+  }
+
+  // Implementation
+  return result;
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import task, TaskContext
+
+# Simple retry with exponential backoff
+@task(
+name="fetch_data",
+retry_policy={"max_attempts": 5},
+)
+async def fetch_data(ctx: TaskContext, url: str) -> str:
+import httpx
+async with httpx.AsyncClient() as client:
+    response = await client.get(url)
+    response.raise_for_status()
+    return response.text
+
+# Advanced retry policy
+@task(
+name="flaky_operation",
+retry_policy={
+    "max_attempts": 5,
+    "initial_interval_seconds": 1,     # 1 second
+    "max_interval_seconds": 60,        # 60 seconds
+    "backoff_coefficient": 2.0,        # Double delay each retry
+},
+)
+async def flaky_operation(
+ctx: TaskContext,
+input: OperationInput,
+) -> OperationResult:
+# Will retry with delays: 1s, 2s, 4s, 8s, 16s
+if ctx.attempt > 1:
+    print(f"Retrying operation (attempt {ctx.attempt})")
+
+# Implementation
+return result
+```
+
+</TabPanel>
+
+</Tabs>
+
+### Timeout Configuration
+
+Two independent limits bound a task. The **queue limit** (`schedule_to_start`) caps how long it may wait to be picked up; the **run limit** (`start_to_close`) caps how long it may run once started. Exceeding either marks the task timed out, and it is retried according to its retry policy.
+
+They are set separately because they answer different questions. A nightly reconciliation job may legitimately queue for an hour and must not run for more than ten minutes; a payment capture must start within seconds and may take a minute. Setting only a run limit leaves the wait unbounded, which is the right default — a task that has not started yet has not misbehaved.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+// Timeout in seconds
+#[task(
+name = "slow_operation",
+timeout = 300  // 5 minutes timeout
+)]
+pub async fn slow_operation(
+_ctx: TaskContext,
+input: SlowInput,
+) -> Result<SlowOutput> {
+// Task will fail if it exceeds 5 minutes
+}
+
+// Timeout shortcut (in minutes)
+#[task(
+name = "quick_task",
+timeout_mins = 2  // Automatically converted to 120 seconds
+)]
+pub async fn quick_task(
+_ctx: TaskContext,
+input: QuickInput,
+) -> Result<QuickOutput> {
+// Task will fail if it exceeds 2 minutes
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Inside a @Tasks() class:
+
+// Timeout in milliseconds
+@Task({
+  name: 'slowOperation',
+  timeout: 300000, // 5 minutes (in milliseconds)
+})
+async slowOperation(
+  _ctx: TaskContext,
+  input: SlowInput
+): Promise<SlowOutput> {
+  // Task will fail if it exceeds 5 minutes
+}
+
+// Quick task with short timeout
+@Task({
+  name: 'quickTask',
+  timeout: 120000, // 2 minutes
+})
+async quickTask(
+  _ctx: TaskContext,
+  input: QuickInput
+): Promise<QuickOutput> {
+  // Task will fail if it exceeds 2 minutes
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import task, TaskContext
+
+# Timeout in seconds
+@task(
+name="slow_operation",
+timeout=300.0,  # 5 minutes timeout
+)
+async def slow_operation(
+ctx: TaskContext,
+input: SlowInput,
+) -> SlowOutput:
+# Task will fail if it exceeds 5 minutes
+...
+
+# Quick task with short timeout
+@task(
+name="quick_task",
+timeout=120.0,  # 2 minutes
+)
+async def quick_task(
+ctx: TaskContext,
+input: QuickInput,
+) -> QuickOutput:
+# Task will fail if it exceeds 2 minutes
+...
+```
+
+</TabPanel>
+
+</Tabs>
+
+### Per-Call Timeouts
+
+Limits declared on the task apply to every invocation. When one call needs
+different bounds — the same task used for an interactive request and for a
+nightly backfill — set them where the task is scheduled. Call-site values take
+precedence.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use std::time::Duration;
+use orcher::workflow::TaskOptions;
+
+ctx.execute_task_with_options(
+    "charge_card",
+    input,
+    TaskOptions {
+        // How long it may run once a worker starts it.
+        timeout: Some(Duration::from_secs(90)),
+        // How long it may wait to be started. Omit for no queue limit.
+        queue_timeout: Some(Duration::from_secs(10)),
+        // Kill the task if it stops heartbeating for this long.
+        heartbeat_timeout: Some(Duration::from_secs(30)),
+        ..Default::default()
+    },
+).await?
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from datetime import timedelta
+
+await ctx.execute_task(
+    charge_card,
+    timeout=timedelta(seconds=90),            # how long it may run
+    queue_timeout=timedelta(seconds=10),      # how long it may wait to start
+    heartbeat_timeout=timedelta(seconds=30),  # stalled if no heartbeat
+)
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Duration } from '@orcher-io/sdk';
+
+await ctx.executeTask(chargeCard, input, {
+  timeout: Duration.fromSeconds(90),          // how long it may run
+  queueTimeout: Duration.fromSeconds(10),     // how long it may wait to start
+  heartbeatTimeout: Duration.fromSeconds(30), // stalled if no heartbeat
+});
+```
+
+</TabPanel>
+
+</Tabs>
+
+<Admonition type="note">
+
+`timeout` bounds only the run. Omitting `queue_timeout` leaves the wait unbounded rather than reusing the run limit, so a task given a 90s run limit is not also given 90s to start — the two never sum into a total you did not ask for.
+
+</Admonition>
+
+### Reading the Limits From a Task
+
+A handler that heartbeats needs to know the interval it is judged by: heartbeat
+less often than that and a healthy task is killed as stalled.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+if let Some(interval) = ctx.heartbeat_timeout() {
+    // Heartbeat comfortably inside the interval, not at its edge.
+    let every = interval / 3;
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+interval = ctx.heartbeat_timeout
+if interval:
+    every = interval / 3
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+const intervalMs = ctx.heartbeatTimeout();
+if (intervalMs !== undefined) {
+  const everyMs = intervalMs / 3;
+}
+```
+
+</TabPanel>
+
+</Tabs>
+
+### Resource Requirements (Rust)
+
+In the Rust SDK, you can declare resource requirements (memory, CPU) directly in the task macro. Workers use this information for capacity-aware scheduling — tasks are only dispatched to workers that have sufficient resources available.
+
+```rust
+#[task(
+    name = "memory_intensive",
+    memory = "2Gi",           // Shortcut for memory requirement
+    resources(
+        cpu = 2.0,            // 2 CPU cores
+        memory = "4Gi",       // 4GB RAM
+        disk = "10Gi"         // 10GB disk space
+    )
+)]
+pub async fn memory_intensive(
+    _ctx: TaskContext,
+    data: LargeDataset,
+) -> Result<ProcessedData> {
+    // Task will only run on workers with sufficient resources
+}
+```
+
+---
+
+### Task Groups (Rust)
+
+In the Rust SDK, you can group related tasks under a struct using the `#[tasks]` macro. This provides:
+
+- **Shared defaults** — set retry, timeout, task queue, etc. once for all tasks in the group
+- **Per-task overrides** — any method-level `#[task(...)]` attribute overrides the group default
+- **Type-safe references** — `StructName::method` works as a `TaskReference` for `ctx.execute_task()`
+- **Code organization** — logically group related tasks, add helper methods
+
+```rust
+use orcher::prelude::*;
+
+pub struct NotificationTasks;
+
+#[tasks(retry = 3, timeout = 30, namespace = "notifications")]
+impl NotificationTasks {
+    #[task]
+    async fn send_email(ctx: TaskContext, input: EmailInput) -> Result<EmailResult> {
+        // inherits retry=3, timeout=30, namespace="notifications"
+        let result = email_service::send(&input.to, &input.subject, &input.body).await?;
+        Ok(EmailResult { message_id: result.id })
+    }
+
+    #[task(timeout = 10)]
+    async fn send_sms(ctx: TaskContext, input: SmsInput) -> Result<SmsResult> {
+        // overrides timeout=10, inherits retry=3, namespace="notifications"
+        let result = twilio::send_sms(&input.phone, &input.message).await?;
+        Ok(SmsResult { sid: result.sid })
+    }
+
+    #[task(retry = 5, timeout = 120, preset = "long-running")]
+    async fn send_push(ctx: TaskContext, input: PushInput) -> Result<PushResult> {
+        // fully custom: retry=5, timeout=120, preset="long-running"
+        let result = fcm::send(&input.device_token, &input.payload).await?;
+        Ok(PushResult { success: result.success })
+    }
+
+    // Not a task — plain helper preserved as-is
+    fn build_template(template_name: &str, vars: &HashMap<String, String>) -> String {
+        // Template rendering logic
+        format!("rendered: {}", template_name)
+    }
+}
+```
+
+**Using in workflows:**
+
+```rust
+#[workflow]
+async fn order_confirmation(ctx: WorkflowContext, order: Order) -> Result<()> {
+    // Type-safe associated constants — compile error if task doesn't exist
+    ctx.execute_task(NotificationTasks::send_email, EmailInput {
+        to: order.email.clone(),
+        subject: "Order Confirmed".to_string(),
+        body: format!("Order #{} confirmed", order.id),
+    }).await?;
+
+    if let Some(phone) = &order.phone {
+        ctx.execute_task(NotificationTasks::send_sms, SmsInput {
+            phone: phone.clone(),
+            message: format!("Order #{} confirmed!", order.id),
+        }).await?;
+    }
+
+    Ok(())
+}
+```
+
+**Group-level attributes reference:**
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `retry` | `u32` | Max retry attempts (exponential backoff) |
+| `timeout` | `u64` | Timeout in seconds |
+| `timeout_mins` | `u64` | Timeout in minutes |
+| `task_queue` | `String` | Task queue for routing |
+| `namespace` | `String` | Namespace for multi-tenancy |
+| `memory` | `String` | Memory requirement (e.g., `"512Mi"`) |
+| `preset` | `String` | `"long-running"`, `"quick"`, or `"critical"` |
+| `heartbeat_timeout` | `u64` | Heartbeat timeout in seconds |
+| `priority` | `u8` | Priority 0-100 |
+| `max_concurrent` | `u32` | Max concurrent executions |
+| `rate_limit` | `u32` | Max executions per second |
+
+---
+
+### Task Context
+
+The `TaskContext` is a crucial object passed to every task that provides access to workflow metadata, execution state, and utilities for long-running operations.
+
+**What TaskContext Provides:**
+
+1. **Workflow Identification** - Access to workflow ID, run ID, and task ID
+2. **Execution Metadata** - Current attempt number, retry information
+3. **Heartbeat Mechanism** - Signal progress for long-running tasks
+4. **Cancellation Signals** - Detect when workflow/task is being cancelled
+5. **Logging Context** - Structured logging with workflow context
+
+**When to Use TaskContext:**
+
+- **Always** available in task functions, even if you don't use it
+- **Required** for heartbeats in long-running tasks
+- **Useful** for debugging (include workflow_id in logs)
+- **Essential** for cancellation-aware operations
+
+---
+
+### Understanding TaskContext Properties
+
+Every task receives a `TaskContext` parameter. Let's explore what information is available:
+
+**Core Properties:**
+
+```typescript
+interface TaskContext {
+  // Unique ID of the workflow instance
+  workflowId(): string;        // e.g., "wf_abc123xyz"
+
+  // Unique ID for this specific workflow run
+  runId(): string;             // e.g., "run_def456uvw"
+
+  // Unique ID for this task execution
+  taskId(): string;            // e.g., "task_ghi789rst"
+
+  // Current attempt number (starts at 1)
+  attempt(): number;           // 1, 2, 3, etc.
+
+  // Functions
+  isRetry(): boolean;
+  heartbeat(): Promise<void>;
+  heartbeatWithDetails(details?: any): Promise<void>;
+  isCancelled(): boolean;
+}
+```
+
+---
+
+### Metadata Access
+
+**Use Case:** Access workflow and task metadata for logging, debugging, and tracking.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task(name = "metadata_example")]
+pub async fn metadata_example(
+ctx: TaskContext,
+input: String,
+) -> Result<String> {
+// Access workflow metadata
+let workflow_id = ctx.workflow_id();
+let run_id = ctx.run_id();
+let task_id = ctx.task_id();
+let attempt = ctx.attempt();
+
+tracing::info!(
+    "Task {} (attempt {}) executing in workflow {} (run {})",
+    task_id,
+    attempt,
+    workflow_id,
+    run_id
+);
+
+// Check if this is a retry
+if ctx.is_retry() {
+    tracing::warn!("This is a retry attempt");
+}
+
+Ok(format!("Processed in workflow {}", workflow_id))
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Inside a @Tasks() class:
+@Task({ name: 'metadataExample' })
+async metadataExample(
+  ctx: TaskContext,
+  input: string
+): Promise<string> {
+  // Access workflow metadata
+  const workflowId = ctx.workflowId();
+  const runId = ctx.runId();
+  const taskId = ctx.taskId();
+  const attempt = ctx.attempt();
+
+  console.log(
+    `Task ${taskId} (attempt ${attempt}) executing in workflow ${workflowId} (run ${runId})`
+  );
+
+  // Check if this is a retry
+  if (ctx.isRetry()) {
+    console.warn('This is a retry attempt');
+  }
+
+  return `Processed in workflow ${workflowId}`;
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import task, TaskContext
+
+@task(name="metadata_example")
+async def metadata_example(ctx: TaskContext, input: str) -> str:
+# Access workflow metadata
+workflow_id = ctx.info.workflow_id
+run_id = ctx.info.run_id
+task_id = ctx.task_id
+attempt = ctx.attempt
+
+print(
+    f"Task {task_id} (attempt {attempt}) "
+    f"executing in workflow {workflow_id} (run {run_id})"
+)
+
+# Check if this is a retry
+if attempt > 1:
+    print("This is a retry attempt")
+
+return f"Processed in workflow {workflow_id}"
+```
+
+</TabPanel>
+
+</Tabs>
+
+**Why Metadata Matters:**
+
+- **Debugging:** When a task fails, logs with `workflow_id` let you trace the entire workflow execution
+- **Monitoring:** Track retry patterns by logging `attempt` numbers
+- **Alerting:** Send alerts when tasks repeatedly fail (check `attempt` vs `maxAttempts`)
+- **Audit Trail:** Include `workflow_id` in external API calls for end-to-end tracing
+- **Dynamic Logic:** Adjust behavior based on attempt number (e.g., use fallback on final attempt)
+
+**Real-World Example:**
+
+```typescript
+// Inside a @Tasks() class:
+@Task({ name: 'processPayment' })
+async processPayment(
+  ctx: TaskContext,
+  payment: Payment
+): Promise<PaymentResult> {
+  const workflowId = ctx.workflowId();
+  const attempt = ctx.attempt();
+  // Mirror the task's configured retryPolicy.maxAttempts
+  const maxAttempts = 3;
+
+  try {
+    // Primary payment processor
+    const result = await stripeClient.charge({
+      amount: payment.amount,
+      // Include workflow_id for traceability
+      metadata: { workflowId },
+    });
+
+    return result;
+  } catch (error) {
+    // On final attempt, try backup processor
+    if (attempt >= maxAttempts) {
+      logger.warn('Stripe failed, trying PayPal as fallback', {
+        workflowId,
+        error: error.message,
+      });
+
+      return await paypalClient.charge({
+        amount: payment.amount,
+        metadata: { workflowId },
+      });
+    }
+
+    throw error; // Let Orcher retry with Stripe
+  }
+}
+```
+
+---
+
+### Heartbeats
+
+**What are Heartbeats?**
+
+Heartbeats are periodic signals sent from long-running tasks to indicate they're still making progress. Without heartbeats, Orcher might think a task is stuck and cancel it.
+
+**When to Use Heartbeats:**
+
+- Tasks that take **>30 seconds** to complete
+- Tasks processing large batches (thousands of items)
+- Tasks with unpredictable execution time
+- Tasks that might appear "stuck" but are actually working
+
+**How Heartbeats Work:**
+
+<div className="not-prose my-8 max-w-2xl mx-auto grid grid-cols-1 sm:grid-cols-2 gap-4">
+  <div className="border">
+    <div className="bg-surface-75 px-3 py-2 border-b text-[10px] font-mono uppercase tracking-wide text-foreground-muted">Without heartbeats</div>
+    <div className="p-3 space-y-1.5 text-[11px] text-foreground-muted">
+      <div>Task starts</div>
+      <div>Process item 1 <span className="font-mono">· 60s+</span></div>
+      <div>Process item 2 …</div>
+    </div>
+    <div className="bg-red-500/5 px-3 py-2 border-t text-[11px] text-red-400">Orcher: “task looks stuck” → cancelled</div>
+  </div>
+  <div className="border">
+    <div className="bg-surface-75 px-3 py-2 border-b text-[10px] font-mono uppercase tracking-wide text-foreground-muted">With heartbeats</div>
+    <div className="p-3 space-y-1.5 text-[11px] text-foreground-muted">
+      <div>Task starts</div>
+      <div>Process item 1 → <span className="font-mono text-foreground">heartbeat()</span></div>
+      <div>Process item 2 → <span className="font-mono text-foreground">heartbeat()</span></div>
+    </div>
+    <div className="bg-surface-75 px-3 py-2 border-t text-[11px] text-foreground-muted">Orcher: “still working” → kept alive</div>
+  </div>
+</div>
+
+For long-running tasks, send periodic heartbeats to prevent timeout:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task(
+name = "process_large_batch",
+timeout_mins = 60,
+heartbeat_timeout = 30  // Consider stalled if no heartbeat for 30s
+)]
+pub async fn process_large_batch(
+ctx: TaskContext,
+items: Vec<Item>,
+) -> Result<Vec<ProcessedItem>> {
+let mut results = Vec::new();
+
+for (i, item) in items.iter().enumerate() {
+    // Process item
+    let processed = process_item(item).await?;
+    results.push(processed);
+
+    // Send heartbeat every 10 items
+    if i % 10 == 0 {
+        ctx.heartbeat().await?;
+    }
+}
+
+Ok(results)
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Inside a @Tasks() class:
+@Task({
+  name: 'processLargeBatch',
+  timeout: 3600000,  // 60 minutes
+})
+async processLargeBatch(
+  ctx: TaskContext,
+  items: Item[]
+): Promise<ProcessedItem[]> {
+  const results: ProcessedItem[] = [];
+
+  for (let i = 0; i < items.length; i++) {
+// Process item
+const processed = await processItem(items[i]);
+results.push(processed);
+
+// Send heartbeat every 10 items
+if (i % 10 === 0) {
+  await ctx.heartbeat();
+}
+  }
+
+  return results;
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import task, TaskContext
+
+@task(
+name="process_large_batch",
+timeout=3600.0,  # 60 minutes
+)
+async def process_large_batch(
+ctx: TaskContext,
+items: list[Item],
+) -> list[ProcessedItem]:
+results: list[ProcessedItem] = []
+
+for i, item in enumerate(items):
+    # Process item
+    processed = await process_item(item)
+    results.append(processed)
+
+    # Send heartbeat every 10 items
+    if i % 10 == 0:
+        await ctx.heartbeat()
+
+return results
+```
+
+</TabPanel>
+
+</Tabs>
+
+### Heartbeats with Progress
+
+You can include progress data with each heartbeat to track how far a task has progressed. This is useful for long-running tasks like file processing or batch jobs where you want to report completion percentage or the current item being processed.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use serde::Serialize;
+
+#[derive(Serialize)]
+struct Progress {
+current: usize,
+total: usize,
+percent: f64,
+}
+
+#[task(name = "process_with_progress")]
+pub async fn process_with_progress(
+ctx: TaskContext,
+items: Vec<Item>,
+) -> Result<ProcessedResult> {
+let total = items.len();
+
+for (current, item) in items.iter().enumerate() {
+    process_item(item).await?;
+
+    // Send heartbeat with progress details
+    let progress = Progress {
+        current: current + 1,
+        total,
+        percent: ((current + 1) as f64 / total as f64) * 100.0,
+    };
+
+    ctx.heartbeat_with_details(Some(progress)).await?;
+}
+
+Ok(ProcessedResult { count: total })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+interface Progress {
+  current: number;
+  total: number;
+  percent: number;
+}
+
+// Inside a @Tasks() class:
+@Task({ name: 'processWithProgress' })
+async processWithProgress(
+  ctx: TaskContext,
+  items: Item[]
+): Promise<ProcessedResult> {
+  const total = items.length;
+
+  for (let current = 0; current < total; current++) {
+await processItem(items[current]);
+
+// Send heartbeat with progress details
+const progress: Progress = {
+  current: current + 1,
+  total,
+  percent: ((current + 1) / total) * 100,
+};
+
+await ctx.heartbeatWithDetails(progress);
+  }
+
+  return { count: total };
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from dataclasses import dataclass
+from orcher import task, TaskContext
+
+@dataclass
+class Progress:
+current: int
+total: int
+percent: float
+
+@task(name="process_with_progress")
+async def process_with_progress(
+ctx: TaskContext,
+items: list[Item],
+) -> ProcessedResult:
+total = len(items)
+
+for current, item in enumerate(items):
+    await process_item(item)
+
+    # Send heartbeat with progress details
+    progress = Progress(
+        current=current + 1,
+        total=total,
+        percent=((current + 1) / total) * 100.0,
+    )
+
+    await ctx.heartbeat(details=progress)
+
+return ProcessedResult(count=total)
+```
+
+</TabPanel>
+
+</Tabs>
+
+### Cancellation Handling
+
+Tasks can detect cancellation requests and perform cleanup before exiting. Check for cancellation periodically in long-running tasks to release resources, close connections, or roll back partial work.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task(name = "cancellable_task")]
+pub async fn cancellable_task(
+ctx: TaskContext,
+items: Vec<Item>,
+) -> Result<ProcessedResult> {
+for item in items {
+    // Check for cancellation before processing
+    if ctx.is_cancelled() {
+        tracing::info!("Task cancelled, cleaning up...");
+        cleanup().await?;
+        return Err(anyhow::anyhow!("Task cancelled"));
+    }
+
+    process_item(item).await?;
+}
+
+Ok(ProcessedResult::success())
+}
+
+// Using cancellation token with tokio::select
+#[task(name = "long_wait_task")]
+pub async fn long_wait_task(
+ctx: TaskContext,
+duration_secs: u64,
+) -> Result<String> {
+let work = async {
+    tokio::time::sleep(Duration::from_secs(duration_secs)).await;
+    Ok("Work completed".to_string())
+};
+
+tokio::select! {
+    result = work => result,
+    _ = ctx.cancellation_token().cancelled() => {
+        Err(anyhow::anyhow!("Task was cancelled"))
+    }
+}
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Inside a @Tasks() class:
+@Task({ name: 'cancellableTask' })
+async cancellableTask(
+  ctx: TaskContext,
+  items: Item[]
+): Promise<ProcessedResult> {
+  for (const item of items) {
+// Check for cancellation before processing
+if (ctx.isCancelled()) {
+  console.log('Task cancelled, cleaning up...');
+  await cleanup();
+  throw new Error('Task cancelled');
+}
+
+await processItem(item);
+  }
+
+  return { success: true };
+}
+
+// Using cancellation token with Promise.race
+@Task({ name: 'longWaitTask' })
+async longWaitTask(
+  ctx: TaskContext,
+  durationMs: number
+): Promise<string> {
+  const work = async () => {
+await new Promise(resolve => setTimeout(resolve, durationMs));
+return 'Work completed';
+  };
+
+  const result = await Promise.race([
+work(),
+ctx.cancellationToken().waitForCancellation().then(() => {
+  throw new Error('Task was cancelled');
+}),
+  ]);
+
+  return result;
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+import asyncio
+from orcher import task, TaskContext
+
+@task(name="cancellable_task")
+async def cancellable_task(
+ctx: TaskContext,
+items: list[Item],
+) -> ProcessedResult:
+for item in items:
+    # Check for cancellation before processing
+    if ctx.cancellation_token.is_cancelled():
+        print("Task cancelled, cleaning up...")
+        await cleanup()
+        raise RuntimeError("Task cancelled")
+
+    await process_item(item)
+
+return ProcessedResult(success=True)
+
+# Using cancellation token with asyncio
+@task(name="long_wait_task")
+async def long_wait_task(
+ctx: TaskContext,
+duration_secs: float,
+) -> str:
+try:
+    await asyncio.wait_for(
+        asyncio.sleep(duration_secs),
+        timeout=duration_secs,
+    )
+    return "Work completed"
+except asyncio.CancelledError:
+    raise RuntimeError("Task was cancelled")
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+### Next Steps
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/tasks/idempotency" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Idempotency Patterns →</h3>
+      <p className="text-sm text-foreground-light">
+        Learn how to make tasks safe to retry with idempotency keys and error handling
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/tasks/getting-started" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">← Getting Started</h3>
+      <p className="text-sm text-foreground-light">
+        Task execution APIs and your first task
+      </p>
+    </div>
+  </Link>
+</div>

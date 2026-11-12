@@ -1,0 +1,374 @@
+---
+id: 'financial-subscription'
+title: 'Subscription Billing with Dunning'
+description: 'Recurring subscription billing with retry schedules spanning days, dunning emails, and automatic account suspension.'
+sidebar_label: 'Subscription Billing'
+---
+
+Recurring subscription billing requires retry logic that spans days — if a payment fails, you don't just retry immediately. You wait hours or days, send dunning emails, try alternate payment methods, and eventually suspend the account. Orcher's durable timers make this natural: the workflow sleeps between retries with zero resource consumption.
+
+## How it works
+
+The example's plain for-loop is actually an eleven-day state machine. Each failed attempt sends a dunning email, sleeps for the next interval in the schedule, and tries again; any success exits immediately with the payment recorded. Between attempts the workflow is suspended — a fleet of 100,000 subscriptions in dunning holds no threads and no connections.
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">The Dunning Schedule</div>
+  </div>
+  {[
+    { label: 'attempt 1', detail: 'Charge declined', icon: 'd0', state: 'fail' },
+    { label: 'email #1 · sleep 1 day', detail: 'Suspended until the timer fires', icon: '⏸', state: 'suspend' },
+    { label: 'attempt 2', detail: 'Charge declined', icon: 'd1', state: 'fail' },
+    { label: 'email #2 · sleep 3 days', detail: 'Suspended', icon: '⏸', state: 'suspend' },
+    { label: 'attempt 3', detail: 'Charge declined', icon: 'd4', state: 'fail' },
+    { label: 'email #3 · sleep 7 days', detail: 'Suspended', icon: '⏸', state: 'suspend' },
+    { label: 'attempt 4', detail: 'Charge declined — schedule exhausted', icon: 'd11', state: 'fail' },
+    { label: 'suspend_subscription', detail: 'Terminal state — journaled like every other step', icon: '✗', state: 'crash' },
+  ].map((row, i, arr) => (
+    <div key={i}>
+      <div className={`px-4 py-2 flex items-center gap-3 ${row.state === 'crash' ? 'bg-red-500/5' : ''} ${row.state === 'suspend' ? 'bg-surface-75' : ''}`}>
+        <span className={`w-5 h-5 flex items-center justify-center text-[10px] shrink-0 ${row.state === 'crash' ? 'text-red-400' : row.state === 'fail' ? 'font-mono text-foreground-muted border border-default' : 'text-foreground-muted'}`}>{row.icon}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{row.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{row.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Any attempt that succeeds exits immediately: record_payment → status "paid".</span>
+  </div>
+</div>
+
+## Example: billing with a retry schedule
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use std::time::Duration;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SubscriptionBilling {
+    subscription_id: String,
+    customer_id: String,
+    amount: f64,
+    payment_method_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BillingResult {
+    subscription_id: String,
+    paid: bool,
+    attempts: u32,
+    final_status: String,
+}
+
+#[task]
+async fn attempt_charge(customer_id: String, amount: f64, method_id: String) -> Result<String> {
+    let charge = gateway::charge(&customer_id, amount, &method_id).await?;
+    Ok(charge.id)
+}
+
+#[task]
+async fn send_dunning_email(customer_id: String, attempt: u32) -> Result<()> {
+    email::send_payment_failed(&customer_id, attempt).await?;
+    Ok(())
+}
+
+#[task]
+async fn suspend_subscription(subscription_id: String) -> Result<()> {
+    billing::suspend(&subscription_id).await?;
+    Ok(())
+}
+
+#[task]
+async fn record_payment(subscription_id: String, charge_id: String) -> Result<()> {
+    billing::record_payment(&subscription_id, &charge_id).await?;
+    Ok(())
+}
+
+#[workflow(name = "subscription_billing", version = "1.0.0")]
+pub async fn subscription_billing(
+    ctx: WorkflowContext,
+    billing: SubscriptionBilling,
+) -> Result<BillingResult> {
+    // Retry schedule: immediate, 1 day, 3 days, 7 days
+    let retry_delays = [
+        Duration::from_secs(0),
+        Duration::from_secs(86400),      // 1 day
+        Duration::from_secs(259200),     // 3 days
+        Duration::from_secs(604800),     // 7 days
+    ];
+
+    for (attempt, delay) in retry_delays.iter().enumerate() {
+        if attempt > 0 {
+            // Send dunning email before retry
+            ctx.execute_task(
+                send_dunning_email, (billing.customer_id.clone(), attempt as u32)
+            ).await?;
+
+            // Wait before retrying — durable timer
+            ctx.sleep(*delay).await?;
+        }
+
+        // Attempt the charge
+        match ctx.execute_task(attempt_charge, (
+            billing.customer_id.clone(),
+            billing.amount,
+            billing.payment_method_id.clone(),
+        )).await {
+            Ok(charge_id) => {
+                // Payment succeeded — record and return
+                ctx.execute_task(
+                    record_payment, (billing.subscription_id.clone(), charge_id)
+                ).await?;
+
+                return Ok(BillingResult {
+                    subscription_id: billing.subscription_id,
+                    paid: true,
+                    attempts: attempt as u32 + 1,
+                    final_status: "paid".to_string(),
+                });
+            }
+            Err(e) => {
+                println!("Attempt {} failed: {}", attempt + 1, e);
+                // Continue to next retry
+            }
+        }
+    }
+
+    // All retries exhausted — suspend the subscription
+    ctx.execute_task(suspend_subscription, billing.subscription_id.clone()).await?;
+
+    Ok(BillingResult {
+        subscription_id: billing.subscription_id,
+        paid: false,
+        attempts: retry_delays.len() as u32,
+        final_status: "suspended".to_string(),
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, WorkflowContext, createTaskRefs } from '@orcher/sdk';
+
+interface SubscriptionBilling {
+  subscriptionId: string;
+  customerId: string;
+  amount: number;
+  paymentMethodId: string;
+}
+
+interface BillingResult {
+  subscriptionId: string;
+  paid: boolean;
+  attempts: number;
+  finalStatus: string;
+}
+
+@Tasks()
+class BillingTasks {
+  @Task()
+  async attemptCharge(customerId: string, amount: number, methodId: string): Promise<string> {
+    const charge = await gateway.charge(customerId, amount, methodId);
+    return charge.id;
+  }
+
+  @Task()
+  async sendDunningEmail(customerId: string, attempt: number): Promise<void> {
+    await email.sendPaymentFailed(customerId, attempt);
+  }
+
+  @Task()
+  async suspendSubscription(subscriptionId: string): Promise<void> {
+    await billing.suspend(subscriptionId);
+  }
+
+  @Task()
+  async recordPayment(subscriptionId: string, chargeId: string): Promise<void> {
+    await billing.recordPayment(subscriptionId, chargeId);
+  }
+}
+
+const tasks = createTaskRefs(BillingTasks);
+
+@Workflow({ name: 'subscription_billing', version: '1.0.0' })
+class SubscriptionBillingWorkflow {
+  async run(ctx: WorkflowContext, billing: SubscriptionBilling): Promise<BillingResult> {
+    // Retry schedule: immediate, 1 day, 3 days, 7 days
+    const retryDelays = [0, 86400000, 259200000, 604800000];
+
+    for (let attempt = 0; attempt < retryDelays.length; attempt++) {
+      if (attempt > 0) {
+        await ctx.executeTask(tasks.sendDunningEmail, billing.customerId, attempt);
+        await ctx.sleep(retryDelays[attempt]);
+      }
+
+      try {
+        const chargeId = await ctx.executeTask(
+          tasks.attemptCharge, billing.customerId, billing.amount, billing.paymentMethodId
+        );
+
+        await ctx.executeTask(tasks.recordPayment, billing.subscriptionId, chargeId);
+
+        return {
+          subscriptionId: billing.subscriptionId,
+          paid: true,
+          attempts: attempt + 1,
+          finalStatus: 'paid',
+        };
+      } catch (e) {
+        console.log(`Attempt ${attempt + 1} failed: ${e}`);
+      }
+    }
+
+    await ctx.executeTask(tasks.suspendSubscription, billing.subscriptionId);
+
+    return {
+      subscriptionId: billing.subscriptionId,
+      paid: false,
+      attempts: retryDelays.length,
+      finalStatus: 'suspended',
+    };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext
+from dataclasses import dataclass
+
+@dataclass
+class SubscriptionBilling:
+    subscription_id: str
+    customer_id: str
+    amount: float
+    payment_method_id: str
+
+@dataclass
+class BillingResult:
+    subscription_id: str
+    paid: bool
+    attempts: int
+    final_status: str
+
+@task
+async def attempt_charge(customer_id: str, amount: float, method_id: str) -> str:
+    charge = await gateway.charge(customer_id, amount, method_id)
+    return charge.id
+
+@task
+async def send_dunning_email(customer_id: str, attempt: int) -> None:
+    await email.send_payment_failed(customer_id, attempt)
+
+@task
+async def suspend_subscription(subscription_id: str) -> None:
+    await billing_service.suspend(subscription_id)
+
+@task
+async def record_payment(subscription_id: str, charge_id: str) -> None:
+    await billing_service.record_payment(subscription_id, charge_id)
+
+@workflow(name="subscription_billing", version="1.0.0")
+async def subscription_billing(ctx: WorkflowContext, bill: SubscriptionBilling) -> BillingResult:
+    # Retry schedule: immediate, 1 day, 3 days, 7 days
+    retry_delays = [0, 86400, 259200, 604800]
+
+    for attempt, delay in enumerate(retry_delays):
+        if attempt > 0:
+            await ctx.execute_task(send_dunning_email, bill.customer_id, attempt)
+            await ctx.sleep(delay)
+
+        try:
+            charge_id = await ctx.execute_task(
+                attempt_charge, bill.customer_id, bill.amount, bill.payment_method_id
+            )
+            await ctx.execute_task(record_payment, bill.subscription_id, charge_id)
+
+            return BillingResult(
+                subscription_id=bill.subscription_id,
+                paid=True,
+                attempts=attempt + 1,
+                final_status="paid",
+            )
+        except Exception as e:
+            print(f"Attempt {attempt + 1} failed: {e}")
+
+    await ctx.execute_task(suspend_subscription, bill.subscription_id)
+
+    return BillingResult(
+        subscription_id=bill.subscription_id,
+        paid=False,
+        attempts=len(retry_delays),
+        final_status="suspended",
+    )
+```
+
+</TabPanel>
+
+</Tabs>
+
+## Two layers of retries
+
+Don't confuse the dunning schedule with task retries — they solve different problems, and this workflow uses both:
+
+<div className="not-prose my-8 max-w-lg mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Task Retries vs. the Dunning Schedule</div>
+  </div>
+  <div className="grid grid-cols-2 gap-px bg-border-default">
+    <div className="bg-background px-4 py-3">
+      <div className="text-[10px] font-mono uppercase tracking-widest text-foreground-muted mb-2">Task retries</div>
+      <div className="text-xs font-medium text-foreground mb-1">Transient faults</div>
+      <p className="m-0 text-[10px] text-foreground-muted leading-relaxed">Gateway timeout, network blip. Retried automatically by the platform within seconds — the workflow code never sees them.</p>
+    </div>
+    <div className="bg-background px-4 py-3">
+      <div className="text-[10px] font-mono uppercase tracking-widest text-foreground-muted mb-2">Dunning schedule</div>
+      <div className="text-xs font-medium text-foreground mb-1">Business declines</div>
+      <p className="m-0 text-[10px] text-foreground-muted leading-relaxed">Insufficient funds, expired card. Surfaces as a task failure the workflow catches — answered with emails, days of waiting, and eventually suspension.</p>
+    </div>
+  </div>
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">The match on attempt_charge is the boundary: task retries happen below it, business policy above it.</span>
+  </div>
+</div>
+
+By the time the workflow's `match` sees an error from `attempt_charge`, the platform has already exhausted its retries for transient faults. What's left is a real decline — and that's a business event, not an infrastructure one.
+
+## Design notes
+
+- **Distinguish hard and soft declines.** A soft decline (insufficient funds) may resolve on payday, so the 1/3/7-day schedule earns its keep. A hard decline (stolen card, closed account) never will — branch on the decline code and suspend immediately instead of burning eleven days.
+- **Scope idempotency keys per attempt.** Unlike [one-shot payment processing](/guides/use-cases/financial-workflows/payment-processing#two-layers-of-idempotency), each dunning attempt is a *distinct* charge intent. Derive keys from (subscription, billing period, attempt) so retries of one attempt deduplicate without blocking the next attempt.
+- **The schedule is versioned logic.** This workflow lives for up to eleven days, and replay must walk the same path — treat the retry schedule as part of the workflow's versioned definition, not runtime config you mutate under running instances.
+- **Suspension is a journaled step too.** If `suspend_subscription` fails, the task retries; the workflow can't silently finish leaving a delinquent account active. Every subscription ends in exactly one recorded terminal state: `paid` or `suspended`.
+
+---
+
+## Next Steps
+
+- Next pattern: [Fraud Detection with Human Review](/guides/use-cases/financial-workflows/fraud-detection)
+- Previous: [Payment Processing with Saga Rollback](/guides/use-cases/financial-workflows/payment-processing)
+- Back to [Payment Workflows overview](/guides/use-cases/financial-workflows)

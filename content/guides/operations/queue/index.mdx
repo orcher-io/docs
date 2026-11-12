@@ -1,0 +1,52 @@
+---
+id: 'queue'
+title: 'Queues'
+description: 'Understand how Orcher task queues route work from the orchestrator to workers'
+sidebar_label: 'Queues'
+---
+
+A **queue** in Orcher is a named work distribution channel that connects the orchestrator to SDK workers. Each worker polls a single task queue for workflows, tasks, and actor operations.
+
+- **Decoupled dispatch** — The orchestrator inserts work into queues; workers poll independently
+- **Load distribution** — Multiple workers can poll the same queue for horizontal scaling
+- **Work isolation** — Different task types use different queues for resource-appropriate scaling
+- **Multi-tenancy** — Namespaces isolate queues between environments and tenants
+
+Workers specify their task queue when building the Worker. When a workflow starts or a task is dispatched, the orchestrator routes it to the matching queue, and the next available worker picks it up.
+
+---
+
+## How Queues Work
+
+### Dispatch: The Outbox Pattern
+
+When a workflow step produces new tasks, the orchestrator inserts them atomically using the **outbox pattern**:
+
+1. Workflow state change and outbox entry are written in a single PostgreSQL transaction
+2. The `OutboxProcessor` claims the entry (lease-based, with expiry for crash safety)
+3. The task is dispatched to workers via the polling manager or eager dispatch
+4. If the worker doesn't claim it in time, the lease expires and another processor retries
+
+This guarantees **at-least-once delivery** — no work is silently lost, even if the orchestrator crashes mid-dispatch.
+
+### Polling: Dual-Path System
+
+Workers poll for work using gRPC long-polling. Orcher supports two dispatch paths:
+
+**PostgreSQL path (default):**
+Workers call `poll_workflow_execution()` or `poll_task_execution()` with a 60-second long-polling timeout. The orchestrator uses `SELECT FOR UPDATE SKIP LOCKED` for atomic, contention-free claiming. When no work is available, the call blocks until notified or the timeout expires.
+
+**Redis fast path (optional):**
+When Redis is configured, the orchestrator pushes execution IDs to Redis lists via `LPUSH`. Workers use `BRPOP` to be told of it at once. The worker then claims the execution in PostgreSQL. If Redis is unavailable, workers automatically fall back to PostgreSQL polling.
+
+### Eager Dispatch
+
+When a task completes, the orchestrator can return the **next task** directly in the completion response. This skips the poll round-trip entirely for sequential workflows. The SDK automatically injects eager tasks into the worker's task channel.
+
+---
+
+## Next Steps
+
+- [Configuring Queues](/guides/operations/queue/configuration) — Assign workers, isolate workloads, and use namespaces
+- [Polling & Dead Letter Queue](/guides/operations/queue/polling) — Tune pollers, configure retries, and enable Redis fast path
+- [Monitoring & Troubleshooting](/guides/operations/queue/monitoring) — CLI commands, auto-scaling, and common issues

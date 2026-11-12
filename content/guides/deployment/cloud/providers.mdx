@@ -1,0 +1,113 @@
+---
+id: 'providers'
+title: 'Cloud Providers'
+description: 'Deploy Orcher on AWS (EKS, ECS), GCP (GKE, Cloud Run), and Azure (AKS) with provider-specific guides'
+sidebar_label: 'Cloud Providers'
+---
+
+## AWS
+
+### EKS (Elastic Kubernetes Service)
+
+The Kubernetes manifests in `services/orchestrator/k8s/` work directly on EKS:
+
+```bash
+# Configure kubectl for EKS
+aws eks update-kubeconfig --name your-cluster --region us-east-1
+
+# Create namespace and secrets
+kubectl create namespace orcher
+kubectl create secret generic orcher-secrets \
+  --namespace=orcher \
+  --from-literal=database-url='postgresql://orcher:PASSWORD@your-rds.us-east-1.rds.amazonaws.com:5432/orcher?sslmode=require' \
+  --from-literal=redis-url='redis://your-elasticache.us-east-1.cache.amazonaws.com:6379'
+
+# Deploy
+cd services/orchestrator/k8s
+kubectl apply -k .
+```
+
+For secrets, consider AWS Secrets Manager with the External Secrets Operator instead of plain Kubernetes secrets.
+
+### ECS (Elastic Container Service)
+
+Run the orchestrator as an ECS service with Fargate:
+
+1. Push the image to ECR
+2. Create a task definition with the container image, environment variables, port mappings (50051, 8080), and health check (`/health/live`)
+3. Create an ECS service with the task definition behind a Network Load Balancer (NLB) for gRPC
+4. Configure security groups to allow inbound on ports 50051 and 8080
+
+Key considerations for ECS:
+- Use **NLB** (not ALB) for gRPC traffic — ALB supports gRPC but NLB has lower latency
+- Set `DATABASE_URL` and `REDIS_URL` via ECS task definition secrets referencing Secrets Manager
+- Enable ECS Service Connect or Cloud Map for service discovery
+
+---
+
+## GCP
+
+### GKE (Google Kubernetes Engine)
+
+```bash
+# Configure kubectl for GKE
+gcloud container clusters get-credentials your-cluster --zone us-central1-a
+
+# Create namespace and secrets
+kubectl create namespace orcher
+kubectl create secret generic orcher-secrets \
+  --namespace=orcher \
+  --from-literal=database-url='postgresql://orcher:PASSWORD@/orcher?host=/cloudsql/project:region:instance' \
+  --from-literal=redis-url='redis://10.0.0.3:6379'
+
+# Deploy
+cd services/orchestrator/k8s
+kubectl apply -k .
+```
+
+For Cloud SQL, use the Cloud SQL Auth Proxy as a sidecar container for secure, IAM-authenticated connections without managing SSL certificates.
+
+### Cloud Run
+
+Cloud Run can host the orchestrator for lower-traffic deployments:
+
+1. Push the image to Artifact Registry
+2. Deploy with gRPC port mapping and Cloud SQL connection
+3. Set minimum instances to 1 (the orchestrator needs persistent connections)
+
+Cloud Run limitations to consider:
+- **Request timeout** — Maximum 60 minutes per request (sufficient for gRPC long-polling)
+- **Cold starts** — Set minimum instances > 0 to avoid startup latency
+- **VPC connector** — Required for Cloud SQL and Memorystore private IP access
+
+---
+
+## Azure
+
+### AKS (Azure Kubernetes Service)
+
+```bash
+# Configure kubectl for AKS
+az aks get-credentials --resource-group your-rg --name your-cluster
+
+# Create namespace and secrets
+kubectl create namespace orcher
+kubectl create secret generic orcher-secrets \
+  --namespace=orcher \
+  --from-literal=database-url='postgresql://orcher:PASSWORD@your-server.postgres.database.azure.com:5432/orcher?sslmode=require' \
+  --from-literal=redis-url='redis://your-cache.redis.cache.windows.net:6380,password=KEY,ssl=True'
+
+# Deploy
+cd services/orchestrator/k8s
+kubectl apply -k .
+```
+
+Azure Database for PostgreSQL Flexible Server includes built-in PgBouncer — enable it in the server parameters to avoid deploying a separate connection pooler.
+
+---
+
+## Next Steps
+
+- [Managed Databases](/guides/deployment/cloud/managed-databases) — PostgreSQL, PgBouncer, and Redis configuration
+- [Operations](/guides/deployment/cloud/operations) — High availability, monitoring, and secrets management
+- [Cloud Platforms Overview](/guides/deployment/cloud) — Architecture and container image setup

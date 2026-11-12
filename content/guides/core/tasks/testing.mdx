@@ -1,0 +1,498 @@
+---
+id: 'tasks-testing'
+title: 'Testing Tasks'
+description: 'Learn how to test tasks independently using mock contexts, and explore common task patterns for API integration and batch processing.'
+sidebar_label: 'Testing'
+---
+
+Tasks can be tested independently using mock context:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[cfg(test)]
+mod tests {
+use super::*;
+use orcher::testing::TestEnv;
+
+#[tokio::test]
+async fn test_send_email() -> Result<()> {
+    let mut env = TestEnv::new();
+
+    // Mock the task result the workflow will observe
+    env.mock_task("send_email").returns(Ok(EmailResult {
+        message_id: "test_123".to_string(),
+        sent: true,
+    }));
+
+    let input = EmailInput {
+        to: "test@example.com".to_string(),
+        subject: "Test".to_string(),
+        body: "Test body".to_string(),
+    };
+
+    // Drive the workflow that invokes the task
+    let message_id: String = env.execute_workflow("notify_user", input).await?;
+
+    assert!(!message_id.is_empty());
+    env.assert_task_called("send_email", 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_idempotency() -> Result<()> {
+    // Reset any global state
+    reset_test_state();
+
+    let mut env = TestEnv::new();
+    env.mock_task("process_payment").returns(Ok(payment_result()));
+
+    // Run the same workflow twice with identical input
+    let _first: PaymentResult = env
+        .execute_workflow("payment_workflow", payment_input())
+        .await?;
+    let _second: PaymentResult = env
+        .execute_workflow("payment_workflow", payment_input())
+        .await?;
+
+    // Verify no duplicate side effects occurred
+    assert_eq!(get_charge_count(), 1);
+    Ok(())
+}
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { TestWorkflowEnvironment } from '@orcher/sdk/testing';
+
+describe('Task Tests', () => {
+  let testEnv: TestWorkflowEnvironment;
+
+  beforeEach(async () => {
+testEnv = await TestWorkflowEnvironment.create();
+  });
+
+  afterEach(async () => {
+await testEnv.cleanup();
+  });
+
+  it('should send email successfully', async () => {
+const input: EmailInput = {
+  to: 'test@example.com',
+  subject: 'Test',
+  body: 'Test body',
+};
+
+// Mock the task result the workflow will observe
+testEnv.mockTask('sendEmail').returns({
+  messageId: 'test_123',
+  sent: true,
+});
+
+// Drive the workflow that invokes the task
+const messageId = await testEnv.executeWorkflow(NotifyUserWorkflow, input);
+
+expect(messageId).toBeDefined();
+  });
+
+  it('should be idempotent', async () => {
+resetTestState();
+
+testEnv.mockTask('processPayment').returns(paymentResult());
+
+// Run the same workflow twice with identical input
+const first = await testEnv.executeWorkflow(PaymentWorkflow, paymentInput());
+const second = await testEnv.executeWorkflow(PaymentWorkflow, paymentInput());
+expect(first).toBeDefined();
+expect(second).toBeDefined();
+
+// Verify no duplicate side effects occurred
+expect(getChargeCount()).toBe(1);
+  });
+});
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+import pytest
+from orcher.testing import TestWorkflowEnvironment
+
+@pytest.mark.asyncio
+async def test_send_email():
+# create() is a synchronous factory
+env = TestWorkflowEnvironment.create()
+
+# Mock the task result the workflow will observe
+env.mock_task("send_email").returns(
+    EmailResult(message_id="test_123", sent=True)
+)
+
+# Drive the workflow that invokes the task
+result = await env.execute_workflow(
+    NotifyUser,
+    {
+        "to": "test@example.com",
+        "subject": "Test",
+        "body": "Test body",
+    },
+)
+
+assert result is not None
+await env.cleanup()
+
+@pytest.mark.asyncio
+async def test_idempotency():
+# Reset any global state
+reset_test_state()
+
+env = TestWorkflowEnvironment.create()
+env.mock_task("process_payment").returns(payment_result())
+
+# Run the same workflow twice with identical input
+first = await env.execute_workflow(PaymentWorkflow, payment_input())
+second = await env.execute_workflow(PaymentWorkflow, payment_input())
+assert first is not None
+assert second is not None
+
+# Verify no duplicate side effects occurred
+assert get_charge_count() == 1
+await env.cleanup()
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+### Common Task Patterns
+
+These patterns show how to structure tasks for real-world use cases. Each example demonstrates proper error handling, retry safety, and integration with the `TaskContext`.
+
+### API Integration
+
+Tasks that call external HTTP APIs should handle transient errors (network timeouts, rate limits) with retries and use idempotency keys to prevent duplicate requests.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use std::time::Duration;
+
+#[task(
+name = "call_external_api",
+retry = 5,
+timeout_mins = 2
+)]
+pub async fn call_external_api(
+ctx: TaskContext,
+request: ApiRequest,
+) -> Result<ApiResponse> {
+let client = reqwest::Client::new();
+
+let response = client
+    .post(&request.endpoint)
+    .json(&request.payload)
+    .header("X-API-Key", get_api_key())
+    .timeout(Duration::from_secs(30))
+    .send()
+    .await
+    .context("API request failed")?;
+
+if ctx.is_retry() {
+    tracing::warn!(
+        "API call retry (attempt {})",
+        ctx.attempt()
+    );
+}
+
+let data = response
+    .json()
+    .await
+    .context("Failed to parse API response")?;
+
+Ok(data)
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Inside a @Tasks() class:
+@Task({
+  name: 'callExternalApi',
+  retryPolicy: { maxAttempts: 5 },
+  timeout: 120000, // 2 minutes
+})
+async callExternalApi(
+  ctx: TaskContext,
+  request: ApiRequest
+): Promise<ApiResponse> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+  try {
+const response = await fetch(request.endpoint, {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'X-API-Key': getApiKey(),
+  },
+  body: JSON.stringify(request.payload),
+  signal: controller.signal,
+});
+
+if (ctx.isRetry()) {
+  console.warn(`API call retry (attempt ${ctx.attempt()})`);
+}
+
+if (!response.ok) {
+  throw new Error(`API request failed: ${response.status}`);
+}
+
+return response.json();
+  } finally {
+clearTimeout(timeoutId);
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+import httpx
+from orcher import task, TaskContext
+from dataclasses import dataclass
+
+@dataclass
+class ApiRequest:
+endpoint: str
+payload: dict
+
+@task(
+name="call_external_api",
+retry_policy={"max_attempts": 5},
+timeout=120.0,  # 2 minutes
+)
+async def call_external_api(
+ctx: TaskContext,
+request: ApiRequest,
+) -> dict:
+async with httpx.AsyncClient(timeout=30.0) as client:
+    response = await client.post(
+        request.endpoint,
+        json=request.payload,
+        headers={"X-API-Key": get_api_key()},
+    )
+
+if ctx.attempt > 1:
+    print(f"API call retry (attempt {ctx.attempt})")
+
+response.raise_for_status()
+return response.json()
+```
+
+</TabPanel>
+
+</Tabs>
+
+### Batch Processing
+
+Batch tasks process collections of items in a single execution. Use heartbeats to report progress and enable resumption from the last processed item if the task is interrupted.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task(
+name = "process_batch_parallel",
+timeout_mins = 15
+)]
+pub async fn process_batch_parallel(
+ctx: TaskContext,
+items: Vec<Item>,
+) -> Result<BatchResult> {
+use futures::future::join_all;
+
+let chunk_size = 10;
+let chunks: Vec<_> = items.chunks(chunk_size).collect();
+
+let mut all_results = Vec::new();
+
+for (i, chunk) in chunks.iter().enumerate() {
+    // Process chunk in parallel
+    let futures = chunk.iter().map(|item| {
+        process_single_item(item.clone())
+    });
+
+    let results = join_all(futures).await;
+    all_results.extend(results);
+
+    // Heartbeat after each chunk
+    ctx.heartbeat_with_details(Some(Progress {
+        current: (i + 1) * chunk_size,
+        total: items.len(),
+    })).await?;
+}
+
+Ok(BatchResult {
+    processed: all_results.len(),
+    results: all_results,
+})
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Inside a @Tasks() class:
+@Task({
+  name: 'processBatchParallel',
+  timeout: 900000, // 15 minutes
+})
+async processBatchParallel(
+  ctx: TaskContext,
+  items: Item[]
+): Promise<BatchResult> {
+  const chunkSize = 10;
+  const chunks = [];
+
+  for (let i = 0; i < items.length; i += chunkSize) {
+chunks.push(items.slice(i, i + chunkSize));
+  }
+
+  const allResults: ProcessedItem[] = [];
+
+  for (let i = 0; i < chunks.length; i++) {
+// Process chunk in parallel
+const results = await Promise.all(
+  chunks[i].map(item => processSingleItem(item))
+);
+
+allResults.push(...results);
+
+// Heartbeat after each chunk
+await ctx.heartbeatWithDetails({
+  current: (i + 1) * chunkSize,
+  total: items.length,
+});
+  }
+
+  return {
+processed: allResults.length,
+results: allResults,
+  };
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+import asyncio
+from orcher import task, TaskContext
+from dataclasses import dataclass
+
+@dataclass
+class BatchResult:
+processed: int
+results: list
+
+@task(
+name="process_batch_parallel",
+timeout=900.0,  # 15 minutes
+)
+async def process_batch_parallel(
+ctx: TaskContext,
+items: list[Item],
+) -> BatchResult:
+chunk_size = 10
+chunks = [
+    items[i : i + chunk_size]
+    for i in range(0, len(items), chunk_size)
+]
+
+all_results = []
+
+for i, chunk in enumerate(chunks):
+    # Process chunk in parallel
+    results = await asyncio.gather(
+        *(process_single_item(item) for item in chunk)
+    )
+    all_results.extend(results)
+
+    # Heartbeat after each chunk
+    await ctx.heartbeat(details={
+        "current": (i + 1) * chunk_size,
+        "total": len(items),
+    })
+
+return BatchResult(
+    processed=len(all_results),
+    results=all_results,
+)
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+### Next Steps
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/tasks/best-practices" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Best Practices →</h3>
+      <p className="text-sm text-foreground-light">
+        Production-ready patterns and guidelines for tasks
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/tasks/idempotency" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">← Idempotency</h3>
+      <p className="text-sm text-foreground-light">
+        Idempotency patterns and error handling strategies
+      </p>
+    </div>
+  </Link>
+</div>

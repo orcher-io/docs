@@ -1,0 +1,360 @@
+---
+id: platform-engineers-operating
+title: "Operating in Production"
+description: "Monitoring, alerting, Prometheus metrics, debugging, backup and DR, upgrades, failure modes, and on-call runbooks"
+sidebar_label: 'Operating'
+---
+
+Now that Orcher is deployed and tuned, let's cover day-to-day operations.
+
+## Monitoring and Alerting
+
+**The Essential Metrics** (monitor these from day one):
+
+**1. Workflow Queue Depth**
+
+```sql
+-- Current queue depth by status
+SELECT status, COUNT(*) as count
+FROM workflow_executions
+WHERE status IN ('pending', 'queued', 'running')
+GROUP BY status;
+```
+
+**Alert when**: Pending count exceeds 2x your normal baseline for more than 5 minutes. This means workflows are arriving faster than workers can process them.
+
+**2. Workflow Completion Rate**
+
+```sql
+-- Completion rate over the last hour
+SELECT
+  COUNT(*) FILTER (WHERE status = 'completed') AS completed,
+  COUNT(*) FILTER (WHERE status = 'failed') AS failed,
+  ROUND(
+    100.0 * COUNT(*) FILTER (WHERE status = 'completed') /
+    NULLIF(COUNT(*), 0), 2
+  ) AS success_rate_pct
+FROM workflow_executions
+WHERE completed_at > NOW() - INTERVAL '1 hour';
+```
+
+**Alert when**: Success rate drops below 95% over a 15-minute window.
+
+**3. Workflow Duration (P95)**
+
+```sql
+-- P95 duration by workflow type
+SELECT
+  workflow_name,
+  PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_ms) AS p95_ms,
+  PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY duration_ms) AS p50_ms,
+  COUNT(*) AS total
+FROM workflow_executions
+WHERE status = 'completed'
+  AND completed_at > NOW() - INTERVAL '1 hour'
+GROUP BY workflow_name;
+```
+
+**Alert when**: P95 exceeds 3x the normal baseline.
+
+**4. Database Connection Count**
+
+```sql
+-- Active connections
+SELECT COUNT(*) AS active_connections,
+  MAX(pg_stat_activity.backend_type) AS connection_types
+FROM pg_stat_activity
+WHERE state = 'active';
+```
+
+**Alert when**: Connections exceed 80% of `max_connections`.
+
+**5. Dead Letter Queue Growth**
+
+```sql
+-- DLQ entries in the last hour
+SELECT COUNT(*) AS dlq_entries
+FROM dead_letter_queue
+WHERE failed_at > NOW() - INTERVAL '1 hour';
+```
+
+**Alert when**: Any new entries appear (DLQ entries indicate tasks that failed beyond retry limits).
+
+## Prometheus Metrics
+
+Export these metrics from your application for Grafana dashboards:
+
+```text
+# Workflow throughput
+orcher_workflows_started_total{workflow_name, namespace}
+orcher_workflows_completed_total{workflow_name, namespace, status}
+
+# Workflow duration
+orcher_workflow_duration_seconds{workflow_name, namespace, quantile}
+
+# Queue depth
+orcher_queue_depth{status, namespace}
+
+# Worker utilization
+orcher_worker_active_workflows{worker_id}
+orcher_worker_capacity{worker_id}
+
+# Database health
+orcher_db_connections_active
+orcher_db_query_duration_seconds{query_type}
+```
+
+## Debugging Production Issues
+
+**Problem 1: Workflows Are Stuck**
+
+Symptoms: Workflows stay in 'running' for too long.
+
+```sql
+-- Find stuck workflows
+SELECT
+  execution_id,
+  workflow_name,
+  status,
+  claimed_by,
+  claimed_at,
+  claim_timeout_at,
+  EXTRACT(EPOCH FROM (NOW() - claimed_at)) / 60 AS running_minutes
+FROM workflow_executions
+WHERE status = 'running'
+  AND claimed_at < NOW() - INTERVAL '10 minutes'
+ORDER BY claimed_at;
+```
+
+**Common causes:**
+- Worker crashed without releasing claim (wait for claim timeout, then auto-reclaim)
+- Task making external call that never returns (check task timeouts)
+- Deadlock between workflows (check for circular dependencies)
+
+**Resolution**: If a workflow is truly stuck, release its claim:
+
+```sql
+-- Release a stuck workflow's claim (it will be picked up by another worker)
+UPDATE workflow_executions
+SET claimed_by = NULL,
+    claimed_at = NULL,
+    claim_timeout_at = NULL,
+    status = 'pending'
+WHERE execution_id = 'the-stuck-execution-id'
+  AND status = 'running';
+```
+
+**Problem 2: High Failure Rate**
+
+```sql
+-- Find the most common errors
+SELECT
+  workflow_name,
+  error,
+  COUNT(*) AS failure_count,
+  MAX(completed_at) AS last_failure
+FROM workflow_executions
+WHERE status = 'failed'
+  AND completed_at > NOW() - INTERVAL '1 hour'
+GROUP BY workflow_name, error
+ORDER BY failure_count DESC
+LIMIT 20;
+```
+
+**Common causes:**
+- External service outage (check error messages for HTTP timeouts, connection refused)
+- Database connection exhaustion (check connection count)
+- Code bug in task implementation (check application logs)
+
+**Problem 3: Increasing Latency**
+
+```sql
+-- Compare current vs. historical duration
+SELECT
+  workflow_name,
+  AVG(duration_ms) FILTER (WHERE completed_at > NOW() - INTERVAL '1 hour') AS current_avg_ms,
+  AVG(duration_ms) FILTER (WHERE completed_at BETWEEN NOW() - INTERVAL '25 hours' AND NOW() - INTERVAL '24 hours') AS yesterday_avg_ms
+FROM workflow_executions
+WHERE status = 'completed'
+GROUP BY workflow_name
+HAVING AVG(duration_ms) FILTER (WHERE completed_at > NOW() - INTERVAL '1 hour') IS NOT NULL;
+```
+
+**Common causes:**
+- Database bloat (run VACUUM ANALYZE)
+- Too many concurrent workflows (check worker concurrency settings)
+- External service degradation (check task-level durations)
+- Missing indexes (check `pg_stat_user_tables` for sequential scans)
+
+## Backup and Disaster Recovery
+
+Since PostgreSQL is your only stateful component, backup strategy is straightforward.
+
+**Automated Backups (Managed PostgreSQL):**
+- Enable daily automated backups with 7-30 day retention
+- Enable point-in-time recovery (PITR) for sub-second RPO
+- Test restores quarterly
+
+**Self-Managed Backups:**
+
+```bash
+# Daily logical backup
+pg_dump -Fc -h postgres -U orcher -d orcher > backup_$(date +%Y%m%d).dump
+
+# Restore from backup
+pg_restore -h postgres -U orcher -d orcher_restored backup_20260317.dump
+```
+
+**For near-zero RPO**, use WAL archiving:
+
+```conf
+# postgresql.conf
+archive_mode = on
+archive_command = 'aws s3 cp %p s3://your-bucket/wal/%f'
+```
+
+**Recovery Time Objectives (RTO):**
+
+| Scenario | RTO | Strategy |
+|----------|-----|----------|
+| Worker pod crash | Seconds | Kubernetes auto-restart |
+| All workers down | 1-2 minutes | HPA scales up, workflows resume from journal |
+| Database failover (managed) | 30-60 seconds | Automatic Multi-AZ failover |
+| Database corruption | 5-30 minutes | Restore from backup + WAL replay |
+| Full region failure | 15-60 minutes | Restore in new region from cross-region backup |
+
+## Upgrade Strategies
+
+**Application Upgrades** (zero-downtime):
+
+```bash
+# Rolling update (zero downtime)
+kubectl set image deployment/orcher-api api=your-registry.com/orcher-app:v2.0
+kubectl set image deployment/orcher-worker worker=your-registry.com/orcher-app:v2.0
+
+# Monitor the rollout
+kubectl rollout status deployment/orcher-api -n orcher
+kubectl rollout status deployment/orcher-worker -n orcher
+
+# Rollback if something goes wrong
+kubectl rollout undo deployment/orcher-api -n orcher
+kubectl rollout undo deployment/orcher-worker -n orcher
+```
+
+**Key principle**: Since workers are stateless, you can upgrade them independently, and old and new workers can run simultaneously. But Orcher routes work by workflow name and task queue — **not by code version** — so during a rolling deploy an in-flight workflow may be picked up and continued by _either_ an old or a new worker. That is safe only when the change is replay-compatible (it doesn't alter the step sequence of workflows already in progress). For a breaking change to workflow logic, drain in-flight executions first or register the new logic under a distinct workflow name (see [Versioning](/guides/core/workflows/lifecycle)).
+
+**Database Schema Migrations:**
+
+Orcher manages its own schema migrations automatically on startup. When upgrading:
+1. Deploy new application version (it runs migrations on first connect)
+2. Migrations are forward-compatible (old version can still read the schema)
+3. Never run migrations manually unless Orcher docs specifically instruct you to
+
+## Common Failure Modes and Prevention
+
+| Failure Mode | Symptoms | Prevention | Resolution |
+|-------------|----------|------------|------------|
+| Database connection exhaustion | Timeouts, "too many connections" errors | Use PgBouncer, set appropriate `max_connections` | Restart PgBouncer, reduce worker concurrency |
+| Table bloat | Increasing query latency, disk usage growth | Aggressive autovacuum settings (see above) | Run `VACUUM FULL` during maintenance window |
+| Worker memory leak | OOMKilled pods, increasing memory usage | Set resource limits, monitor memory per workflow | Restart workers, investigate task code |
+| Long-running transactions | Lock contention, vacuum blocked | Set `statement_timeout`, `idle_in_transaction_session_timeout` | Terminate long transactions, investigate cause |
+| Network partition (app to DB) | Connection errors, workflow timeouts | Health checks, connection retry logic | Restore connectivity, workflows auto-resume |
+
+## On-Call Runbook
+
+**Severity 1: All Workflows Stopped**
+1. Check database connectivity: `psql -h postgres -U orcher -c 'SELECT 1'`
+2. Check worker pods: `kubectl get pods -n orcher -l component=worker`
+3. Check worker logs: `kubectl logs -l component=worker -n orcher --tail=50`
+4. If DB is down: check cloud provider status page, initiate failover if needed
+5. If workers are crash-looping: check recent deployment, rollback if needed
+
+**Severity 2: High Failure Rate**
+1. Check error distribution: Run the "most common errors" query above
+2. If external service: Check status page of the failing service, consider circuit breaker
+3. If database: Check connections, run `VACUUM ANALYZE`, check slow query log
+4. If code bug: Rollback to previous version
+
+**Severity 3: Increasing Latency**
+1. Check queue depth: If growing, add workers
+2. Check database: Run `EXPLAIN ANALYZE` on slow queries, check for missing indexes
+3. Check external services: Measure task-level durations
+4. Check vacuum: Ensure autovacuum is running and keeping up
+
+---
+
+## Production Checklist
+
+Before going live, verify each item:
+
+**Infrastructure:**
+- [ ] PostgreSQL deployed with HA (Multi-AZ or replication)
+- [ ] Automated backups enabled with tested restore procedure
+- [ ] PgBouncer or connection pooling configured
+- [ ] Resource limits set on all pods/processes
+- [ ] Health checks configured for API and worker deployments
+
+**Database:**
+- [ ] Required indexes verified (`idx_workflow_exec_*`)
+- [ ] Autovacuum tuned for write-heavy workload
+- [ ] `max_connections` sized for expected worker count
+- [ ] Slow query logging enabled (`log_min_duration_statement`)
+- [ ] Journal retention/cleanup strategy implemented
+
+**Monitoring:**
+- [ ] Queue depth metric with alerting
+- [ ] Workflow success rate metric with alerting
+- [ ] P95 workflow duration tracked
+- [ ] Database connection count monitored
+- [ ] Dead letter queue growth monitored
+- [ ] Disk space alerts configured
+
+**Operations:**
+- [ ] Rolling update strategy tested
+- [ ] Rollback procedure documented and tested
+- [ ] On-call runbook written and accessible
+- [ ] Disaster recovery plan documented
+- [ ] Team trained on debugging stuck workflows (SQL queries above)
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-4 not-prose">
+  <Link href="/guides/getting-started/architecture" className="block p-4 border border-neutral-200 dark:border-neutral-800 rounded-lg hover:border-blue-300 dark:hover:border-blue-700 transition-colors no-underline">
+    <strong className="block mb-1">Architecture Deep Dive</strong>
+    <span className="text-sm text-neutral-600 dark:text-neutral-400">Understand Orcher's internals in detail</span>
+  </Link>
+  <Link href="/guides/core/workflows" className="block p-4 border border-neutral-200 dark:border-neutral-800 rounded-lg hover:border-blue-300 dark:hover:border-blue-700 transition-colors no-underline">
+    <strong className="block mb-1">Building Workflows</strong>
+    <span className="text-sm text-neutral-600 dark:text-neutral-400">Learn to write workflows and tasks</span>
+  </Link>
+  <Link href="/guides/patterns/saga" className="block p-4 border border-neutral-200 dark:border-neutral-800 rounded-lg hover:border-blue-300 dark:hover:border-blue-700 transition-colors no-underline">
+    <strong className="block mb-1">Saga Pattern</strong>
+    <span className="text-sm text-neutral-600 dark:text-neutral-400">Distributed transactions with compensating actions</span>
+  </Link>
+  <Link href="/guides/use-cases/distributed-systems" className="block p-4 border border-neutral-200 dark:border-neutral-800 rounded-lg hover:border-blue-300 dark:hover:border-blue-700 transition-colors no-underline">
+    <strong className="block mb-1">Microservice Orchestration</strong>
+    <span className="text-sm text-neutral-600 dark:text-neutral-400">Coordinate work across services reliably</span>
+  </Link>
+</div>
+
+---
+
+## What You've Learned
+
+Congratulations on completing the Platform Engineers learning path! Here's what you now know:
+
+- **Orcher's two-component architecture** — stateless app processes + PostgreSQL — and why it's radically simpler to operate than traditional orchestration platforms
+- **How work flows through the system** — from API request to queue insert to worker poll to journal-backed execution with automatic recovery
+- **Deployment strategies** — Kubernetes manifests, Dockerfiles, and configuration for API and worker deployments across Rust, TypeScript, and Python
+- **Database selection and sizing** — managed vs. self-managed PostgreSQL, capacity planning formulas, and realistic cost estimates
+- **Scaling model** — the two independent dimensions (throughput vs. concurrency), worker pool tuning, and when to scale what
+- **Database performance tuning** — PostgreSQL configuration for write-heavy workloads, autovacuum strategy, connection pooling with PgBouncer
+- **Monitoring and alerting** — the five essential metrics (queue depth, success rate, P95 duration, connections, DLQ growth) and when to alert
+- **Debugging production issues** — SQL queries for stuck workflows, high failure rates, and latency investigations
+- **Backup and disaster recovery** — RTO targets, WAL archiving, and tested restore procedures
+- **Upgrade strategies** — zero-downtime rolling updates with rollback capability
+- **On-call runbooks** — severity-based response procedures for common failure modes
+
+[Back to Overview](/guides/learning/platform-engineers)

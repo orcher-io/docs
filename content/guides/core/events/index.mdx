@@ -1,0 +1,113 @@
+---
+id: 'events'
+title: 'Events & Signals'
+description: 'Learn how to handle events and external signals in Orcher workflows. Understand event-driven patterns, timeouts, and inter-workflow communication.'
+sidebar_label: 'Events'
+---
+
+Events (also called signals) enable workflows to receive asynchronous messages from external systems and other workflows. A workflow can pause execution with `wait_for_event()`, and an external caller — a REST API handler, another workflow, or a cron job — delivers the event with `send_event()`. The workflow resumes from exactly where it left off.
+
+### Key Characteristics
+
+- **Asynchronous** — Events are delivered without blocking the sender
+- **Buffered** — Events sent before the workflow calls `wait_for_event()` are queued and delivered immediately when the workflow is ready
+- **Durable** — Event delivery is journaled and survives crashes and replays
+- **Type-Safe** — Events carry strongly-typed payloads that are deserialized automatically
+- **Named** — Events are identified by string names, allowing a workflow to wait for different event types at different points
+
+<div className="not-prose my-8 max-w-lg mx-auto">
+  <div className="flex gap-4 items-start">
+    {/* Senders */}
+    <div className="flex flex-col gap-2" style={{ minWidth: '7rem' }}>
+      <div className="text-[10px] font-mono uppercase tracking-wider text-foreground-muted text-center mb-1">Senders</div>
+      {[
+        { name: 'REST API', detail: 'external' },
+        { name: 'Workflow B', detail: 'inter-workflow' },
+        { name: 'Cron Job', detail: 'scheduled' },
+      ].map((sender) => (
+        <div key={sender.name} className="border bg-surface-75 px-3 py-2 text-center">
+          <div className="text-[10px] font-medium text-foreground">{sender.name}</div>
+          <div className="text-[9px] text-foreground-muted">{sender.detail}</div>
+        </div>
+      ))}
+    </div>
+    {/* Arrows */}
+    <div className="flex flex-col gap-2 pt-8">
+      {[1, 2, 3].map((i) => (
+        <div key={i} className="flex items-center h-[2.75rem]">
+          <div className="h-px w-3 bg-border-strong" />
+          <span className="text-[8px] text-foreground-muted px-0.5">send_event</span>
+          <div className="h-px w-3 bg-border-strong" />
+          <span className="text-[8px] text-foreground-muted">►</span>
+        </div>
+      ))}
+    </div>
+    {/* Receiving workflow */}
+    <div className="flex-1 flex flex-col items-center">
+      <div className="text-[10px] font-mono uppercase tracking-wider text-foreground-muted mb-1">Workflow A</div>
+      <div className="border bg-surface-100 w-full px-4 py-2 text-center">
+        <div className="text-[10px] font-medium text-foreground">Execute tasks</div>
+      </div>
+      <div className="w-px h-2 bg-border-strong" />
+      <div className="border border-dashed bg-surface-75 w-full px-4 py-2.5 text-center">
+        <div className="text-[10px] font-mono text-foreground">wait_for_event("approval")</div>
+        <div className="text-[9px] text-foreground-muted mt-0.5">paused · zero resources</div>
+      </div>
+      <div className="w-px h-2 bg-border-strong" />
+      <div className="flex items-center gap-1 mb-1">
+        <span className="text-[9px] text-foreground-muted">event arrives or</span>
+        <span className="text-[9px] text-foreground-muted italic">timeout</span>
+      </div>
+      <div className="w-px h-2 bg-border-strong" />
+      <div className="border bg-surface-100 w-full px-4 py-2 text-center">
+        <div className="text-[10px] font-medium text-foreground">Resume execution</div>
+      </div>
+      <div className="w-px h-3 bg-border-strong" />
+      <div className="border bg-background px-4 py-1.5 text-center text-[9px] text-foreground-muted">
+        Buffered: events sent before wait are queued
+      </div>
+    </div>
+  </div>
+</div>
+
+---
+
+## Topics
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/events/receiving-events" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Receiving Events</h3>
+      <p className="text-sm text-foreground-light">
+        Wait for events, use timeouts, and handle multi-step approval chains
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/events/sending-events" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Sending Events & Signals</h3>
+      <p className="text-sm text-foreground-light">
+        Send events between workflows and understand event buffering
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/events/patterns" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Event Patterns</h3>
+      <p className="text-sm text-foreground-light">
+        Human approval, webhook callbacks, and dynamic workflow control
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/events/best-practices" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Best Practices & Troubleshooting</h3>
+      <p className="text-sm text-foreground-light">
+        Naming conventions, timeout strategies, and common issues
+      </p>
+    </div>
+  </Link>
+</div>

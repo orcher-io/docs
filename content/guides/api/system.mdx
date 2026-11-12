@@ -1,0 +1,307 @@
+---
+id: 'api-system'
+title: 'Version & System Endpoints'
+description: 'Version information, compatibility checks, and system status endpoints for the Orcher REST API'
+sidebar_label: 'Version & System'
+---
+
+## Overview
+
+The Version and System endpoints provide information about the Orcher orchestrator that serves the REST API: which API versions are supported, how to migrate between them, whether a given client is compatible with the server, and runtime system status. All endpoints in this group are public and do not require authentication.
+
+## Version Information
+
+### Get Current Version Info
+
+Returns an overview of all API versions, including which versions are currently supported, deprecated, or sunset.
+
+**Request**
+
+```bash
+curl http://localhost:8080/api/v1/version
+```
+
+**Response `200 OK`**
+
+```json
+{
+  "currentVersion": "v1",
+  "latestVersion": "v1",
+  "supportedVersions": ["v1"],
+  "deprecatedVersions": [],
+  "sunsetVersions": [],
+  "documentationUrl": "https://docs.orcher.io/api",
+  "changelogUrl": "https://docs.orcher.io/changelog"
+}
+```
+
+| Field                | Type     | Description                                      |
+| -------------------- | -------- | ------------------------------------------------ |
+| `currentVersion`     | string   | The current stable API version.                  |
+| `latestVersion`      | string   | The latest API version, including beta releases.  |
+| `supportedVersions`  | string[] | All actively supported version identifiers.       |
+| `deprecatedVersions` | object[] | Versions that are deprecated but still reachable. |
+| `sunsetVersions`     | string[] | Versions that have been fully retired.            |
+| `documentationUrl`   | string   | Link to the API documentation.                    |
+| `changelogUrl`       | string   | Link to the API changelog.                        |
+
+Each entry in `deprecatedVersions` contains:
+
+| Field                | Type   | Description                          |
+| -------------------- | ------ | ------------------------------------ |
+| `version`            | string | The deprecated version identifier.   |
+| `sunsetDate`         | string | ISO 8601 date when the version will be removed. |
+| `replacementVersion` | string | The recommended replacement version. |
+| `message`            | string | Human-readable deprecation notice.   |
+
+### Get Specific Version Info
+
+Returns detailed information about a single API version.
+
+**Request**
+
+```bash
+curl http://localhost:8080/api/v1/version/v1
+```
+
+**Response `200 OK`**
+
+```json
+{
+  "version": "v1",
+  "status": "stable",
+  "deprecated": false,
+  "sunset": false,
+  "deprecationInfo": null,
+  "documentation": "https://docs.orcher.io/api/v1"
+}
+```
+
+| Field             | Type        | Description                                                        |
+| ----------------- | ----------- | ------------------------------------------------------------------ |
+| `version`         | string      | Version identifier.                                                |
+| `status`          | string      | Lifecycle status: `development`, `beta`, `stable`, `deprecated`, or `sunset`. |
+| `deprecated`      | boolean     | Whether the version is deprecated.                                 |
+| `sunset`          | boolean     | Whether the version has been retired.                              |
+| `deprecationInfo` | object/null | Present only for deprecated versions (contains `sunsetDate`, `replacementVersion`, `message`). |
+| `documentation`   | string      | Link to version-specific documentation.                            |
+
+**Status Codes**
+
+| Status | Description                             |
+| ------ | --------------------------------------- |
+| 200    | Version info returned successfully.     |
+| 404    | The requested version does not exist.   |
+
+### Get Migration Guide
+
+Returns a migration guide between two API versions, including breaking changes, step-by-step instructions, and estimated effort.
+
+**Request**
+
+```bash
+curl http://localhost:8080/api/v1/version/migration/v1/v2
+```
+
+**Response `200 OK`**
+
+```json
+{
+  "fromVersion": "v1",
+  "toVersion": "v2",
+  "breakingChanges": [
+    {
+      "area": "Authentication",
+      "description": "JWT format changed",
+      "impact": "Medium",
+      "mitigation": "Update JWT parsing logic"
+    }
+  ],
+  "migrationSteps": [
+    "Update API base URL",
+    "Update authentication flow"
+  ],
+  "estimatedEffort": "Medium",
+  "documentationUrl": "https://docs.orcher.io/api/migration/v1-to-v2"
+}
+```
+
+| Field              | Type     | Description                                   |
+| ------------------ | -------- | --------------------------------------------- |
+| `fromVersion`      | string   | Source version.                                |
+| `toVersion`        | string   | Target version.                                |
+| `breakingChanges`  | object[] | List of breaking changes (see below).          |
+| `migrationSteps`   | string[] | Ordered list of migration actions.             |
+| `estimatedEffort`  | string   | Estimated effort level for the migration.      |
+| `documentationUrl` | string   | Link to the full migration guide.              |
+
+Each entry in `breakingChanges` contains:
+
+| Field        | Type   | Description                          |
+| ------------ | ------ | ------------------------------------ |
+| `area`       | string | Affected area (e.g., Authentication).|
+| `description`| string | What changed.                        |
+| `impact`     | string | Impact level (e.g., Low, Medium, High). |
+| `mitigation` | string | Recommended action to address the change. |
+
+**Status Codes**
+
+| Status | Description                                        |
+| ------ | -------------------------------------------------- |
+| 200    | Migration guide returned successfully.             |
+| 404    | One or both versions not found, or no guide exists.|
+
+### Check Version Compatibility
+
+Checks whether a given client API version is compatible with a given server API version.
+
+**Request**
+
+```bash
+curl http://localhost:8080/api/v1/version/compatibility/v1/v1
+```
+
+**Response `200 OK`**
+
+```json
+{
+  "compatible": true,
+  "status": "FullyCompatible",
+  "clientVersion": "v1",
+  "serverVersion": "v1",
+  "message": "Client and server versions are identical",
+  "recommendation": "Consider upgrading to the latest version for new features"
+}
+```
+
+| Field           | Type    | Description                                          |
+| --------------- | ------- | ---------------------------------------------------- |
+| `compatible`    | boolean | Whether the client can communicate with the server.  |
+| `status`        | string  | One of: `FullyCompatible`, `BackwardCompatible`, `CompatibleWithWarning`, `Incompatible`. |
+| `clientVersion` | string  | The client version that was checked.                 |
+| `serverVersion` | string  | The server version that was checked.                 |
+| `message`       | string  | Human-readable explanation.                          |
+| `recommendation`| string  | Suggested next action, if any.                       |
+
+**Status Codes**
+
+| Status | Description                              |
+| ------ | ---------------------------------------- |
+| 200    | Compatibility result returned.           |
+| 404    | One or both versions not found.          |
+
+## System Information
+
+### Get System Info
+
+Returns general metadata about the running orchestrator, including the service name, build version, and uptime.
+
+**Request**
+
+```bash
+curl http://localhost:8080/api/v1/system/info
+```
+
+**Response `200 OK`**
+
+```json
+{
+  "name": "<service name>",
+  "version": "0.1.0",
+  "uptime": "0d 0h 0m"
+}
+```
+
+| Field     | Type   | Description                              |
+| --------- | ------ | ---------------------------------------- |
+| `name`    | string | The service name.                        |
+| `version` | string | The build version from `Cargo.toml`.     |
+| `uptime`  | string | How long the service has been running.   |
+
+### Get System Status
+
+Returns the overall health status of the system and its individual components.
+
+**Request**
+
+```bash
+curl http://localhost:8080/api/v1/system/status
+```
+
+**Response `200 OK`**
+
+```json
+{
+  "status": "healthy",
+  "components": [
+    {
+      "name": "<component>",
+      "status": "healthy"
+    }
+  ]
+}
+```
+
+| Field        | Type     | Description                              |
+| ------------ | -------- | ---------------------------------------- |
+| `status`     | string   | Overall system status (e.g., `healthy`). |
+| `components` | object[] | Per-component status breakdown.          |
+
+Each entry in `components` contains:
+
+| Field    | Type   | Description                     |
+| -------- | ------ | ------------------------------- |
+| `name`   | string | Component name.                 |
+| `status` | string | Component status (e.g., `healthy`, `unknown`, `degraded`). |
+
+### Get Service Version
+
+Returns the build version string of the running orchestrator.
+
+**Request**
+
+```bash
+curl http://localhost:8080/api/v1/system/version
+```
+
+**Response `200 OK`**
+
+```json
+"0.1.0"
+```
+
+The response body is a plain JSON string containing the `CARGO_PKG_VERSION` of the orchestrator binary.
+
+### Get System Configuration
+
+Returns the current non-sensitive system configuration. Sensitive values such as passwords and API keys are redacted.
+
+**Request**
+
+```bash
+curl http://localhost:8080/api/v1/system/config
+```
+
+**Response `200 OK`**
+
+```json
+"configuration-placeholder"
+```
+
+> **Note:** This endpoint currently returns a placeholder value. It will be expanded in a future release to expose sanitized runtime configuration.
+
+## Common Status Codes
+
+All endpoints in this group may return the following status codes:
+
+| Status | Description                        |
+| ------ | ---------------------------------- |
+| 200    | Request completed successfully.    |
+| 404    | Requested resource not found.      |
+| 500    | Internal server error.             |
+
+## Next Steps
+
+- [API Overview](/guides/api) -- Introduction to the Orcher REST API and authentication.
+- [Health & System](/guides/api/health) -- Health check endpoints for readiness and liveness probes.
+- [Errors & Limits](/guides/api/errors-and-limits) -- Error response format and rate-limiting details.

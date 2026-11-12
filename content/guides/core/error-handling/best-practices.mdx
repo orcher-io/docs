@@ -1,0 +1,358 @@
+---
+id: 'error-best-practices'
+title: 'Best Practices & Troubleshooting'
+sidebar_label: 'Best Practices'
+---
+
+## Best Practices
+
+### 1. Use Appropriate Retry Policies
+
+Not all errors should be retried. Transient errors like network timeouts, rate limits, and temporary service outages benefit from retries. But deterministic errors — validation failures, authentication errors, or malformed input — will never succeed no matter how many times you retry. Only configure retries for operations that have a reasonable chance of succeeding on a subsequent attempt.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+<TabPanel id="rust" label="Rust">
+
+```rust
+// ✔ Good: Transient errors (network, service unavailable)
+#[task(name = "api_call", retry = 5)]
+
+// ✔ Good: Critical operations with bounded retries
+#[task(name = "payment", retry = 3)]
+
+// ❌ Bad: Validation errors (will never succeed on retry)
+#[task(name = "validate_email", retry = 5)]  // Don't retry validation
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// ✔ Good: Transient errors (network, service unavailable)
+@Task({ name: 'apiCall', retryPolicy: { maxAttempts: 5 } })
+
+// ✔ Good: Critical operations with bounded retries
+@Task({ name: 'payment', retryPolicy: { maxAttempts: 3 } })
+
+// ❌ Bad: Validation errors (will never succeed on retry)
+@Task({ name: 'validateEmail', retryPolicy: { maxAttempts: 5 } })  // Don't retry validation
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+# ✔ Good: Transient errors (network, service unavailable)
+@task(name="api_call", retry_policy={"max_attempts": 5})
+
+# ✔ Good: Critical operations with bounded retries
+@task(name="payment", retry_policy={"max_attempts": 3})
+
+# ❌ Bad: Validation errors (will never succeed on retry)
+@task(name="validate_email", retry_policy={"max_attempts": 5})  # Don't retry validation
+```
+
+</TabPanel>
+</Tabs>
+
+### 2. Implement Idempotent Compensation
+
+Compensation actions may themselves be retried if they fail, so they must be idempotent — safe to execute multiple times with the same result. Always check the current state before performing the compensation action. If the resource is already in the compensated state, return success immediately.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+<TabPanel id="rust" label="Rust">
+
+```rust
+// ✔ Good: Idempotent cancellation
+async fn cancel_booking(ctx: &WorkflowContext, booking_id: String) -> Result<()> {
+    // Check if already canceled
+    let status = get_booking_status(&booking_id).await?;
+    if status == "canceled" {
+        return Ok(()); // Already canceled, safe to skip
+    }
+
+    // Cancel the booking
+    booking_service::cancel(&booking_id).await
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// ✔ Good: Idempotent cancellation
+async function cancelBooking(ctx: WorkflowContext, bookingId: string): Promise<void> {
+  // Check if already canceled
+  const status = await getBookingStatus(bookingId);
+  if (status === 'canceled') {
+    return; // Already canceled, safe to skip
+  }
+
+  // Cancel the booking
+  await bookingService.cancel(bookingId);
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+# ✔ Good: Idempotent cancellation
+async def cancel_booking(ctx: WorkflowContext, booking_id: str) -> None:
+    # Check if already canceled
+    status = await get_booking_status(booking_id)
+    if status == "canceled":
+        return  # Already canceled, safe to skip
+
+    # Cancel the booking
+    await booking_service.cancel(booking_id)
+```
+
+</TabPanel>
+</Tabs>
+
+### 3. Log Error Context
+
+When errors occur in workflows, rich contextual logging is essential for debugging. Include the operation name, relevant identifiers, the current attempt number, and the error itself. Structured logging (key-value pairs rather than string interpolation) makes it much easier to search and filter logs in production monitoring tools.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+<TabPanel id="rust" label="Rust">
+
+```rust
+// ✔ Good: Detailed error context
+Err(e) => {
+    tracing::error!(
+        operation = "book_flight",
+        flight_id = %input.flight_id,
+        attempt = ctx.attempt(),
+        error = %e,
+        "Flight booking failed"
+    );
+    return Err(e);
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// ✔ Good: Detailed error context
+catch (e) {
+  console.error('Flight booking failed', {
+    operation: 'bookFlight',
+    flightId: input.flightId,
+    attempt: ctx.attempt(),
+    error: e,
+  });
+  throw e;
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+import logging
+
+logger = logging.getLogger(__name__)
+
+# ✔ Good: Detailed error context
+except Exception as e:
+    logger.error(
+        "Flight booking failed",
+        extra={
+            "operation": "book_flight",
+            "flight_id": input["flight_id"],
+            "attempt": ctx.attempt,
+            "error": str(e),
+        },
+    )
+    raise
+```
+
+</TabPanel>
+</Tabs>
+
+### 4. Set Reasonable Timeouts
+
+Timeouts should reflect the actual expected duration of the operation plus a safety margin. A task that normally completes in 10 seconds might have a 60-second timeout to account for slow networks, but a 1-second timeout would cause false failures. Conversely, setting no timeout at all risks workflows hanging indefinitely if an external service stops responding.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+<TabPanel id="rust" label="Rust">
+
+```rust
+// ✔ Good: Match timeout to expected duration
+#[task(name = "quick_validation", timeout_mins = 1)]
+#[task(name = "batch_import", timeout_mins = 30)]
+#[task(name = "ml_training", timeout_mins = 180)]
+
+// ❌ Bad: Timeout too short for operation
+#[task(name = "large_file_upload", timeout_mins = 1)]  // Will always timeout
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// ✔ Good: Match timeout to expected duration
+@Task({ name: 'quickValidation', timeout: 60000 })
+@Task({ name: 'batchImport', timeout: 1800000 })
+@Task({ name: 'mlTraining', timeout: 10800000 })
+
+// ❌ Bad: Timeout too short for operation
+@Task({ name: 'largeFileUpload', timeout: 60000 })  // Will always timeout
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+# ✔ Good: Match timeout to expected duration
+@task(name="quick_validation", timeout=60.0)
+@task(name="batch_import", timeout=1800.0)
+@task(name="ml_training", timeout=10800.0)
+
+# ❌ Bad: Timeout too short for operation
+@task(name="large_file_upload", timeout=60.0)  # Will always timeout
+```
+
+</TabPanel>
+</Tabs>
+
+### 5. Handle Partial Failures
+
+When processing a batch of items, a single failure shouldn't necessarily abort the entire batch. Collect results and errors separately, then return a summary that includes both successful outcomes and failure details. This lets downstream consumers decide how to handle the partial results — retry just the failed items, alert on the errors, or accept the partial dataset.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+<TabPanel id="rust" label="Rust">
+
+```rust
+// ✔ Good: Continue processing on partial failure
+let mut results = Vec::new();
+let mut errors = Vec::new();
+
+for item in items {
+    match ctx.execute_task(process_item, item).await {
+        Ok(result) => results.push(result),
+        Err(e) => errors.push(e),
+    }
+}
+
+// Return partial results with error summary
+Ok(BatchResult { results, errors })
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// ✔ Good: Continue processing on partial failure
+const results: Result[] = [];
+const errors: Error[] = [];
+
+for (const item of items) {
+  try {
+    const result = await ctx.executeTask(tasks.processItem, item);
+    results.push(result);
+  } catch (e) {
+    errors.push(e as Error);
+  }
+}
+
+// Return partial results with error summary
+return { results, errors };
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+# ✔ Good: Continue processing on partial failure
+results = []
+errors = []
+
+for item in items:
+    try:
+        result = await ctx.execute_task(process_item, item)
+        results.append(result)
+    except Exception as e:
+        errors.append(e)
+
+# Return partial results with error summary
+return {"results": results, "errors": [str(e) for e in errors]}
+```
+
+</TabPanel>
+</Tabs>
+
+---
+
+## Troubleshooting
+
+Below are common error handling issues you may encounter when building Orcher workflows, along with their root causes and recommended solutions.
+
+### Retry Not Working
+
+**Symptom**: Task fails without retrying
+
+**Causes**:
+- Task configured with `retry = 0` or no retry policy
+- Error is a non-retryable type (e.g., validation error returned as permanent failure)
+- The workflow itself failed before the task could be retried
+
+**Solutions**:
+- Verify the task's retry configuration in its decorator/attribute
+- Ensure the error is a transient type that can succeed on retry
+- Add logging with `ctx.attempt()` to confirm retry attempts are being made
+
+### Compensation Not Running
+
+**Symptom**: Resources not cleaned up after failure
+
+**Causes**:
+- Compensation logic placed outside the correct catch/error block
+- The compensation task itself failed silently
+- Workflow crashed or was terminated before reaching compensation code
+
+**Solutions**:
+- Ensure compensation calls are inside the catch/error block for each step
+- Make compensation tasks idempotent so they can be safely retried
+- Add logging to both the start and completion of compensation tasks
+
+### Circuit Breaker Not Opening
+
+**Symptom**: Failures continue despite reaching the threshold
+
+**Causes**:
+- Failure count stored in local memory but workflow runs on different instances
+- Threshold set too high relative to the number of operations
+- Each workflow instance maintains its own counter instead of a shared one
+
+**Solutions**:
+- Use shared state (database, Redis, or workflow state) for the failure counter
+- Lower the failure threshold to match your availability requirements
+- Consider implementing the circuit breaker as a separate workflow that other workflows query
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/tasks" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Tasks</h3>
+      <p className="text-sm text-foreground-light">
+        Configure retry policies, timeouts, and heartbeats for individual tasks
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/events" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Events</h3>
+      <p className="text-sm text-foreground-light">
+        Use signals and events for inter-workflow communication and external triggers
+      </p>
+    </div>
+  </Link>
+</div>

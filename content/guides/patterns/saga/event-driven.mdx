@@ -1,0 +1,383 @@
+---
+id: 'saga-event-driven'
+title: 'Event-Driven Saga'
+sidebar_label: 'Event-Driven'
+---
+
+## Event-Driven Saga
+
+In an event-driven saga, each step sends a request to an external service and then waits for a confirmation event before proceeding. This is the right approach when external services are asynchronous — such as a payment gateway that processes charges via webhooks, or a warehouse system that confirms inventory reservations through a message queue. The workflow uses `wait_for_event_with_timeout` to pause until the external system responds, with a timeout to handle cases where the external service never replies.
+
+<div className="not-prose my-8 max-w-lg mx-auto">
+  <div className="flex flex-col items-center">
+    {[
+      { action: 'Request payment', wait: 'wait_for_event("payment_confirmed")', timeout: '5 min', service: 'Payment Gateway' },
+      { action: 'Request inventory', wait: 'wait_for_event("inventory_reserved")', timeout: '10 min', service: 'Warehouse' },
+      { action: 'Request shipping', wait: 'wait_for_event("shipping_confirmed")', timeout: '30 min', service: 'Shipping API' },
+    ].map((step, i, arr) => (
+      <div key={i} className="w-full flex flex-col items-center">
+        {/* Action: send request to external service */}
+        <div className="w-full flex gap-3 items-center">
+          <div className="flex-1 border bg-background px-4 py-2 text-center">
+            <div className="text-[10px] font-medium text-foreground">{step.action}</div>
+          </div>
+          <div className="flex items-center">
+            <div className="h-px w-6 bg-border-strong" />
+            <span className="text-[8px] text-foreground-muted">►</span>
+          </div>
+          <div className="border bg-surface-75 px-3 py-2 text-center" style={{ minWidth: '7rem' }}>
+            <div className="text-[10px] font-medium text-foreground">{step.service}</div>
+            <div className="text-[9px] text-foreground-muted">external</div>
+          </div>
+        </div>
+        {/* Wait for event */}
+        <div className="w-px h-2 bg-border-strong" style={{ marginRight: 'auto', marginLeft: 'calc(50% - 5rem)' }} />
+        <div className="border border-dashed bg-surface-75 px-4 py-1.5 text-center" style={{ marginRight: 'auto' }}>
+          <div className="text-[10px] font-mono text-foreground-muted italic">{step.wait}</div>
+          <div className="text-[9px] text-foreground-muted">timeout: {step.timeout}</div>
+        </div>
+        {i < arr.length - 1 && <div className="w-px h-3 bg-border-strong" style={{ marginRight: 'auto', marginLeft: 'calc(50% - 5rem)' }} />}
+      </div>
+    ))}
+    <div className="w-px h-3 bg-border-strong" />
+    <div className="border bg-surface-100 px-5 py-2 text-center">
+      <div className="text-xs font-medium text-foreground">Order Complete</div>
+    </div>
+  </div>
+</div>
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use std::time::Duration;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum SagaEvent {
+    InventoryReserved { inventory_id: String },
+    PaymentAuthorized { payment_id: String },
+    ShipmentCreated { shipment_id: String },
+    StepFailed { step: String, reason: String },
+}
+
+// Event-driven saga
+#[workflow(name = "event_driven_saga", version = "1.0.0")]
+pub async fn event_driven_saga(
+    ctx: WorkflowContext,
+    order: OrderData,
+) -> Result<OrderResult> {
+    println!("Starting event-driven saga");
+
+    let mut state = SagaState::new(order.order_id.clone());
+
+    // Step 1: Reserve inventory (wait for external confirmation)
+    ctx.execute_task(request_inventory_reservation, order.items.clone()).await?;
+
+    let inventory_event: Option<SagaEvent> = ctx
+        .wait_for_event_with_timeout("inventory_result", Duration::from_secs(300))
+        .await?;
+
+    match inventory_event {
+        Some(SagaEvent::InventoryReserved { inventory_id }) => {
+            state.inventory_reserved = true;
+            state.inventory_id = Some(inventory_id);
+        }
+        Some(SagaEvent::StepFailed { reason, .. }) => {
+            println!("Inventory reservation failed: {}", reason);
+            return Ok(OrderResult {
+                order_id: order.order_id,
+                success: false,
+                ..Default::default()
+            });
+        }
+        None => {
+            println!("Inventory reservation timed out");
+            return Ok(OrderResult {
+                order_id: order.order_id,
+                success: false,
+                ..Default::default()
+            });
+        }
+        _ => unreachable!(),
+    }
+
+    // Step 2: Authorize payment (wait for external confirmation)
+    ctx.execute_task(request_payment_authorization, order.amount).await?;
+
+    let payment_event: Option<SagaEvent> = ctx
+        .wait_for_event_with_timeout("payment_result", Duration::from_secs(300))
+        .await?;
+
+    match payment_event {
+        Some(SagaEvent::PaymentAuthorized { payment_id }) => {
+            state.payment_captured = true;
+            state.payment_id = Some(payment_id);
+        }
+        Some(SagaEvent::StepFailed { reason, .. }) | None => {
+            println!("Payment failed, compensating");
+            compensate_saga(&ctx, &state).await?;
+            return Ok(OrderResult {
+                order_id: order.order_id,
+                success: false,
+                ..Default::default()
+            });
+        }
+        _ => unreachable!(),
+    }
+
+    // Step 3: Create shipment (wait for external confirmation)
+    ctx.execute_task(request_shipment_creation, order.order_id.clone()).await?;
+
+    let shipment_event: Option<SagaEvent> = ctx
+        .wait_for_event_with_timeout("shipment_result", Duration::from_secs(300))
+        .await?;
+
+    match shipment_event {
+        Some(SagaEvent::ShipmentCreated { shipment_id }) => {
+            state.shipment_created = true;
+            state.shipment_id = Some(shipment_id);
+        }
+        Some(SagaEvent::StepFailed { reason, .. }) | None => {
+            println!("Shipment failed, compensating");
+            compensate_saga(&ctx, &state).await?;
+            return Ok(OrderResult {
+                order_id: order.order_id,
+                success: false,
+                ..Default::default()
+            });
+        }
+        _ => unreachable!(),
+    }
+
+    println!("Event-driven saga completed");
+    Ok(OrderResult {
+        order_id: order.order_id,
+        success: true,
+        payment_id: state.payment_id,
+        inventory_id: state.inventory_id,
+        shipment_id: state.shipment_id,
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, WorkflowContext, createTaskRefs } from '@orcher/sdk';
+
+type SagaEvent =
+  | { type: 'InventoryReserved'; inventoryId: string }
+  | { type: 'PaymentAuthorized'; paymentId: string }
+  | { type: 'ShipmentCreated'; shipmentId: string }
+  | { type: 'StepFailed'; step: string; reason: string };
+
+@Tasks()
+class EventSagaTasks {
+  @Task({ name: 'requestInventoryReservation' })
+  async requestInventoryReservation(ctx: TaskContext, items: string[]): Promise<void> { /* ... */ }
+
+  @Task({ name: 'requestPaymentAuthorization' })
+  async requestPaymentAuthorization(ctx: TaskContext, amount: number): Promise<void> { /* ... */ }
+
+  @Task({ name: 'requestShipmentCreation' })
+  async requestShipmentCreation(ctx: TaskContext, orderId: string): Promise<void> { /* ... */ }
+}
+
+const eventTasks = createTaskRefs(EventSagaTasks);
+
+// Event-driven saga
+@Workflow()
+class EventDrivenSaga {
+  async execute(ctx: WorkflowContext, order: OrderData): Promise<OrderResult> {
+    console.log('Starting event-driven saga');
+
+    const state = createSagaState(`saga-${order.orderId}`);
+
+    // Step 1: Reserve inventory (wait for external confirmation)
+    await ctx.executeTask(eventTasks.requestInventoryReservation, order.items);
+
+    const inventoryEvent = await ctx.waitForEventWithTimeout<SagaEvent>(
+      'inventory_result',
+      300000,
+    );
+
+    if (!inventoryEvent || inventoryEvent.type !== 'InventoryReserved') {
+      console.log('Inventory reservation failed or timed out');
+      return { orderId: order.orderId, success: false };
+    }
+
+    state.inventoryReserved = true;
+    state.inventoryId = inventoryEvent.inventoryId;
+
+    // Step 2: Authorize payment (wait for external confirmation)
+    await ctx.executeTask(eventTasks.requestPaymentAuthorization, order.amount);
+
+    const paymentEvent = await ctx.waitForEventWithTimeout<SagaEvent>(
+      'payment_result',
+      300000,
+    );
+
+    if (!paymentEvent || paymentEvent.type !== 'PaymentAuthorized') {
+      console.log('Payment failed, compensating');
+      await compensateSaga(ctx, state);
+      return { orderId: order.orderId, success: false };
+    }
+
+    state.paymentCaptured = true;
+    state.paymentId = paymentEvent.paymentId;
+
+    // Step 3: Create shipment (wait for external confirmation)
+    await ctx.executeTask(eventTasks.requestShipmentCreation, order.orderId);
+
+    const shipmentEvent = await ctx.waitForEventWithTimeout<SagaEvent>(
+      'shipment_result',
+      300000,
+    );
+
+    if (!shipmentEvent || shipmentEvent.type !== 'ShipmentCreated') {
+      console.log('Shipment failed, compensating');
+      await compensateSaga(ctx, state);
+      return { orderId: order.orderId, success: false };
+    }
+
+    state.shipmentCreated = true;
+    state.shipmentId = shipmentEvent.shipmentId;
+
+    console.log('Event-driven saga completed');
+    return {
+      orderId: order.orderId,
+      success: true,
+      paymentId: state.paymentId,
+      inventoryId: state.inventoryId,
+      shipmentId: state.shipmentId,
+    };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext, TaskContext
+
+@task(name="request_inventory_reservation")
+async def request_inventory_reservation(ctx: TaskContext, items: list[str]) -> None:
+    # ... send reservation request to inventory service (async, responds via event)
+    pass
+
+@task(name="request_payment_authorization")
+async def request_payment_authorization(ctx: TaskContext, amount: float) -> None:
+    # ... send authorization request to payment gateway (responds via webhook)
+    pass
+
+@task(name="request_shipment_creation")
+async def request_shipment_creation(ctx: TaskContext, order_id: str) -> None:
+    # ... send shipment creation request to warehouse (responds via event)
+    pass
+
+# Event-driven saga
+@workflow(name="event_driven_saga", version="1.0.0")
+async def event_driven_saga(ctx: WorkflowContext, order: dict) -> dict:
+    print("Starting event-driven saga")
+
+    state = {
+        "saga_id": f"saga-{order['order_id']}",
+        "inventory_reserved": False, "inventory_id": None,
+        "payment_captured": False, "payment_id": None,
+        "shipment_created": False, "shipment_id": None,
+    }
+
+    # Step 1: Reserve inventory (wait for external confirmation)
+    await ctx.execute_task(request_inventory_reservation, order["items"])
+
+    inventory_event = await ctx.wait_for_event_with_timeout(
+        "inventory_result", timeout_ms=300000
+    )
+
+    if not inventory_event or inventory_event.get("type") != "InventoryReserved":
+        print("Inventory reservation failed or timed out")
+        return {"order_id": order["order_id"], "success": False}
+
+    state["inventory_reserved"] = True
+    state["inventory_id"] = inventory_event["inventory_id"]
+
+    # Step 2: Authorize payment (wait for external confirmation)
+    await ctx.execute_task(request_payment_authorization, order["amount"])
+
+    payment_event = await ctx.wait_for_event_with_timeout(
+        "payment_result", timeout_ms=300000
+    )
+
+    if not payment_event or payment_event.get("type") != "PaymentAuthorized":
+        print("Payment failed, compensating")
+        await compensate_saga(ctx, state)
+        return {"order_id": order["order_id"], "success": False}
+
+    state["payment_captured"] = True
+    state["payment_id"] = payment_event["payment_id"]
+
+    # Step 3: Create shipment (wait for external confirmation)
+    await ctx.execute_task(request_shipment_creation, order["order_id"])
+
+    shipment_event = await ctx.wait_for_event_with_timeout(
+        "shipment_result", timeout_ms=300000
+    )
+
+    if not shipment_event or shipment_event.get("type") != "ShipmentCreated":
+        print("Shipment failed, compensating")
+        await compensate_saga(ctx, state)
+        return {"order_id": order["order_id"], "success": False}
+
+    state["shipment_created"] = True
+    state["shipment_id"] = shipment_event["shipment_id"]
+
+    print("Event-driven saga completed")
+    return {
+        "order_id": order["order_id"],
+        "success": True,
+        "payment_id": state["payment_id"],
+        "inventory_id": state["inventory_id"],
+        "shipment_id": state["shipment_id"],
+    }
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/patterns/saga/best-practices" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Best Practices & Pitfalls</h3>
+      <p className="text-sm text-foreground-light">
+        Idempotency, compensation order, performance, and common mistakes to avoid
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/saga" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Saga Overview</h3>
+      <p className="text-sm text-foreground-light">
+        Return to the saga pattern overview and basic implementation
+      </p>
+    </div>
+  </Link>
+</div>

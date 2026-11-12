@@ -1,0 +1,276 @@
+---
+id: 'fan-out-partial-failures'
+title: 'Partial Failure Handling'
+description: 'Handle individual task failures in fan-out operations without aborting the entire batch'
+sidebar_label: 'Partial Failures'
+---
+
+## Partial Failure Handling
+
+In many batch processing scenarios, you want to continue processing remaining items even when some fail. Rather than aborting the entire fan-out on the first error, you catch individual task failures, record them separately, and report both successful results and failures to the caller. This gives consumers the information they need to retry just the failed items or accept the partial result.
+
+<div className="not-prose my-8 max-w-md mx-auto">
+  <div className="flex flex-col items-center">
+    <div className="text-[10px] font-mono uppercase tracking-wider text-foreground-muted mb-1">fan-out</div>
+    <div className="relative w-full">
+      <div className="absolute top-0 h-px bg-border-strong" style={{ left: 'calc(10% - 0.2rem)', right: 'calc(10% - 0.2rem)' }} />
+      <div className="grid grid-cols-5 gap-1.5">
+        {[
+          { label: 'Task 1', status: 'ok' },
+          { label: 'Task 2', status: 'fail' },
+          { label: 'Task 3', status: 'ok' },
+          { label: 'Task 4', status: 'ok' },
+          { label: 'Task 5', status: 'fail' },
+        ].map((t, i) => (
+          <div key={i} className="flex flex-col items-center">
+            <div className="w-px h-4 bg-border-strong" />
+            <div className={`border w-full py-2 px-1 text-center ${t.status === 'fail' ? 'border-red-400/30 bg-red-500/5' : 'bg-background'}`}>
+              <div className="text-[10px] font-medium text-foreground">{t.label}</div>
+              <div className={`text-[8px] mt-0.5 ${t.status === 'fail' ? 'text-red-400' : 'text-foreground-muted'}`}>
+                {t.status === 'fail' ? '✗ error' : '✓ ok'}
+              </div>
+            </div>
+            <div className="w-px h-4 bg-border-strong" />
+          </div>
+        ))}
+      </div>
+      <div className="absolute bottom-0 h-px bg-border-strong" style={{ left: 'calc(10% - 0.2rem)', right: 'calc(10% - 0.2rem)' }} />
+    </div>
+    <div className="text-[10px] font-mono uppercase tracking-wider text-foreground-muted mt-1">fan-in</div>
+    <div className="w-px h-4 bg-border-strong" />
+    {/* Split results */}
+    <div className="relative w-full">
+      <div className="absolute top-0 h-px bg-border-strong" style={{ left: 'calc(25% - 0.45rem)', right: 'calc(25% - 0.45rem)' }} />
+      <div className="flex gap-4">
+        <div className="flex-1 flex flex-col items-center">
+          <div className="w-px h-4 bg-border-strong" />
+          <div className="border bg-background w-full p-3 text-center flex flex-col justify-center min-h-[4rem]">
+            <div className="text-xs font-medium text-foreground">3 Succeeded</div>
+            <div className="text-[10px] text-foreground-muted mt-0.5">Return results</div>
+          </div>
+        </div>
+        <div className="flex-1 flex flex-col items-center">
+          <div className="w-px h-4 bg-border-strong" />
+          <div className="border border-red-400/30 bg-red-500/5 w-full p-3 text-center flex flex-col justify-center min-h-[4rem]">
+            <div className="text-xs font-medium text-foreground">2 Failed</div>
+            <div className="text-[10px] text-red-400 mt-0.5">Record errors</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ResilientResult {
+    job_id: String,
+    successful: Vec<ItemResult>,
+    failed: Vec<FailedItem>,
+    success_rate: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FailedItem {
+    item_id: String,
+    error: String,
+}
+
+// Fan-out with partial failure handling
+#[workflow(name = "resilient_processor", version = "1.0.0")]
+pub async fn resilient_processor(
+    ctx: WorkflowContext,
+    input: BatchInput,
+) -> Result<ResilientResult> {
+    println!("Processing {} items with failure tolerance", input.items.len());
+
+    let mut successful = Vec::new();
+    let mut failed = Vec::new();
+
+    // Fan-Out: Process all items
+    let mut task_handles = Vec::new();
+    for item in &input.items {
+        let task = ctx.execute_task(process_item, item.clone());
+        task_handles.push((item.clone(), task));
+    }
+
+    // Fan-In: Collect results, handling failures individually
+    for (item_id, task) in task_handles {
+        match task.await {
+            Ok(result) => {
+                successful.push(result);
+            }
+            Err(e) => {
+                println!("Item {} failed: {}", item_id, e);
+                failed.push(FailedItem {
+                    item_id,
+                    error: e.to_string(),
+                });
+            }
+        }
+    }
+
+    let success_rate = successful.len() as f64 / input.items.len() as f64;
+
+    println!("Processing complete: {} successful, {} failed ({}% success rate)",
+        successful.len(), failed.len(), (success_rate * 100.0) as i32);
+
+    Ok(ResilientResult {
+        job_id: input.job_id,
+        successful,
+        failed,
+        success_rate,
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, WorkflowContext, createTaskRefs } from '@orcher/sdk';
+
+interface ResilientResult {
+  jobId: string;
+  successful: ItemResult[];
+  failed: FailedItem[];
+  successRate: number;
+}
+
+interface FailedItem {
+  itemId: string;
+  error: string;
+}
+
+// Fan-out with partial failure handling
+@Workflow()
+class ResilientProcessor {
+  async run(ctx: WorkflowContext, input: BatchInput): Promise<ResilientResult> {
+    console.log(`Processing ${input.items.length} items with failure tolerance`);
+
+    // Fan-Out: Process all items, catching individual failures
+    const taskResults = await Promise.allSettled(
+      input.items.map(async (item) => {
+        const result = await ctx.executeTask(tasks.processItem, item);
+        return { item, result };
+      }),
+    );
+
+    // Fan-In: Separate successes from failures
+    const successful: ItemResult[] = [];
+    const failed: FailedItem[] = [];
+
+    for (let i = 0; i < taskResults.length; i++) {
+      const taskResult = taskResults[i];
+      if (taskResult.status === 'fulfilled') {
+        successful.push(taskResult.value.result);
+      } else {
+        console.log(`Item ${input.items[i]} failed:`, taskResult.reason);
+        failed.push({
+          itemId: input.items[i],
+          error: String(taskResult.reason),
+        });
+      }
+    }
+
+    const successRate = successful.length / input.items.length;
+
+    console.log(
+      `Processing complete: ${successful.length} successful, ${failed.length} failed (${Math.round(successRate * 100)}% success rate)`,
+    );
+
+    return {
+      jobId: input.jobId,
+      successful,
+      failed,
+      successRate,
+    };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, WorkflowContext
+
+# Fan-out with partial failure handling
+@workflow(name="resilient_processor", version="1.0.0")
+async def resilient_processor(ctx: WorkflowContext, input: dict) -> dict:
+    print(f"Processing {len(input['items'])} items with failure tolerance")
+
+    successful = []
+    failed = []
+
+    # Fan-Out: Process all items
+    task_handles = []
+    for item in input["items"]:
+        task_handles.append((item, ctx.execute_task(process_item, item)))
+
+    # Fan-In: Collect results, handling failures individually
+    for item_id, task_future in task_handles:
+        try:
+            result = await task_future
+            successful.append(result)
+        except Exception as e:
+            print(f"Item {item_id} failed: {e}")
+            failed.append({"item_id": item_id, "error": str(e)})
+
+    success_rate = len(successful) / len(input["items"]) if input["items"] else 0
+
+    print(
+        f"Processing complete: {len(successful)} successful, "
+        f"{len(failed)} failed ({int(success_rate * 100)}% success rate)"
+    )
+
+    return {
+        "job_id": input["job_id"],
+        "successful": successful,
+        "failed": failed,
+        "success_rate": success_rate,
+    }
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/patterns/fan-out-fan-in/rate-limiting" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Rate-Limited Fan-Out</h3>
+      <p className="text-sm text-foreground-light">
+        Control concurrency to protect downstream systems
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/fan-out-fan-in/dynamic" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Dynamic Fan-Out</h3>
+      <p className="text-sm text-foreground-light">
+        Determine parallelism from runtime data
+      </p>
+    </div>
+  </Link>
+</div>

@@ -1,0 +1,171 @@
+---
+id: 'events-best-practices'
+title: 'Best Practices & Troubleshooting'
+description: 'Best practices for event naming, timeouts, and type safety in Orcher workflows, plus troubleshooting common issues.'
+sidebar_label: 'Best Practices'
+---
+
+## Best Practices
+
+### 1. Use Descriptive Event Names
+
+Choose event names that describe *what happened*, not generic labels. Clear names make it easier to debug, trace, and document your workflow's event contract.
+
+```rust
+// Good: Clear, descriptive names
+ctx.wait_for_event("order_approved").await?;
+ctx.wait_for_event("payment_confirmed").await?;
+ctx.wait_for_event("shipment_delivered").await?;
+
+// Bad: Vague names — impossible to debug
+ctx.wait_for_event("event1").await?;
+ctx.wait_for_event("done").await?;
+ctx.wait_for_event("ok").await?;
+```
+
+### 2. Always Use Timeouts for External Events
+
+Any event that depends on an external system or human should have a timeout. Without a timeout, a lost webhook or forgotten approval blocks the workflow forever.
+
+```rust
+// Good: Has timeout and fallback logic
+let approval = ctx
+    .wait_for_event_with_timeout("approve", Duration::from_secs(3600))
+    .await?;
+
+match approval {
+    Some(data) => { /* Process approval */ }
+    None => { /* Handle timeout — escalate, auto-approve, or fail */ }
+}
+
+// Bad: No timeout — workflow hangs forever if event never arrives
+let approval = ctx.wait_for_event("approve").await?;
+```
+
+### 3. Type-Safe Event Payloads
+
+Define structs for event payloads to catch schema mismatches at compile time rather than runtime. Avoid parsing raw JSON values manually.
+
+```rust
+// Good: Strongly typed — compiler catches mismatches
+#[derive(Deserialize)]
+struct ApprovalEvent {
+    approved: bool,
+    approver_id: String,
+    timestamp: DateTime<Utc>,
+}
+
+let event: ApprovalEvent = ctx.wait_for_event("approve").await?;
+
+// Bad: Untyped JSON — runtime panics on missing fields
+let event: serde_json::Value = ctx.wait_for_event("approve").await?;
+let approved = event["approved"].as_bool().unwrap(); // Runtime crash if field missing
+```
+
+### 4. Handle Missing Events Gracefully
+
+When using timeouts, always handle the `None` case explicitly. Use default behavior, escalation, or clean failure — never `.unwrap()` or `.expect()` on a timeout result.
+
+```rust
+// Good: Explicit handling of timeout case
+let event = ctx
+    .wait_for_event_with_timeout("optional_event", timeout)
+    .await?;
+
+let result = match event {
+    Some(data) => process_with_event(data),
+    None => use_default_behavior(),
+};
+
+// Bad: Panics if event times out
+let event = ctx
+    .wait_for_event_with_timeout("optional_event", timeout)
+    .await?
+    .expect("Event required!"); // Crashes on timeout
+```
+
+### 5. Document Event Contracts
+
+Document which events a workflow accepts, their payload types, and timeout behavior. This is the contract between the workflow and its callers — without documentation, event names and payloads become tribal knowledge.
+
+```rust
+/// Order approval workflow
+///
+/// **Events accepted:**
+/// - `approve` — Manager approval decision
+///   - Payload: `ApprovalData { approved: bool, approver: String, reason: String }`
+///   - Timeout: 24 hours (auto-escalates)
+///
+/// - `expedite` — Request expedited processing
+///   - Payload: `bool`
+///   - Optional, no timeout
+#[workflow]
+pub async fn order_workflow(
+    ctx: WorkflowContext,
+    input: OrderInput,
+) -> Result<OrderResult> {
+    // ...
+}
+```
+
+---
+
+## Troubleshooting
+
+If events aren't behaving as expected, these are the most common issues and how to resolve them.
+
+### Event Not Delivered
+
+**Symptom**: Workflow hangs waiting for an event that was sent.
+
+**Common causes**:
+- Event name mismatch — names are case-sensitive and must match exactly
+- Wrong workflow ID — event sent to a different workflow instance
+- Workflow not yet started — event sent before the workflow begins execution (events are buffered, but the workflow must exist)
+
+**Solutions**:
+- Verify event names match between sender and receiver
+- Log the workflow ID on both sides and confirm they match
+- Use event buffering — it's safe to send events before `wait_for_event()` is called
+
+### Timeout Too Short
+
+**Symptom**: Events arrive after the timeout expires.
+
+**Solutions**:
+- Account for network latency and processing time in timeout values
+- Use longer timeouts for human interactions (hours/days) vs. system callbacks (seconds/minutes)
+- Monitor event delivery latency to tune timeouts appropriately
+
+### Event Payload Errors
+
+**Symptom**: Deserialization errors when receiving events.
+
+**Solutions**:
+- Ensure the sender's payload structure matches the receiver's expected type exactly
+- Use the same serialization format (JSON) on both sides
+- Add versioning to payload types if the schema evolves over time
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/state-management" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">State Management</h3>
+      <p className="text-sm text-foreground-light">
+        Manage workflow state and query it from external systems
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/error-handling" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Error Handling</h3>
+      <p className="text-sm text-foreground-light">
+        Handle errors, retries, and compensation in workflows
+      </p>
+    </div>
+  </Link>
+</div>

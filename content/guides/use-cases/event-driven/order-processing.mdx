@@ -1,0 +1,291 @@
+---
+id: 'event-order-processing'
+title: 'Event-Driven Order Processing'
+sidebar_label: 'Order Processing'
+---
+
+The most common event-driven pattern is reacting to domain events and triggering side effects. When an order is created, reserve inventory. When payment is received, create a shipment. When an order is cancelled, release the reservation. Each event handler is a workflow that executes tasks durably — if the worker crashes after reserving inventory but before emitting the confirmation event, replay picks up from the last checkpoint.
+
+## How it works
+
+One workflow, `handle_order_event`, is the dispatcher: it matches on the event type and runs the matching reaction chain. Each incoming event starts its own execution of this workflow, so a thousand orders a minute is a thousand independent, individually-journaled runs.
+
+<div className="not-prose my-8 max-w-xl mx-auto">
+  <div className="flex justify-center">
+    <div className="border bg-surface-100 px-6 py-2.5 text-center">
+      <div className="text-[11px] font-medium font-mono text-foreground">handle_order_event</div>
+      <div className="text-[10px] text-foreground-muted mt-0.5">one execution per event · matches on event_type</div>
+    </div>
+  </div>
+  <div className="flex justify-center">
+    <div className="flex items-center gap-1.5">
+      <div className="w-px h-6 bg-border-strong" />
+      <span className="text-[10px] font-mono text-foreground-muted">match event_type</span>
+    </div>
+  </div>
+  <div className="grid grid-cols-3 gap-3">
+    {[
+      { evt: 'order.created', chain: 'reserve_inventory → notify' },
+      { evt: 'payment.received', chain: 'create_shipment → notify' },
+      { evt: 'order.cancelled', chain: 'release_inventory → notify' },
+    ].map((r) => (
+      <div key={r.evt} className="border bg-surface-75 px-2 py-2 text-center">
+        <div className="text-[10px] font-medium font-mono text-foreground">{r.evt}</div>
+        <div className="text-[9px] text-foreground-muted mt-1">{r.chain}</div>
+      </div>
+    ))}
+  </div>
+  <p className="text-[10px] text-foreground-muted text-center mt-3 mb-0">
+    Unmatched event types fall through the <code className="text-[9px]">_</code> arm and are ignored — new events don't break old handlers.
+  </p>
+</div>
+
+## Example: an order event dispatcher
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="typescript"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[task]
+async fn reserve_inventory(items: Vec<OrderItem>) -> Result<ReservationId> {
+    inventory_client::reserve(items).await
+}
+
+#[task]
+async fn create_shipment(order_id: String) -> Result<TrackingNumber> {
+    shipping_client::create_shipment(&order_id).await
+}
+
+#[task]
+async fn release_inventory(order_id: String) -> Result<()> {
+    inventory_client::release(&order_id).await
+}
+
+#[task]
+async fn send_notification(input: NotificationInput) -> Result<()> {
+    notification_client::send(input).await
+}
+
+#[workflow(name = "handle_order_event", version = "1.0.0")]
+async fn handle_order_event(
+    ctx: WorkflowContext,
+    event: OrderEvent,
+) -> Result<()> {
+    match event.event_type.as_str() {
+        "order.created" => {
+            let reservation = ctx.execute_task(
+                reserve_inventory, event.items.unwrap(),
+            ).await?;
+            ctx.execute_task(send_notification, NotificationInput {
+                user_id: event.user_id,
+                message: format!("Order {} confirmed, reservation {}", event.order_id, reservation),
+            }).await?;
+        }
+        "payment.received" => {
+            let tracking = ctx.execute_task(
+                create_shipment, event.order_id.clone(),
+            ).await?;
+            ctx.execute_task(send_notification, NotificationInput {
+                user_id: event.user_id,
+                message: format!("Order {} shipped, tracking {}", event.order_id, tracking),
+            }).await?;
+        }
+        "order.cancelled" => {
+            ctx.execute_task(release_inventory, event.order_id.clone()).await?;
+            ctx.execute_task(send_notification, NotificationInput {
+                user_id: event.user_id,
+                message: format!("Order {} cancelled", event.order_id),
+            }).await?;
+        }
+        _ => {} // Ignore unknown events
+    }
+    Ok(())
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import {
+  Workflow,
+  Tasks,
+  Task,
+  WorkflowContext,
+  createTaskRefs,
+} from '@orcher/sdk';
+
+@Tasks()
+class OrderEventTasks {
+  @Task()
+  async reserveInventory(items: OrderItem[]): Promise<string> {
+    return await inventoryClient.reserve(items);
+  }
+
+  @Task()
+  async createShipment(orderId: string): Promise<string> {
+    return await shippingClient.createShipment(orderId);
+  }
+
+  @Task()
+  async releaseInventory(orderId: string): Promise<void> {
+    await inventoryClient.release(orderId);
+  }
+
+  @Task()
+  async sendNotification(input: NotificationInput): Promise<void> {
+    await notificationClient.send(input);
+  }
+}
+
+const tasks = createTaskRefs(OrderEventTasks);
+
+@Workflow({ name: 'handle_order_event', version: '1.0.0' })
+class HandleOrderEvent {
+  async run(ctx: WorkflowContext, event: OrderEvent): Promise<void> {
+    switch (event.eventType) {
+      case 'order.created': {
+        const reservation = await ctx.executeTask(
+          tasks.reserveInventory, event.items!,
+        );
+        await ctx.executeTask(tasks.sendNotification, {
+          userId: event.userId,
+          message: `Order ${event.orderId} confirmed, reservation ${reservation}`,
+        });
+        break;
+      }
+      case 'payment.received': {
+        const tracking = await ctx.executeTask(
+          tasks.createShipment, event.orderId,
+        );
+        await ctx.executeTask(tasks.sendNotification, {
+          userId: event.userId,
+          message: `Order ${event.orderId} shipped, tracking ${tracking}`,
+        });
+        break;
+      }
+      case 'order.cancelled': {
+        await ctx.executeTask(tasks.releaseInventory, event.orderId);
+        await ctx.executeTask(tasks.sendNotification, {
+          userId: event.userId,
+          message: `Order ${event.orderId} cancelled`,
+        });
+        break;
+      }
+    }
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext
+
+@task
+async def reserve_inventory(items: list[OrderItem]) -> str:
+    return await inventory_client.reserve(items)
+
+@task
+async def create_shipment(order_id: str) -> str:
+    return await shipping_client.create_shipment(order_id)
+
+@task
+async def release_inventory(order_id: str) -> None:
+    await inventory_client.release(order_id)
+
+@task
+async def send_notification(input: NotificationInput) -> None:
+    await notification_client.send(input)
+
+@workflow(name="handle_order_event", version="1.0.0")
+async def handle_order_event(ctx: WorkflowContext, event: OrderEvent) -> None:
+    if event.event_type == "order.created":
+        reservation = await ctx.execute_task(reserve_inventory, event.items)
+        await ctx.execute_task(send_notification, NotificationInput(
+            user_id=event.user_id,
+            message=f"Order {event.order_id} confirmed, reservation {reservation}",
+        ))
+
+    elif event.event_type == "payment.received":
+        tracking = await ctx.execute_task(create_shipment, event.order_id)
+        await ctx.execute_task(send_notification, NotificationInput(
+            user_id=event.user_id,
+            message=f"Order {event.order_id} shipped, tracking {tracking}",
+        ))
+
+    elif event.event_type == "order.cancelled":
+        await ctx.execute_task(release_inventory, event.order_id)
+        await ctx.execute_task(send_notification, NotificationInput(
+            user_id=event.user_id,
+            message=f"Order {event.order_id} cancelled",
+        ))
+```
+
+</TabPanel>
+
+</Tabs>
+
+Each event triggers a new workflow execution. If your service processes 1,000 `order.created` events per minute, that's 1,000 independent workflow executions — each with its own journal, its own retry logic, and its own crash recovery. You can trigger these workflows from any external source (webhook endpoint, message queue consumer, or the CLI).
+
+## The two guarantees an event bus won't give you
+
+Durable execution makes each *reaction* reliable, but the *delivery* still comes from your event source — and real event buses are at-least-once and unordered. Both leak into this handler:
+
+<div className="not-prose my-8 max-w-lg mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">What the Handler Must Tolerate</div>
+  </div>
+  <div className="grid grid-cols-2 gap-px bg-border-default">
+    <div className="bg-background px-4 py-3">
+      <div className="text-[10px] font-mono uppercase tracking-widest text-foreground-muted mb-2">Duplicate delivery</div>
+      <div className="text-xs font-medium text-foreground mb-1">The same event, twice</div>
+      <p className="m-0 text-[10px] text-foreground-muted leading-relaxed">At-least-once means <code className="text-[9px]">order.created</code> can arrive twice — two executions, two reservations, unless <code className="text-[9px]">reserve_inventory</code> is idempotent on the order ID.</p>
+    </div>
+    <div className="bg-background px-4 py-3">
+      <div className="text-[10px] font-mono uppercase tracking-widest text-foreground-muted mb-2">Out-of-order arrival</div>
+      <div className="text-xs font-medium text-foreground mb-1"><code className="text-[10px]">payment</code> before <code className="text-[10px]">created</code></div>
+      <p className="m-0 text-[10px] text-foreground-muted leading-relaxed">Separate executions have no ordering. A shipment handler that assumes the order already exists will fail if payment lands first.</p>
+    </div>
+  </div>
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Durable reactions ≠ ordered, deduplicated delivery — the handler owns those.</span>
+  </div>
+</div>
+
+When ordering actually matters, don't try to sort events in the dispatcher — route them to a per-entity [actor](/guides/use-cases/event-driven/stateful-actors), whose single-writer guarantee applies each event against the entity's current state regardless of arrival order.
+
+## Design notes
+
+- **Make each reaction idempotent.** Derive downstream keys from the event (order ID, a dedupe key on the event itself) so a redelivered event is a no-op — the same defense as [payment processing](/guides/use-cases/financial-workflows/payment-processing#two-layers-of-idempotency).
+- **The `_` arm is a feature.** Ignoring unknown event types lets producers add new events before this consumer learns to handle them — forward compatibility for free. Log the ignored type so a genuinely-missed handler is visible.
+- **One handler per event keeps failures isolated.** A poison event that always fails retries and parks *its own* execution; the other 999 orders that minute are untouched. Contrast a single loop consuming a partition, where one bad message can stall everything behind it.
+- **The dispatcher grows into child workflows.** As each arm gains steps, a fat `match` becomes hard to read and test. Give each event type its own [child workflow](/guides/use-cases/distributed-systems/child-workflows#child-workflow-or-plain-task) and let the dispatcher just route.
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-4 not-prose">
+  <Link href="/guides/use-cases/event-driven/stateful-actors" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Stateful Actors</h3>
+    <p className="text-sm text-foreground-light">Maintain per-entity state with single-writer guarantees and event sourcing.</p>
+  </Link>
+  <Link href="/guides/use-cases/event-driven/best-practices" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Best Practices</h3>
+    <p className="text-sm text-foreground-light">Design guidelines for event-driven systems and actors.</p>
+  </Link>
+</div>

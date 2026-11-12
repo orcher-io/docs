@@ -1,0 +1,162 @@
+---
+id: python-tasks
+title: Tasks
+description: Define tasks with the Python SDK, with retry policies, timeouts, heartbeats, cancellation, dependency injection and payload limits
+sidebar_label: 'Tasks'
+---
+
+A task is a unit of work a workflow schedules and a worker runs. Unlike workflow code, a task can do anything: call other services, write to a database, send an email. The engine journals its result, so a replayed workflow reuses the result instead of running the task again.
+
+There are two ways to define tasks:
+
+- **Functions** decorated with `@task`.
+- **Methods** decorated with `@task` on a class decorated with `@tasks`, when the tasks share dependencies such as clients or connection pools.
+
+---
+
+## Defining a task
+
+The first parameter is the `TaskContext`; the rest are the task's inputs, which workflows pass as keyword arguments:
+
+<$CodeSample path="python/tasks/standalone.py" region="task" />
+
+| Option | Default | Description |
+|---|---|---|
+| `name` | required | The task's name, unique in the worker |
+| `retry_policy` | engine default | A `RetryPolicy`, or a dict (see [Retries](#retries)) |
+| `retry` | none | Shorthand for `RetryPolicy(max_attempts=retry)`; ignored when `retry_policy` is given |
+| `timeout` | 300 seconds | How long one attempt may run, in seconds |
+| `heartbeat_timeout` | engine default, 60 seconds | How long an attempt may go without a heartbeat, in seconds |
+
+A workflow can override `retry_policy`, `timeout` and `heartbeat_timeout` for a single call; see [per-call options](/guides/sdk/python/workflows#per-call-options).
+
+<$CodeSample path="python/tasks/standalone.py" region="shorthand" />
+
+A plain (non-`async`) function is a task too. The worker runs it in a thread pool, so blocking calls don't stall the worker's event loop; for CPU-bound work, hand the worker a process pool with [`task_executor()`](/guides/sdk/python/worker#builder-reference).
+
+<$CodeSample path="python/tasks/standalone.py" region="sync" />
+
+---
+
+## Task classes
+
+`@tasks` on a class registers each of its `@task` methods. Construct the class with its dependencies:
+
+<$CodeSample path="python/tasks/groups.py" region="class" />
+
+In a workflow, refer to a method through the class:
+
+<$CodeSample path="python/tasks/groups.py" region="workflow" />
+
+Give the worker the instance to run the tasks on:
+
+<$CodeSample path="python/tasks/groups.py" region="worker" />
+
+A class whose constructor takes no arguments needs no instance: the worker creates one. A class that needs arguments and has no registered instance stops the worker at startup with an error, rather than failing its first task.
+
+---
+
+## Tasks run at least once
+
+A task can run more than once: the engine retries an attempt that failed, and an attempt whose worker died is timed out and run again. The workflow still sees one result, because only a completed task's result is journaled, but the side effects of an attempt that didn't complete may already have happened.
+
+So make tasks idempotent. Most services accept an idempotency key; build one that is the same for every attempt of the same call, such as the workflow id and the task id (both stable across retries), as `charge_card` above does:
+
+<$CodeSample path="python/tasks/groups.py" region="key" />
+
+Don't generate the key inside the task with `uuid4()` or the clock: a retry would get a new one.
+
+---
+
+## Retries
+
+A `RetryPolicy` has these fields:
+
+| Field | Default | Description |
+|---|---|---|
+| `max_attempts` | `3` | Attempts in all, the first included |
+| `initial_interval` | `timedelta(seconds=1)` | Wait before the second attempt |
+| `max_interval` | `timedelta(seconds=60)` | Cap on the wait between attempts |
+| `backoff_coefficient` | `2.0` | Multiplier applied to the wait after each attempt |
+| `non_retryable_error_types` | `[]` | Exception class names that are never retried |
+
+The engine honors whole-second intervals and rounds sub-second ones down. A task with no policy gets the engine's default.
+
+### Errors that shouldn't be retried
+
+A failure's type is the exception's class name (`CardDeclined`, not `payments.CardDeclined`). List the types never to retry in the policy, or set `non_retryable = True` on the exception class (or on one instance before raising it):
+
+<$CodeSample path="python/tasks/retries.py" region="non-retryable" />
+
+When a task fails for good, the workflow's `execute_task` call raises [`TaskError`](/guides/sdk/python/workflows#when-a-task-fails).
+
+### Attempts
+
+`ctx.attempt` counts from 1, and `ctx.is_retry` is `True` from the second attempt on:
+
+<$CodeSample path="python/tasks/retries.py" region="attempt" />
+
+A dict policy uses seconds and `non_retryable_errors`:
+
+<$CodeSample path="python/tasks/retries.py" region="dict-policy" />
+
+---
+
+## Heartbeats
+
+The worker heartbeats every task it runs, on its own, for as long as the task runs. A long task needs no heartbeat code to stay alive, and if its worker dies the heartbeats stop, the attempt times out after its heartbeat timeout, and the engine runs it again.
+
+`ctx.heartbeat(details)` is for reporting progress. It never waits, and however often you call it, no more heartbeats are sent than the worker's own; the latest details go with the next one:
+
+<$CodeSample path="python/tasks/heartbeats.py" region="progress" />
+
+---
+
+## Cancellation
+
+When the workflow is canceled, or the attempt is no longer wanted, the engine answers the worker's next heartbeat with a request to stop, and the task's cancellation token is set. Stop at a convenient point by raising:
+
+<$CodeSample path="python/tasks/heartbeats.py" region="cancel" />
+
+Or by checking the flag:
+
+<$CodeSample path="python/tasks/heartbeats.py" region="cancel-check" />
+
+The token only signals; a task that never checks it runs to the end.
+
+---
+
+## Inputs, results and size limits
+
+Inputs and results travel as JSON. A task can return a dict, list, string, number, boolean, `None` or a dataclass (sent as a dict).
+
+The engine accepts a single payload (one input, result or event) of up to **8 MiB** unless it's configured otherwise. A task whose result is larger fails at once with a `PayloadTooLarge` failure that says how large it was, and it isn't retried. Store large data elsewhere, such as an object store, and pass a reference. Workers and clients send and receive gRPC messages of up to 32 MiB; set `ORCHER_MAX_MESSAGE_BYTES` to change that.
+
+---
+
+## Task metadata
+
+<$CodeSample path="python/tasks/metadata.py" region="metadata" />
+
+### TaskContext reference
+
+| Method or property | Description |
+|---|---|
+| `await ctx.heartbeat(details=None)` | Attach progress details to the next heartbeat |
+| `ctx.cancellation_token` | `is_cancelled`, `raise_if_cancelled()`, `await wait_for_cancellation()` |
+| `ctx.task_id` | The id of this call, the same on every attempt |
+| `ctx.task_type` | The task's name |
+| `ctx.attempt` | The attempt number, from 1 |
+| `ctx.is_retry` | `True` when `attempt > 1` |
+| `ctx.heartbeat_timeout` | The heartbeat timeout this attempt runs under, or `None` |
+| `ctx.start_to_close_timeout` | How long this attempt may run, or `None` |
+| `ctx.logger` | A `logging.LoggerAdapter` carrying `task_id`, `task_type`, `workflow_id` and `attempt` |
+| `ctx.info` | `TaskInfo`: `task_id`, `task_type`, `workflow_id`, `run_id`, `task_queue`, `namespace`, `attempt`, `scheduled_at`, `started_at`, `heartbeat_timeout`, `start_to_close_timeout` |
+
+---
+
+## Next steps
+
+- [Workflows](/guides/sdk/python/workflows): schedule tasks and handle their failures
+- [Testing](/guides/sdk/python/testing): mock tasks in workflow tests
+- [Patterns](/guides/sdk/python/patterns): compensation and batching

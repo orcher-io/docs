@@ -1,0 +1,287 @@
+---
+id: 'journaling-versioning'
+title: 'Workflow Versioning'
+description: 'Pin an in-flight workflow execution to the code release that started it, so replay never runs against code the journal was not written by.'
+sidebar_label: 'Versioning'
+---
+
+A running workflow replays its journal. If you deploy new workflow code while executions are still in flight, those executions resume against code that did not write their history — the replay can diverge, silently.
+
+Versioning closes that gap. A worker declares the **code release** it is running; the server records that release on an execution the first time the worker claims it, and from then on only workers declaring the same release are given that execution.
+
+<Admonition type="note">
+
+Versioning is **opt-in and off by default**. If no worker declares a release, nothing is recorded and claiming behaves exactly as it always has.
+
+</Admonition>
+
+## Declaring a release
+
+The value is opaque — a git sha, an image digest, a release tag. The server compares it for equality and never parses or orders it.
+
+It normally comes from your build rather than being typed by hand, so every SDK reads **`ORCHER_VERSION_ID`** from the environment:
+
+```bash
+ORCHER_VERSION_ID="$(git rev-parse --short HEAD)"
+```
+
+You can also set it explicitly, which takes precedence over the environment:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+
+let worker = Worker::builder()
+    .server_url("http://localhost:50051")
+    .task_queue("orders")
+    .version_id("v1.4.2-abc123")
+    .build()
+    .await?;
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Worker } from '@orcher/sdk';
+
+const worker = new Worker({
+  serverUrl: 'http://localhost:50051',
+  taskQueue: 'orders',
+  versionId: 'v1.4.2-abc123',
+  workflows: [processOrder],
+  tasks: [chargeCard],
+});
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import Worker
+
+worker = (
+    Worker.builder()
+    .server_url("http://localhost:50051")
+    .task_queue("orders")
+    .version_id("v1.4.2-abc123")
+    .build()
+)
+```
+
+</TabPanel>
+
+</Tabs>
+
+An empty or whitespace-only value counts as *not declared*. This matters more than it looks: without it, an exported-but-empty `ORCHER_VERSION_ID` would pin executions to a release literally named `""`, which is indistinguishable from a real one and would look like versioning was working.
+
+<div className="not-prose my-8 max-w-2xl mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b">
+    <div className="text-[10px] font-mono uppercase tracking-wide text-foreground-muted">One execution · bound on first claim, never moved</div>
+  </div>
+  <div className="p-4 space-y-1">
+    <div className="flex gap-3">
+      <div className="w-6 h-6 shrink-0 border bg-surface-75 flex items-center justify-center text-[10px] font-mono text-foreground-muted">1</div>
+      <div className="pt-0.5">
+        <div className="text-xs font-medium text-foreground">Execution starts</div>
+        <div className="text-[11px] text-foreground-muted"><span className="font-mono">bound_version_id</span> is <span className="font-mono">NULL</span> · claimable by any worker</div>
+      </div>
+    </div>
+    <div className="pl-3"><div className="w-px h-3 bg-border-strong" /></div>
+    <div className="flex gap-3">
+      <div className="w-6 h-6 shrink-0 border bg-surface-75 flex items-center justify-center text-[10px] font-mono text-foreground-muted">2</div>
+      <div className="pt-0.5">
+        <div className="text-xs font-medium text-foreground">A worker on <span className="font-mono">v1</span> claims it</div>
+        <div className="text-[11px] text-foreground-muted">server stamps <span className="font-mono">bound_version_id = v1</span> — this is the only write that ever sets it</div>
+      </div>
+    </div>
+    <div className="pl-3"><div className="w-px h-3 bg-border-strong" /></div>
+    <div className="flex gap-3">
+      <div className="w-6 h-6 shrink-0 border bg-surface-75 flex items-center justify-center text-[10px] font-mono text-foreground-muted">3</div>
+      <div className="pt-0.5">
+        <div className="text-xs font-medium text-foreground">Workflow suspends · a <span className="font-mono">v2</span> worker polls</div>
+        <div className="text-[11px] text-foreground-muted">refused · <span className="font-mono">v2 ≠ v1</span> · the journal was not written by that code</div>
+      </div>
+    </div>
+    <div className="pl-3"><div className="w-px h-3 bg-border-strong" /></div>
+    <div className="flex gap-3">
+      <div className="w-6 h-6 shrink-0 border bg-surface-75 flex items-center justify-center text-[10px] font-mono text-foreground-muted">4</div>
+      <div className="pt-0.5">
+        <div className="text-xs font-medium text-foreground">A <span className="font-mono">v1</span> worker polls</div>
+        <div className="text-[11px] text-foreground-muted">claimed · replay continues on the code it started on</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+## What the server does
+
+**Binds on first claim, and never rebinds.** The first worker to claim an execution stamps its release onto it. A later claim by a worker on a different release cannot move an in-flight execution onto new code — that rebinding is exactly the divergence this exists to prevent.
+
+**Routes claims by that binding.** An execution bound to a release is only handed to a worker declaring the same release. An execution with no binding stays claimable by anyone.
+
+<div className="not-prose my-8 max-w-2xl mx-auto">
+  <div className="border bg-surface-75 p-4">
+    <div className="text-xs font-medium text-foreground">A worker polls, declaring <span className="font-mono">v2</span></div>
+  </div>
+  <div className="flex flex-col items-center">
+    <div className="w-px h-3 bg-border-strong" />
+    <span className="text-[10px] font-mono text-foreground-muted py-0.5">is the execution bound?</span>
+    <div className="w-px h-3 bg-border-strong" />
+  </div>
+  <div className="grid grid-cols-2 gap-3">
+    <div className="border bg-surface-100 p-4">
+      <div className="text-xs font-medium text-foreground">Bound</div>
+      <div className="mt-2 space-y-1 text-[11px] text-foreground-muted">
+        <div><span className="font-mono">= v2</span> → claimed</div>
+        <div><span className="font-mono">= v1</span> → refused, keeps waiting</div>
+      </div>
+      <div className="mt-2 text-[10px] text-foreground-muted">Protects replay. Nothing overrides this — not even a queue policy.</div>
+    </div>
+    <div className="border bg-surface-100 p-4">
+      <div className="text-xs font-medium text-foreground">Unbound</div>
+      <div className="mt-2 space-y-1 text-[11px] text-foreground-muted">
+        <div>current release <span className="font-mono">= v2</span> → claimed, binds to <span className="font-mono">v2</span></div>
+        <div>current release <span className="font-mono">= v1</span> → refused</div>
+        <div>no current release → claimed by anyone</div>
+      </div>
+      <div className="mt-2 text-[10px] text-foreground-muted">Steers new work. This is the queue policy.</div>
+    </div>
+  </div>
+</div>
+
+## The trade-off worth understanding
+
+A bound execution whose release has no running workers **waits**. It is not handed to a worker on a different release.
+
+That is deliberate. The alternative — letting a mismatched worker take it once none match — trades a visible stall for a silent divergence:
+
+| | no matching worker running |
+|---|---|
+| **Wait** (what Orcher does) | the execution pauses; it resumes as soon as a worker on its release starts |
+| Hand it over anyway | the execution replays against code its journal was not written by, with no signal |
+
+A stall is recoverable by an action always available to you: start a worker on that release. A divergence may not be recoverable at all.
+
+## Choosing where new work goes
+
+Binding decides where an execution that has already started must run. It says nothing about a **new** execution — an unbound execution is claimable by any worker.
+
+That matters during a rollout. With v1 and v2 workers both up, each new execution binds to whichever worker polls first, so new work keeps landing on the release you are trying to retire.
+
+Give the queue a **current release** and new executions go there:
+
+```bash
+curl -X PUT http://localhost:8080/api/v1/task-queues/orders/current-release \
+  -H 'content-type: application/json' \
+  -d '{"versionId": "v1.4.2-abc123"}'
+```
+
+```bash
+# what is it now?
+curl http://localhost:8080/api/v1/task-queues/orders/current-release
+# {"taskQueue":"orders","namespace":"default","currentVersionId":"v1.4.2-abc123"}
+```
+
+Sending `null` (or a blank string) clears the policy and returns the queue to "any release may take new work".
+
+<Admonition type="note">
+
+This decides where **new** work goes, never where running work continues. An execution already bound to an older release keeps running on that release — that is the guarantee, and a queue policy does not override it.
+
+</Admonition>
+
+## Rolling out a new release
+
+1. Deploy workers on the new release.
+2. **Set the queue's current release** to the new one. New executions now bind to it, and the old release starts draining.
+3. **Keep the old-release workers running** until the executions bound to them finish.
+4. Retire the old-release workers once nothing is waiting on that release.
+
+Long-running workflows are the case to watch — an execution that sleeps for a week keeps its original release for that week, and retiring those workers early is what causes a stall.
+
+Without step 2 the rollout still works, but the old release keeps picking up new work until you stop it, so it never finishes draining.
+
+<div className="not-prose my-8 max-w-2xl mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b">
+    <div className="text-[10px] font-mono uppercase tracking-wide text-foreground-muted">Rollout · v1 drains while v2 takes over</div>
+  </div>
+  <div className="p-4 space-y-3">
+    <div>
+      <div className="text-xs font-medium text-foreground">Before · only v1 deployed</div>
+      <div className="mt-1 flex gap-1 text-[10px] font-mono">
+        <div className="px-2 py-1 border bg-surface-75 text-foreground-muted">v1 ████████ new + running</div>
+      </div>
+    </div>
+    <div>
+      <div className="text-xs font-medium text-foreground">Step 1 · deploy v2 workers <span className="text-[10px] font-mono text-foreground-muted">no policy yet</span></div>
+      <div className="mt-1 flex gap-1 text-[10px] font-mono">
+        <div className="px-2 py-1 border bg-surface-75 text-foreground-muted">v1 █████ still taking new work</div>
+        <div className="px-2 py-1 border bg-surface-75 text-foreground-muted">v2 ███ arbitrary split</div>
+      </div>
+      <div className="mt-1 text-[10px] text-foreground-muted">New work lands on whichever polls first — v1 never finishes draining.</div>
+    </div>
+    <div>
+      <div className="text-xs font-medium text-foreground">Step 2 · set current release to v2</div>
+      <div className="mt-1 flex gap-1 text-[10px] font-mono">
+        <div className="px-2 py-1 border bg-surface-75 text-foreground-muted">v1 ███ draining only</div>
+        <div className="px-2 py-1 border bg-surface-100 text-foreground">v2 ██████ all new work</div>
+      </div>
+      <div className="mt-1 text-[10px] text-foreground-muted">v1 now shrinks monotonically. Keep its workers running.</div>
+    </div>
+    <div>
+      <div className="text-xs font-medium text-foreground">Step 3 · v1 drained → retire its workers</div>
+      <div className="mt-1 flex gap-1 text-[10px] font-mono">
+        <div className="px-2 py-1 border bg-surface-100 text-foreground">v2 ████████ new + running</div>
+      </div>
+      <div className="mt-1 text-[10px] text-foreground-muted"><span className="font-mono">GET /releases</span> returns <span className="font-mono">[]</span> — nothing is bound to v1 any more.</div>
+    </div>
+  </div>
+</div>
+
+## Knowing when a release is safe to retire
+
+```bash
+curl http://localhost:8080/api/v1/task-queues/orders/releases
+# {"taskQueue":"orders","namespace":"default",
+#  "releases":[{"versionId":"v1.3.9-def456","waiting":12}]}
+```
+
+Each entry is a release with executions still bound to it and not yet finished. **An empty list means everything has drained** and the old workers can go.
+
+Run this during an incident too — a workflow that appears stuck is often one bound to a release with no workers left.
+
+## Unsticking an execution
+
+If a release is already gone and executions are still bound to it, the first answer is to start a worker on that release. When that build no longer exists, move the execution instead:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/executions/<executionId>/rebind \
+  -H 'content-type: application/json' \
+  -d '{"versionId": "v1.4.2-abc123"}'
+```
+
+Sending `null` unbinds it entirely, so any release may pick it up.
+
+<Admonition type="caution">
+
+Rebinding is deliberately a manual, considered action. Replay against different code is exactly what binding prevents, and Orcher cannot tell whether the new release is compatible with the journal the execution has already written — only you can. Executions that have already finished are refused.
+
+</Admonition>
+
+## Not affected by versioning
+
+**Tasks.** A release binds a *workflow execution*, because that is what replays a journal. Tasks are dispatched to any worker serving the queue.
+
+**Actors.** Actor operations are not replayed from a workflow journal, so there is nothing to pin. Actor pollers deliberately do not carry a release.

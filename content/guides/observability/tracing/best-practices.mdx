@@ -1,0 +1,137 @@
+---
+id: 'best-practices'
+title: 'Tracing Best Practices'
+description: 'Sampling configuration, trace visualization with Jaeger, and troubleshooting common tracing issues'
+sidebar_label: 'Best Practices'
+---
+
+## Sampling
+
+Adjust sampling rate based on environment and traffic volume. A sample rate of `1.0` traces everything; `0.01` traces 1%.
+
+| Environment | Recommended Rate | Rationale |
+|-------------|-----------------|-----------|
+| Development | `1.0` (100%) | Full visibility for debugging |
+| Staging | `0.5` (50%) | Good coverage without overwhelming storage |
+| Production (low traffic) | `0.1` (10%) | Balanced cost and observability |
+| Production (high traffic) | `0.01` (1%) | Keep storage costs manageable |
+
+Configure via `JaegerConfig.sample_rate` or `OtlpConfig` sampling settings.
+
+---
+
+## Trace Visualization
+
+### Jaeger UI
+
+Access the Jaeger UI at `http://localhost:16686` to:
+
+- **Search traces** — Filter by service name, operation, tags, min/max duration
+- **View timelines** — See span relationships and timing in a waterfall chart
+- **Inspect details** — View span attributes, events, and logs
+- **Compare traces** — Side-by-side comparison of different executions
+
+### Querying Traces
+
+Useful searches in Jaeger:
+
+| Query | Purpose |
+|-------|---------|
+| Service: `orchestrator`, Operation: `workflow.start` | All workflow executions |
+| Service: `orchestrator`, Min Duration: `5s` | Slow workflows |
+| Tags: `error=true` | Failed operations |
+| Tags: `workflow.id=<id>` | Specific workflow trace |
+
+---
+
+## Best Practices
+
+**Instrument at meaningful boundaries.** Create spans for workflows, tasks, external API calls, and database operations — not for every function call. Too many spans add overhead and noise.
+
+```rust
+// Good: span for the task, not for each line
+let span = create_task_span("execute", &task_id, Some("process_order"));
+let _guard = span.enter();
+
+validate_order(&order)?;       // No separate span needed
+calculate_total(&order)?;      // No separate span needed
+charge_payment(&order).await?; // External call — could warrant its own span
+```
+
+**Always propagate context.** When calling external services from tasks, inject trace context into headers. Without it, traces are broken across service boundaries.
+
+**Record errors in spans.** When an operation fails, log the error within the span so it appears in trace visualization:
+
+```rust
+match operation().await {
+    Ok(result) => Ok(result),
+    Err(err) => {
+        tracing::error!(error = %err, "Operation failed");
+        Err(err)
+    }
+}
+```
+
+**Use descriptive span names.** Include the operation type and specific handler name:
+
+```rust
+// Good
+create_task_span("execute", &task_id, Some("charge_payment"));
+create_workflow_span("step", &workflow_id, Some("validate_orders"));
+
+// Bad
+create_task_span("do_thing", &task_id, None);
+```
+
+**Lower sampling in production.** Full tracing at scale generates enormous data volumes. Start with 1–10% and increase for specific services or workflows as needed.
+
+---
+
+## Troubleshooting
+
+### No Traces Appearing
+
+1. **Check exporter connectivity** — Verify the Jaeger/OTLP endpoint is reachable from the orchestrator
+2. **Check feature flag** — Ensure `tracing-export` feature is enabled in `Cargo.toml`
+3. **Check sampling rate** — A rate of `0.0` will drop all traces
+4. **Check Jaeger UI** — Make sure you're searching the correct service name
+
+```bash
+# Test Jaeger collector connectivity
+curl -s http://localhost:14268/api/traces
+
+# Check Jaeger UI
+open http://localhost:16686
+```
+
+### Broken Traces (Missing Parent Spans)
+
+Ensure context propagation is correctly wired:
+
+```rust
+// Outgoing: inject before sending
+let mut headers = HeaderMap::new();
+inject_context(&mut headers);  // Don't forget this!
+client.post(url).headers(headers).send().await?;
+
+// Incoming: extract from request headers
+let context = extract_context(req.headers());
+```
+
+### High Overhead
+
+- **Lower sampling rate** — Reduce from 1.0 to 0.01–0.1
+- **Reduce span count** — Only instrument significant operations
+- **Batch exports** — Increase `max_batch_size` and `batch_timeout` to reduce export frequency
+
+---
+
+## Next Steps
+
+- [Tracing Overview](/guides/observability/tracing) — Setup and exporter configuration
+- [Creating Spans](/guides/observability/tracing/creating-spans) — Typed span helpers for workflows, tasks, storage, and workers
+- [Context Propagation](/guides/observability/tracing/context-propagation) — W3C trace context across service boundaries
+- [Metrics](/guides/observability/metrics) — Prometheus metrics for monitoring
+- [Logging](/guides/observability/logging) — Structured logging configuration
+- [Debugging](/guides/observability/debugging) — Debug workflow execution
+- [Orchestrator](/guides/operations/orchestrator) — Server configuration and deployment

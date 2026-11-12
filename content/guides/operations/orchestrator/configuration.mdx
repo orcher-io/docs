@@ -1,0 +1,63 @@
+---
+id: orchestrator-configuration
+title: Orchestrator Configuration
+description: Environment variables, authentication and database connection configuration for the Orcher orchestrator
+---
+
+## Orchestrator Environment Variables
+
+The orchestrator is one process that serves both the gRPC API and the REST API, so there is a single set of settings.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DATABASE_URL` | (required) | PostgreSQL connection string |
+| `GRPC_BIND_ADDR` | `127.0.0.1:50051` | gRPC listener (SDKs, workers, CLI); also `--grpc-addr`. The Docker image uses `0.0.0.0:50051` |
+| `HTTP_BIND_ADDR` | `127.0.0.1:8080` | HTTP listener: REST API under `/api/v1`, `/health`, `/health/ready`, `/health/live`, `/metrics`; also `--http-addr`. The Docker image uses `0.0.0.0:8080` |
+| `ORCHER_ORCHESTRATOR_CONFIG` | — | Path to the TOML config file; also `--config` |
+| `ORCHER_INSECURE` | `false` | Allow listening on a non-loopback address without authentication; also `--insecure` |
+| `LOG_LEVEL` | `info` | Log level: trace, debug, info, warn, error |
+| `LOG_FORMAT` | `pretty` | Log format: json, pretty |
+
+## Authentication
+
+REST and gRPC share one authentication layer, configured in the `[security]` section of the TOML config:
+
+```toml
+[security]
+auth_mode = "api-key"   # none | api-key | oidc | mtls | api-key-and-mtls
+tenancy = "single"      # single | multi
+
+# Only for auth_mode = "oidc"
+# [security.oidc]
+# issuer = "https://auth.example.com"
+# audience = "orcher"
+# organization_claim = "org_id"
+# scopes_claim = "scope"
+```
+
+- Without authentication, the orchestrator refuses to listen on a non-loopback gRPC or HTTP address unless you pass `--insecure` or set `ORCHER_INSECURE=true`.
+- When `auth_mode` requires a client certificate (`mtls` or `api-key-and-mtls`), the orchestrator serves **no** REST API.
+- Create the first API key with `orchestrator api-key create --name admin --scope '*'`; it prints the key once on stdout. After that, manage keys with `orcher api-key create|list|get|revoke` or the `/api/v1/api-keys` endpoints (scope `api-keys:manage`).
+
+## Database Connection
+
+PostgreSQL is the exclusive backend. For production, use PgBouncer for connection multiplexing:
+
+```bash
+# Direct connection
+DATABASE_URL=postgresql://orcher:orcher@localhost:5432/orcher
+
+# Via PgBouncer (recommended for production)
+DATABASE_URL=postgresql://orcher:orcher@localhost:6432/orcher
+```
+
+The orchestrator uses a pool of up to 80 connections with a statement cache of 256 prepared statements.
+
+---
+
+## Next Steps
+
+- [Orchestrator Overview](/guides/operations/orchestrator) — Architecture and components
+- [Deployment](/guides/operations/orchestrator/deployment) — Starting the server in development, Docker, and systemd
+- [High Availability](/guides/operations/orchestrator/high-availability) — Multi-instance deployment and load balancing
+- [Monitoring](/guides/operations/orchestrator/monitoring) — Health checks, performance tuning, and troubleshooting

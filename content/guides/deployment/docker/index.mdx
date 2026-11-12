@@ -1,0 +1,138 @@
+---
+id: 'docker'
+title: 'Docker Deployment'
+description: 'Run Orcher with Docker Compose for development and production, including PostgreSQL, PgBouncer, and observability stack'
+sidebar_label: 'Docker'
+---
+
+Orcher provides a Docker Compose setup for running the backing services — PostgreSQL and PgBouncer. The orchestrator runs on the host (or in its own container, image `ghcr.io/orcher-io/orcher`) and serves both the gRPC API and the REST API, so it is the only Orcher process to run.
+
+- **Backing services** — PostgreSQL 15 and the PgBouncer connection pooler
+- **Observability stack** — Optional Prometheus and Grafana via `--profile observability`
+- **Production Dockerfile** — Multi-stage build with non-root user, health checks, and minimal runtime image
+- **Environment-driven** — All configuration via environment variables, no config files required
+
+---
+
+## Quick Start
+
+Start the backing services:
+
+```bash
+cd docker
+docker compose up -d
+```
+
+This starts PostgreSQL (port 5432) and PgBouncer (port 6432).
+
+Then run the orchestrator from source, pointing it at PgBouncer:
+
+```bash
+DATABASE_URL="postgresql://orcher:orcher@localhost:6432/orcher" \
+cargo run -p orcher-orchestrator --release
+```
+
+The orchestrator listens on:
+
+| Port | Protocol | Purpose |
+|------|----------|---------|
+| 50051 | gRPC | SDKs, workers and the CLI (workflow/task polling, completions) |
+| 8080 | HTTP | REST API (`/api/v1`), health checks (`/health`, `/health/ready`, `/health/live`) and metrics (`/metrics`) |
+
+---
+
+## Docker Compose Services
+
+### PostgreSQL
+
+Primary data store for all workflow state, journal entries, task executions, and execution logs.
+
+```yaml
+postgres:
+  image: postgres:15-alpine
+  environment:
+    POSTGRES_USER: orcher
+    POSTGRES_PASSWORD: orcher
+    POSTGRES_DB: orcher
+  ports:
+    - "5432:5432"
+  volumes:
+    - postgres_data:/var/lib/postgresql/data
+```
+
+The compose file tunes PostgreSQL for workflow workloads:
+
+| Parameter | Value | Purpose |
+|-----------|-------|---------|
+| `max_connections` | 200 | Support PgBouncer pool + direct connections |
+| `shared_buffers` | 256MB | Shared memory for caching |
+| `effective_cache_size` | 768MB | Query planner hint for OS cache |
+| `work_mem` | 4MB | Per-operation sort/hash memory |
+| `wal_buffers` | 16MB | Write-ahead log buffer |
+| `max_worker_processes` | 4 | Parallel query workers |
+| `random_page_cost` | 1.1 | Tuned for SSD storage |
+| `effective_io_concurrency` | 200 | Concurrent I/O for SSD |
+
+### PgBouncer
+
+Connection pooler that multiplexes client connections to a smaller pool of PostgreSQL connections. Required for production workloads — PostgreSQL connections are expensive (~10MB each), and concurrent workflows can exhaust the connection limit quickly.
+
+```yaml
+pgbouncer:
+  image: edoburu/pgbouncer:latest
+  environment:
+    DATABASE_URL: postgres://orcher:orcher@postgres:5432/orcher
+    POOL_MODE: transaction
+    MAX_CLIENT_CONN: 1000
+    DEFAULT_POOL_SIZE: 50
+    MIN_POOL_SIZE: 10
+    RESERVE_POOL_SIZE: 10
+    AUTH_TYPE: scram-sha-256
+  ports:
+    - "6432:5432"
+```
+
+**Pool modes:**
+
+- **`transaction`** (recommended) — Connection returned to pool after each transaction. Best for high concurrency. Supports 1000s of clients with 50–100 actual database connections.
+- **`session`** — Connection held for entire client session. Equivalent to direct PostgreSQL but with connection queuing.
+- **`statement`** — Most aggressive pooling but breaks multi-statement transactions.
+
+Always connect via PgBouncer (port 6432) instead of direct PostgreSQL (port 5432) when running multiple workers or high-concurrency workloads.
+
+### Observability Stack
+
+Prometheus and Grafana are available as an optional profile:
+
+```bash
+cd docker
+docker compose --profile observability up -d
+```
+
+This adds:
+
+| Service | Port | Purpose |
+|---------|------|---------|
+| Prometheus | 9090 | Metrics collection, scrapes orchestrator on port 8080 |
+| Grafana | 3001 | Dashboards and visualization (admin/admin) |
+
+Prometheus is pre-configured to scrape the orchestrator at `host.docker.internal:8080/metrics` with a 15-second interval. The Grafana instance includes provisioned datasources pointing to Prometheus and pre-built dashboards for task router monitoring.
+
+---
+
+## Connection Strings
+
+| Service | Connection String | When to Use |
+|---------|------------------|-------------|
+| PgBouncer | `postgresql://orcher:orcher@localhost:6432/orcher` | Production and high-concurrency (recommended) |
+| PostgreSQL (direct) | `postgresql://orcher:orcher@localhost:5432/orcher` | Debugging or migrations |
+
+---
+
+## Next Steps
+
+- [Configuration](/guides/deployment/docker/configuration) — Environment variables, CLI flags, and TOML configuration
+- [Production](/guides/deployment/docker/production) — Production Dockerfile and full production stack
+- [Troubleshooting](/guides/deployment/docker/troubleshooting) — Health checks, volumes, and common issues
+- [Kubernetes](/guides/deployment/kubernetes) — Deploy to Kubernetes with Helm charts
+- [Metrics](/guides/observability/metrics) — Prometheus metrics reference

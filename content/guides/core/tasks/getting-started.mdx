@@ -1,0 +1,697 @@
+---
+id: 'tasks-getting-started'
+title: 'Task Execution & First Task'
+description: 'Understand the two task execution APIs (ctx.execute and ctx.execute_task) and write your first task in Orcher.'
+sidebar_label: 'Getting Started'
+---
+
+Orcher provides two different APIs for executing work from workflows. Understanding the difference is crucial for writing correct workflows.
+
+### ctx.execute() - Inline Durable Execution with Automatic Journaling
+
+**Available in:** Rust, TypeScript
+
+The `ctx.execute()` API provides **durable execution** by automatically journaling the result of an inline async block or closure. This is the core primitive for building reliable workflows.
+
+**Signature (Rust):**
+```rust
+ctx.execute<F, T>(
+  step_name: &str,
+  closure: F
+) -> Result<T>
+where
+  F: Future<Output = Result<T>>
+```
+
+**Signature (TypeScript):**
+```typescript
+ctx.execute<TOutput>(
+  stepName: string,
+  closure: () => Promise<TOutput>
+): Promise<TOutput>
+```
+
+**How it works:**
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+
+#[workflow(version = "1.0.0")]
+async fn payment_workflow(
+ctx: WorkflowContext,
+order: Order,
+) -> Result<Receipt> {
+// Execute inline code with automatic journaling
+let payment = ctx.execute("charge_card", || async {
+    // This code runs inside the workflow
+    // Result is automatically journaled to PostgreSQL
+    stripe::charge(order.amount, order.card).await
+}).await?;
+// ↑ Result written to execution_log table
+// On crash/restart: replays instantly from journal (no duplicate charge!)
+
+// Another durable step
+let inventory = ctx.execute("reserve_inventory", || async {
+    inventory_service::reserve(order.items).await
+}).await?;
+
+// If workflow crashes here and restarts:
+// 1. "charge_card" returns cached result from journal (no API call)
+// 2. "reserve_inventory" returns cached result from journal (no API call)
+// 3. Execution continues from this point
+
+Ok(Receipt::new(payment, inventory))
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, WorkflowContext } from '@orcher/sdk';
+
+@Workflow({ name: 'paymentWorkflow', version: '1.0' })
+class PaymentWorkflow {
+  async run(ctx: WorkflowContext, order: Order): Promise<Receipt> {
+    // Execute inline code with automatic journaling
+    const payment = await ctx.execute('charge_card', async () => {
+      // This code runs inside the workflow
+      // Result is automatically journaled to PostgreSQL
+      return await stripe.charges.create({
+        amount: order.amount,
+        source: order.card,
+      });
+    });
+    // ↑ Result written to execution_log table
+    // On crash/restart: replays instantly from journal (no duplicate charge!)
+
+    // Another durable step
+    const inventory = await ctx.execute('reserve_inventory', async () => {
+      return await inventoryService.reserve(order.items);
+    });
+
+    // If workflow crashes here and restarts:
+    // 1. "charge_card" returns cached result from journal (no API call)
+    // 2. "reserve_inventory" returns cached result from journal (no API call)
+    // 3. Execution continues from this point
+
+    return new Receipt(payment, inventory);
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, WorkflowContext
+
+@workflow(version="1.0.0")
+async def payment_workflow(
+ctx: WorkflowContext,
+order: Order,
+) -> Receipt:
+# Execute inline code with automatic journaling
+payment = await ctx.execute("charge_card", lambda: stripe.charge(
+    order.amount, order.card
+))
+# ^ Result written to execution_log table
+# On crash/restart: replays instantly from journal (no duplicate charge!)
+
+# Another durable step
+inventory = await ctx.execute("reserve_inventory", lambda: inventory_service.reserve(
+    order.items
+))
+
+# If workflow crashes here and restarts:
+# 1. "charge_card" returns cached result from journal (no API call)
+# 2. "reserve_inventory" returns cached result from journal (no API call)
+# 3. Execution continues from this point
+
+return Receipt(payment, inventory)
+```
+
+</TabPanel>
+
+</Tabs>
+
+**How Automatic Journaling Works:**
+
+<div className="not-prose my-8 max-w-2xl mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-[10px] font-mono uppercase tracking-wide text-foreground-muted">First execution</div>
+  <div className="p-4 space-y-1 text-[11px] text-foreground-muted">
+    <div>1 · <span className="font-mono text-foreground">ctx.execute("charge_card", …)</span> called</div>
+    <div>2 · check <span className="font-mono">execution_log</span> → no entry for <span className="font-mono">(workflow_id, "charge_card")</span></div>
+    <div>3 · execute the closure → <span className="font-mono">{'{ charge_id: "ch_123", amount: 5000 }'}</span></div>
+    <div>4 · <span className="font-mono">INSERT INTO execution_log …</span> → status <span className="font-mono">completed</span></div>
+    <div>5 · return result to the workflow</div>
+  </div>
+  <div className="bg-red-500/5 border-y px-4 py-2 text-[11px] font-mono text-red-400">💥 Workflow crashes and restarts</div>
+  <div className="p-4 space-y-1 text-[11px] text-foreground-muted">
+    <div>1 · <span className="font-mono text-foreground">ctx.execute("charge_card", …)</span> called again</div>
+    <div>2 · check <span className="font-mono">execution_log</span> → entry <span className="text-foreground">exists</span></div>
+    <div>3 · return cached result from the journal — closure <span className="text-foreground">not</span> executed</div>
+    <div>4 · no duplicate Stripe charge</div>
+    <div>5 · workflow continues from the next step</div>
+  </div>
+</div>
+
+**Benefits:**
+- **Automatic Journaling** — Every step is automatically saved to PostgreSQL
+- **Replay Protection** — Completed steps never re-execute on workflow restart
+- **No Duplicate Operations** — External APIs (Stripe, SendGrid) never called twice
+- **Fast Replay** — Results cached in-memory, replays in &lt;1ms
+- **Complete Audit Trail** — Every step's input/output stored as JSONB
+- **Inline Code** — Write workflow logic naturally without defining separate tasks
+
+**When to use:**
+- For most workflow steps (this is the primary API)
+- When you want automatic durability and replay protection
+- For inline API calls, database operations, or any code that should be journaled
+- When you don't need to reuse the logic across multiple workflows
+
+### ctx.execute_task() - Pre-Defined Named Tasks
+
+**Available in:** Rust, TypeScript (as `ctx.executeTask()`)
+
+The `ctx.execute_task()` API executes **pre-defined tasks** that are registered separately. Use this when you need reusable task functions.
+
+**Signature (Rust):**
+```rust
+ctx.execute_task<T: IntoTaskName, I, O>(
+  task: T,       // Type-safe task reference or &str
+  input: I
+) -> Result<O>
+```
+
+**Signature (TypeScript):**
+```typescript
+ctx.executeTask<I, O>(
+  taskRef: TaskReference<I, O>,
+  input: I
+): Promise<O>
+```
+
+**How it works:**
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+
+// 1. Define a reusable task (registered globally)
+#[task(name = "send_email")]
+pub async fn send_email(
+_ctx: TaskContext,
+input: EmailInput,
+) -> Result<EmailResult> {
+let client = get_email_client();
+let result = client.send(
+    &input.to,
+    &input.subject,
+    &input.body
+).await?;
+
+Ok(EmailResult {
+    message_id: result.id,
+    sent: true,
+})
+}
+
+// 2. Execute the task using a type-safe reference in a workflow
+#[workflow(name = "notify_user")]
+pub async fn notify_user(
+ctx: WorkflowContext,
+email: String,
+) -> Result<String> {
+let input = EmailInput {
+    to: email,
+    subject: "Welcome".to_string(),
+    body: "Thanks for signing up".to_string(),
+};
+
+// Execute pre-defined task by reference
+let result: EmailResult = ctx
+    .execute_task(send_email, input)  // ← Function reference
+    .await?;
+
+Ok(result.message_id)
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Tasks, Task, Workflow, TaskContext, WorkflowContext, createTaskRefs } from '@orcher/sdk';
+
+// 1. Define reusable tasks (registered globally)
+@Tasks()
+class EmailTasks {
+  @Task({ name: 'send_email' })
+  async sendEmail(ctx: TaskContext, input: EmailInput): Promise<EmailResult> {
+    const client = getEmailClient();
+    const result = await client.send(
+      input.to,
+      input.subject,
+      input.body
+    );
+
+    return {
+      messageId: result.id,
+      sent: true,
+    };
+  }
+}
+
+// Create type-safe task references
+const emailTasks = createTaskRefs(EmailTasks);
+
+// 2. Execute the task using a type-safe reference in a workflow
+@Workflow({ name: 'notifyUser', version: '1.0' })
+class NotifyUserWorkflow {
+  async run(ctx: WorkflowContext, email: string): Promise<string> {
+    const input: EmailInput = {
+      to: email,
+      subject: 'Welcome',
+      body: 'Thanks for signing up'
+    };
+
+    // Execute pre-defined task by reference
+    const result = await ctx.executeTask(emailTasks.sendEmail, input);
+
+    return result.messageId;
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import task, workflow, TaskContext, WorkflowContext
+from dataclasses import dataclass
+
+@dataclass
+class EmailInput:
+to: str
+subject: str
+body: str
+
+@dataclass
+class EmailResult:
+message_id: str
+sent: bool
+
+# 1. Define a reusable task (registered globally)
+@task(name="send_email")
+async def send_email(ctx: TaskContext, input: EmailInput) -> EmailResult:
+client = get_email_client()
+result = await client.send(input.to, input.subject, input.body)
+
+return EmailResult(
+    message_id=result.id,
+    sent=True,
+)
+
+# 2. Execute the task by name in a workflow
+@workflow()
+async def notify_user(ctx: WorkflowContext, email: str) -> str:
+input = EmailInput(
+    to=email,
+    subject="Welcome",
+    body="Thanks for signing up",
+)
+
+# Execute pre-defined task by reference
+result: EmailResult = await ctx.execute_task(send_email, input=input)
+
+return result.message_id
+```
+
+</TabPanel>
+
+</Tabs>
+
+**Benefits:**
+- **Reusable** — Define once, use in multiple workflows
+- **Testable** — Tasks can be unit tested independently
+- **Language Agnostic** — Call Rust tasks from TypeScript workflows and vice versa
+- **Organized** — Separate task definition from workflow orchestration logic
+
+**When to use:**
+- When you need to reuse the same logic across multiple workflows
+- When you want to unit test task logic independently
+- For cross-language task calls (Rust task from TypeScript workflow)
+
+### Comparison: ctx.execute() vs ctx.execute_task()
+
+| Feature | ctx.execute() | ctx.execute_task() |
+|---------|---------------|-------------------|
+| **Code Location** | Inline in workflow | Separate task definition |
+| **Journaling** | ✓ Automatic | ✓ Automatic |
+| **Replay Protection** | ✓ Yes | ✓ Yes |
+| **Reusability** | ✗ Single workflow only | ✓ Use across multiple workflows |
+| **Unit Testing** | Difficult (coupled to workflow) | ✓ Easy (independent function) |
+| **Cross-Language** | ✗ No | ✓ Yes |
+| **Type Safety** | ✓ Yes (inline code) | ✓ Full type-safe references |
+| **Best For** | Most workflow steps | Reusable tasks |
+
+### Which Should You Use?
+
+**Use `ctx.execute()` when:**
+- Writing most workflow steps (this is the primary API)
+- You want inline code with automatic journaling
+- The logic is specific to one workflow
+
+**Use `ctx.execute_task()` when:**
+- You need to reuse logic across multiple workflows
+- You want to unit test task logic independently
+- Calling tasks defined in a different language
+
+**Example: Combining Both APIs**
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[workflow]
+async fn order_workflow(ctx: WorkflowContext, order: Order) -> Result<Receipt> {
+    // Use ctx.execute() for inline workflow-specific logic
+    let payment = ctx.execute("charge_card", || async {
+        stripe::charge(order.amount, order.card).await
+    }).await?;
+
+    // Use ctx.execute_task() for reusable, high-throughput operations
+    // (This task is reused across 5 different workflows)
+    let inventory = ctx.execute_task(reserve_inventory, order.items).await?;
+
+    // Use ctx.execute() for workflow-specific notification logic
+    let notification = ctx.execute("send_confirmation", || async {
+        email_service::send_order_confirmation(&order, &payment).await
+    }).await?;
+
+    Ok(Receipt::new(payment, inventory, notification))
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, WorkflowContext } from '@orcher/sdk';
+
+@Workflow({ name: 'order_workflow', version: '1.0' })
+class OrderWorkflow {
+  async run(ctx: WorkflowContext, order: Order): Promise<Receipt> {
+    // Use ctx.execute() for inline workflow-specific logic
+    const payment = await ctx.execute('charge_card', async () => {
+      return await stripe.charge(order.amount, order.card);
+    });
+
+    // Use ctx.executeTask() for reusable, high-throughput operations
+    // (This task is reused across 5 different workflows)
+    const inventory = await ctx.executeTask(reserveInventory, { items: order.items });
+
+    // Use ctx.execute() for workflow-specific notification logic
+    const notification = await ctx.execute('send_confirmation', async () => {
+      return await emailService.sendOrderConfirmation(order, payment);
+    });
+
+    return new Receipt(payment, inventory, notification);
+  }
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, WorkflowContext
+
+@workflow(name="order_workflow", version="1.0")
+async def order_workflow(ctx: WorkflowContext, order: Order) -> Receipt:
+    # Use ctx.execute() for inline workflow-specific logic
+    payment = await ctx.execute("charge_card", lambda: stripe.charge(order.amount, order.card))
+
+    # Use ctx.execute_task() for reusable, high-throughput operations
+    # (This task is reused across 5 different workflows)
+    inventory = await ctx.execute_task(reserve_inventory, items=order.items)
+
+    # Use ctx.execute() for workflow-specific notification logic
+    notification = await ctx.execute(
+        "send_confirmation",
+        lambda: email_service.send_order_confirmation(order, payment),
+    )
+
+    return Receipt(payment, inventory, notification)
+```
+
+</TabPanel>
+</Tabs>
+
+---
+
+### Your First Task
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+
+#[task(
+name = "send_email",
+description = "Send email notification",
+retry = 3
+)]
+pub async fn send_email(
+_ctx: TaskContext,
+input: EmailInput,
+) -> Result<EmailResult> {
+// Call external email API
+let result = email_service::send(
+    &input.to,
+    &input.subject,
+    &input.body
+).await?;
+
+Ok(EmailResult {
+    message_id: result.id,
+    sent: true,
+})
+}
+
+// Define input/output types
+#[derive(Serialize, Deserialize)]
+struct EmailInput {
+to: String,
+subject: String,
+body: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct EmailResult {
+message_id: String,
+sent: bool,
+}
+```
+
+**Use in a workflow:**
+
+```rust
+#[workflow(name = "notify_user", version = "1.0.0")]
+pub async fn notify_user(
+ctx: WorkflowContext,
+user_email: String,
+) -> Result<String> {
+let email_input = EmailInput {
+    to: user_email,
+    subject: "Welcome!".to_string(),
+    body: "Thanks for signing up.".to_string(),
+};
+
+let result: EmailResult = ctx
+    .execute_task(send_email, email_input)
+    .await?;
+
+Ok(result.message_id)
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Tasks, Task, TaskContext, createTaskRefs } from '@orcher/sdk';
+
+interface EmailInput {
+  to: string;
+  subject: string;
+  body: string;
+}
+
+interface EmailResult {
+  messageId: string;
+  sent: boolean;
+}
+
+@Tasks()
+class EmailTasks {
+  @Task({
+    name: 'sendEmail',
+    description: 'Send email notification',
+    retryPolicy: {
+      maxAttempts: 3,
+    },
+  })
+  async sendEmail(
+    _ctx: TaskContext,
+    input: EmailInput
+  ): Promise<EmailResult> {
+    // Call external email API
+    const result = await emailService.send({
+      to: input.to,
+      subject: input.subject,
+      body: input.body,
+    });
+
+    return {
+      messageId: result.id,
+      sent: true,
+    };
+  }
+}
+
+const emailTasks = createTaskRefs(EmailTasks);
+```
+
+**Use in a workflow:**
+
+```typescript
+import { Workflow, WorkflowContext } from '@orcher/sdk';
+
+@Workflow({ name: 'notifyUser', version: '1.0' })
+class NotifyUserWorkflow {
+  async run(ctx: WorkflowContext, userEmail: string): Promise<string> {
+    const emailInput: EmailInput = {
+      to: userEmail,
+      subject: 'Welcome!',
+      body: 'Thanks for signing up.',
+    };
+
+    const result = await ctx.executeTask(emailTasks.sendEmail, emailInput);
+
+    return result.messageId;
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import task, workflow, TaskContext, WorkflowContext
+from dataclasses import dataclass
+
+@dataclass
+class EmailInput:
+to: str
+subject: str
+body: str
+
+@dataclass
+class EmailResult:
+message_id: str
+sent: bool
+
+@task(
+name="send_email",
+retry_policy={"max_attempts": 3},
+)
+async def send_email(ctx: TaskContext, input: EmailInput) -> EmailResult:
+# Call external email API
+result = await email_service.send(input.to, input.subject, input.body)
+
+return EmailResult(
+    message_id=result.id,
+    sent=True,
+)
+```
+
+**Use in a workflow:**
+
+```python
+@workflow(name="notify_user", version="1.0.0")
+async def notify_user(ctx: WorkflowContext, user_email: str) -> str:
+email_input = EmailInput(
+    to=user_email,
+    subject="Welcome!",
+    body="Thanks for signing up.",
+)
+
+result: EmailResult = await ctx.execute_task(send_email, input=email_input)
+
+return result.message_id
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+### Next Steps
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/tasks/configuration" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Configuration →</h3>
+      <p className="text-sm text-foreground-light">
+        Configure task macros, retry policies, timeouts, and task context
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/tasks/idempotency" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Idempotency Patterns →</h3>
+      <p className="text-sm text-foreground-light">
+        Learn how to make tasks safe to retry
+      </p>
+    </div>
+  </Link>
+</div>

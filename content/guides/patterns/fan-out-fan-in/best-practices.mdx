@@ -1,0 +1,337 @@
+---
+id: 'fan-out-best-practices'
+title: 'Best Practices & Performance'
+description: 'Guidelines, performance tuning, and real-world use cases for fan-out/fan-in patterns'
+sidebar_label: 'Best Practices'
+---
+
+## Best Practices
+
+### 1. Control Concurrency
+
+Always limit the number of parallel operations to avoid overwhelming downstream systems, exhausting database connections, or running out of memory. Start with a conservative limit (e.g., 50) and tune based on monitoring.
+
+```rust
+// Good - Controlled concurrency
+const MAX_CONCURRENT: usize = 50;
+
+for chunk in items.chunks(MAX_CONCURRENT) {
+    let tasks: Vec<_> = chunk
+        .iter()
+        .map(|item| ctx.execute_task(process_item, item.clone()))
+        .collect();
+
+    for task in tasks {
+        results.push(task.await?);
+    }
+}
+
+// Bad - Unbounded parallelism (could be 10,000+ items!)
+let tasks: Vec<_> = items
+    .iter()
+    .map(|item| ctx.execute_task(process_item, item.clone()))
+    .collect();
+```
+
+### 2. Handle Partial Failures
+
+Don't let one failed item abort the entire batch. Catch errors per-item and collect both successes and failures, giving the caller enough information to retry just the failed items or accept the partial result.
+
+```rust
+// Good - Continue on partial failures
+for (item_id, task) in task_handles {
+    match task.await {
+        Ok(result) => successful.push(result),
+        Err(e) => {
+            eprintln!("Task failed: {}", e);
+            failed.push((item_id, e));
+        }
+    }
+}
+
+// Bad - One failure stops everything
+for task in task_handles {
+    let result = task.await?;  // Aborts at first error
+    results.push(result);
+}
+```
+
+### 3. Aggregate Results Efficiently
+
+For large result sets, avoid collecting all results into memory before aggregating. Instead, compute running aggregates (sum, count, min, max) as results arrive. This keeps memory usage constant regardless of how many items you process.
+
+```rust
+// Good - Stream aggregation (constant memory)
+let mut total = 0;
+for task in tasks {
+    let value = task.await?;
+    total += value;
+}
+
+// Bad - Collect all then aggregate (memory proportional to item count)
+let results: Vec<_> = /* collect all results */;
+let total: i32 = results.iter().sum();
+```
+
+### 4. Set Appropriate Timeouts
+
+Each fanned-out task should have a timeout that matches its expected duration. Without timeouts, a single hung task can block the entire fan-in phase indefinitely.
+
+```rust
+// Good - Task-appropriate timeout
+#[task(name = "api_call", timeout_mins = 1)]    // API calls: 1 minute
+#[task(name = "batch_import", timeout_mins = 30)] // Imports: 30 minutes
+
+// Bad - Timeout too short for the operation
+#[task(name = "long_computation", timeout_mins = 1)]  // Actually takes hours!
+```
+
+### 5. Monitor Progress
+
+For long-running fan-out operations, log progress at regular intervals so operators can see how much work remains and estimate completion time.
+
+```rust
+// Good - Progress tracking
+let total = items.len();
+let mut completed = 0;
+
+for task in tasks {
+    task.await?;
+    completed += 1;
+    if completed % 100 == 0 || completed == total {
+        println!("Progress: {}/{} ({:.1}%)",
+            completed, total, (completed as f64 / total as f64) * 100.0);
+    }
+}
+```
+
+### 6. Choose Tasks vs Child Workflows
+
+Use tasks for lightweight, fast operations (under a few seconds) and child workflows for complex, multi-step operations that need independent error handling, their own journal, or may take minutes to complete.
+
+```rust
+// Good - Tasks for simple, fast operations
+for item in items {
+    ctx.execute_task(validate_item, item).await?;  // Milliseconds
+}
+
+// Good - Child workflows for complex operations
+for order in orders {
+    ctx.start_child_workflow("process_order", order).await?;  // Minutes, multi-step
+}
+
+// Bad - Child workflows for trivial operations (unnecessary overhead)
+for item in items {
+    ctx.start_child_workflow("validate_item", item).await?;  // Overkill
+}
+```
+
+---
+
+## Performance Considerations
+
+### Parallelism Limits
+
+The degree of parallelism directly impacts resource usage. Choose a concurrency level appropriate for your workload and downstream system capacity.
+
+| Concurrent Operations | Memory Usage | Network Connections | Recommended For |
+|-----------------------|--------------|---------------------|-----------------|
+| 1-10 | Minimal | Low | Small batches |
+| 10-50 | Low | Moderate | Standard processing |
+| 50-100 | Moderate | High | High throughput |
+| 100+ | High | Very High | Carefully tune |
+
+**Rule of thumb:** Start with 50 concurrent operations and tune based on monitoring.
+
+### Latency Analysis
+
+Fan-out/fan-in latency is determined by three components: the time to dispatch all tasks (fan-out overhead), the time for the slowest task to complete (parallel execution), and the time to collect results (fan-in overhead).
+
+<div className="not-prose my-8 max-w-lg mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Serial vs. Parallel — 10 ops × 100ms each</div>
+  </div>
+  <div className="grid grid-cols-2 gap-px bg-border-default">
+    <div className="bg-background px-4 py-3">
+      <div className="text-[10px] font-mono uppercase tracking-widest text-foreground-muted mb-2">Serial</div>
+      <div className="text-lg font-heading font-bold text-foreground tracking-tight">1000ms</div>
+      <p className="m-0 mt-1 text-[10px] text-foreground-muted leading-relaxed">10 × 100ms — each op waits for the one before it.</p>
+    </div>
+    <div className="bg-background px-4 py-3">
+      <div className="text-[10px] font-mono uppercase tracking-widest text-foreground-muted mb-2">Parallel fan-out</div>
+      <div className="text-lg font-heading font-bold text-foreground tracking-tight">111ms <span className="text-[11px] font-mono font-normal text-foreground-muted">· 9× faster</span></div>
+      <p className="m-0 mt-1 text-[10px] text-foreground-muted leading-relaxed">10ms fan-out + 100ms slowest op + 1ms fan-in.</p>
+    </div>
+  </div>
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] font-mono text-foreground-muted">total = fan-out + MAX(op times) + fan-in</span>
+  </div>
+</div>
+
+### Result Collection Strategies
+
+Choose a collection strategy based on the number of results and available memory.
+
+```rust
+// Strategy 1: Collect all (good for < 10K results)
+let results: Vec<_> = /* await all tasks */;
+
+// Strategy 2: Stream aggregation (good for any size, constant memory)
+let mut aggregate = Aggregate::new();
+for task in tasks {
+    let result = task.await?;
+    aggregate.add(result);
+}
+
+// Strategy 3: Batch collection (good for > 10K results)
+for chunk in task_handles.chunks(1000) {
+    let batch_results = /* await chunk */;
+    persist_batch(batch_results).await?;
+}
+```
+
+---
+
+## Common Patterns Summary
+
+| Pattern | Use Case | Example |
+|---------|----------|---------|
+| **Basic Fan-Out/Fan-In** | Independent operations | Parallel API calls |
+| **Rate-Limited Fan-Out** | Protect downstream systems | API with rate limits |
+| **Partial Failure Handling** | Resilient processing | Optional validations |
+| **Dynamic Fan-Out** | Variable workload | Multi-source aggregation |
+| **Nested Fan-Out** | Hierarchical processing | Region → Store → Product |
+| **Streaming Fan-In** | Large result sets | Big data aggregation |
+
+---
+
+## Real-World Use Cases
+
+### Multi-API Data Aggregation
+
+<div className="not-prose my-8 max-w-sm mx-auto text-center">
+  <div className="border bg-surface-75 p-3">
+    <div className="text-xs font-medium text-foreground">API Aggregator</div>
+  </div>
+  <div className="flex flex-col items-center">
+    <div className="w-px h-3 bg-border-strong" />
+    <span className="text-[10px] font-mono text-foreground-muted py-0.5">fan-out · parallel</span>
+    <div className="w-px h-3 bg-border-strong" />
+  </div>
+  <div className="border p-3 space-y-1.5">
+    <div className="text-[11px] text-foreground-muted">Call Weather API</div>
+    <div className="text-[11px] text-foreground-muted">Call News API</div>
+    <div className="text-[11px] text-foreground-muted">Call Stock API</div>
+    <div className="text-[11px] text-foreground-muted">Call Traffic API</div>
+    <div className="text-[11px] text-foreground-muted">Call Events API</div>
+  </div>
+  <div className="flex flex-col items-center">
+    <div className="w-px h-3 bg-border-strong" />
+    <span className="text-[10px] font-mono text-foreground-muted py-0.5">fan-in · gather</span>
+    <div className="w-px h-3 bg-border-strong" />
+  </div>
+  <div className="border bg-surface-75 p-3">
+    <div className="text-xs font-medium text-foreground">Aggregate All Data</div>
+  </div>
+  <div className="flex justify-center"><div className="w-px h-3 bg-border-strong" /></div>
+  <div className="border bg-background p-3">
+    <div className="text-xs font-medium text-foreground">Return Dashboard</div>
+  </div>
+</div>
+
+### Batch Email Sending
+
+<div className="not-prose my-8 max-w-sm mx-auto text-center">
+  <div className="border bg-surface-75 p-3">
+    <div className="text-xs font-medium text-foreground">Email Campaign</div>
+  </div>
+  <div className="flex flex-col items-center">
+    <div className="w-px h-3 bg-border-strong" />
+    <span className="text-[10px] font-mono text-foreground-muted py-0.5">fan-out · parallel</span>
+    <div className="w-px h-3 bg-border-strong" />
+  </div>
+  <div className="border p-3 space-y-1.5">
+    <div className="text-[11px] text-foreground-muted">Send to segment 1 · 1000 emails</div>
+    <div className="text-[11px] text-foreground-muted">Send to segment 2 · 1000 emails</div>
+    <div className="text-[11px] text-foreground-muted">Send to segment 3 · 1000 emails</div>
+    <div className="text-[11px] text-foreground-muted">Send to segment 4 · 1000 emails</div>
+    <div className="text-[11px] text-foreground-muted">Send to segment 5 · 1000 emails</div>
+  </div>
+  <div className="flex flex-col items-center">
+    <div className="w-px h-3 bg-border-strong" />
+    <span className="text-[10px] font-mono text-foreground-muted py-0.5">fan-in · gather</span>
+    <div className="w-px h-3 bg-border-strong" />
+  </div>
+  <div className="border bg-surface-75 p-3">
+    <div className="text-xs font-medium text-foreground">Collect Delivery Stats</div>
+  </div>
+  <div className="flex justify-center"><div className="w-px h-3 bg-border-strong" /></div>
+  <div className="border bg-background p-3">
+    <div className="text-xs font-medium text-foreground">Generate Report</div>
+  </div>
+</div>
+
+### Distributed Data Processing
+
+<div className="not-prose my-8 max-w-sm mx-auto text-center">
+  <div className="border bg-surface-75 p-3">
+    <div className="text-xs font-medium text-foreground">ETL Pipeline</div>
+  </div>
+  <div className="flex flex-col items-center">
+    <div className="w-px h-3 bg-border-strong" />
+    <span className="text-[10px] font-mono text-foreground-muted py-0.5">fan-out · parallel</span>
+    <div className="w-px h-3 bg-border-strong" />
+  </div>
+  <div className="border p-3 space-y-1.5">
+    <div className="text-[11px] text-foreground-muted">Extract from DB1</div>
+    <div className="text-[11px] text-foreground-muted">Extract from DB2</div>
+    <div className="text-[11px] text-foreground-muted">Extract from S3</div>
+    <div className="text-[11px] text-foreground-muted">Extract from API</div>
+    <div className="text-[11px] text-foreground-muted">Extract from CSV</div>
+  </div>
+  <div className="flex flex-col items-center">
+    <div className="w-px h-3 bg-border-strong" />
+    <span className="text-[10px] font-mono text-foreground-muted py-0.5">fan-in · gather</span>
+    <div className="w-px h-3 bg-border-strong" />
+  </div>
+  <div className="border bg-surface-75 p-3">
+    <div className="text-xs font-medium text-foreground">Transform &amp; Validate</div>
+  </div>
+  <div className="flex justify-center"><div className="w-px h-3 bg-border-strong" /></div>
+  <div className="border bg-background p-3">
+    <div className="text-xs font-medium text-foreground">Load to Data Warehouse</div>
+  </div>
+</div>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/patterns/fan-out-fan-in" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Overview & Basic Fan-Out</h3>
+      <p className="text-sm text-foreground-light">
+        Start with the basic fan-out/fan-in pattern
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/parent-child" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Parent-Child Orchestration</h3>
+      <p className="text-sm text-foreground-light">
+        Combine fan-out with child workflows for complex hierarchies
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/error-handling" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Error Handling</h3>
+      <p className="text-sm text-foreground-light">
+        Learn about retry policies and resilience patterns
+      </p>
+    </div>
+  </Link>
+</div>

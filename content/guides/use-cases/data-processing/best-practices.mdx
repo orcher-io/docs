@@ -1,0 +1,76 @@
+---
+id: 'data-processing-best-practices'
+title: 'Best Practices & Performance'
+description: 'Production tips, performance optimization, and real-world examples for data pipelines'
+sidebar_label: 'Best Practices'
+---
+
+Everything on this page assumes the patterns from this section — [batch processing](/guides/use-cases/data-processing/batch-processing), [parallel ETL](/guides/use-cases/data-processing/parallel-etl), [scheduled sync](/guides/use-cases/data-processing/scheduled-sync), and [data validation](/guides/use-cases/data-processing/data-validation). Each practice below links back to the pattern that demonstrates it.
+
+## Design Principles
+
+### Design for Idempotency
+
+Every task in a data pipeline can be retried after a failure, so all write operations must be idempotent. Use `UPSERT` (INSERT ... ON CONFLICT UPDATE) instead of plain `INSERT`, include deduplication keys in your records, and design transforms to produce the same output given the same input. This is the single most important practice for reliable data pipelines — [crash recovery, step by step](/guides/use-cases/data-processing/batch-processing#crash-recovery-step-by-step) shows exactly how a retry can re-run a write that already reached the database.
+
+### Choose the Right Batch Size
+
+Batch size directly affects throughput, memory usage, and checkpoint granularity. Smaller batches (100-500 records) give finer checkpoints and lower memory usage but more overhead per record. Larger batches (1,000-10,000 records) maximize throughput but mean more work is lost on failure. Start with 1,000 records per batch and tune based on your record size and failure frequency.
+
+| Record Size | Recommended Batch Size | Checkpoint Frequency |
+|-------------|----------------------|---------------------|
+| < 1 KB | 5,000 - 10,000 | Every ~10 seconds |
+| 1-10 KB | 1,000 - 5,000 | Every ~5 seconds |
+| 10-100 KB | 100 - 500 | Every ~2 seconds |
+| > 100 KB | 10 - 50 | Every record |
+
+### Handle Partial Failures Gracefully
+
+Not every batch will succeed, and that's OK. Design your pipeline to continue processing remaining batches when one fails, collect failed batch indices for retry, and provide a summary of what succeeded and what didn't. The [quarantine pattern](/guides/use-cases/data-processing/data-validation) is especially useful — load clean data immediately and deal with invalid records separately. For multi-source pipelines, [failure isolation](/guides/use-cases/data-processing/parallel-etl#failure-isolation) keeps one source's failure from touching the rest.
+
+### Use Child Workflows for Source Isolation
+
+When processing multiple data sources, use child workflows rather than running everything in a single workflow. Each child has its own journal and error handling, so a failure in one source (e.g., a network timeout to an external API) doesn't block or affect the others. The parent workflow collects results and reports aggregate status. [Parallel ETL](/guides/use-cases/data-processing/parallel-etl) walks through this pattern end-to-end.
+
+### Schedule with Durable Timers, Not External Cron
+
+Instead of using an external scheduler such as cron to trigger pipeline runs, use a long-running Orcher workflow with `ctx.sleep()`. The workflow maintains its own watermark state, sleeps between runs using durable timers (zero resource consumption), and resumes exactly where it left off after restarts. This eliminates the need for a separate scheduling system and keeps all pipeline logic in one place — see [surviving a deploy mid-sleep](/guides/use-cases/data-processing/scheduled-sync#surviving-a-deploy-mid-sleep) for why this beats cron during rollouts.
+
+---
+
+## Real-World Examples
+
+These are common data pipeline scenarios that Orcher handles well, with the pattern combination each maps to:
+
+- **Stripe to Snowflake sync** — Incremental sync of payment events every 5 minutes with deduplication and watermark tracking → [Scheduled Sync](/guides/use-cases/data-processing/scheduled-sync)
+- **Multi-source analytics** — Fan-out child workflows to pull from Google Analytics, Facebook Ads, and Stripe concurrently, then aggregate into a unified reporting table → [Parallel ETL](/guides/use-cases/data-processing/parallel-etl)
+- **Data warehouse ETL** — Nightly batch processing of millions of records with parallel transforms and automatic checkpoint/resume → [Batch Processing](/guides/use-cases/data-processing/batch-processing) + [Parallel ETL](/guides/use-cases/data-processing/parallel-etl)
+- **Event stream processing** — Consume from Kafka or Redis Streams, transform events, and load into a time-series database, with idempotent writes so a redelivered event is counted once → [Scheduled Sync](/guides/use-cases/data-processing/scheduled-sync) with an offset watermark
+- **Database migration** — Batch-migrate records between databases with validation, quarantine for incompatible rows, and progress tracking → [Batch Processing](/guides/use-cases/data-processing/batch-processing) + [Data Validation](/guides/use-cases/data-processing/data-validation)
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/patterns/fan-out-fan-in" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Fan-Out/Fan-In Pattern</h3>
+      <p className="text-sm text-foreground-light">
+        Deep dive into parallel processing with rate limiting and partial failure handling.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/long-running" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Long-Running Processes</h3>
+      <p className="text-sm text-foreground-light">
+        Durable timers, scheduled operations, and recurring pipeline execution.
+      </p>
+    </div>
+  </Link>
+</div>
+
+- Previous: [Data Validation](/guides/use-cases/data-processing/data-validation)
+- Back to [Data Pipelines & ETL overview](/guides/use-cases/data-processing)

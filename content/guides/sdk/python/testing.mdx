@@ -1,0 +1,98 @@
+---
+id: python-testing
+title: Testing
+description: Test workflows with the Python SDK's in-memory environment, with mocked tasks, assertions on task calls and a test clock
+sidebar_label: 'Testing'
+---
+
+`orcher.testing.TestWorkflowEnvironment` runs a workflow in memory, with no engine and no worker. Every task the workflow calls is answered by a mock you set up by task name, the environment records the calls, and `ctx.sleep()` moves a test clock instead of waiting.
+
+The examples use [pytest](https://docs.pytest.org/) with [pytest-asyncio](https://pytest-asyncio.readthedocs.io/).
+
+---
+
+## The workflow under test
+
+<$CodeSample path="python/testing/orders.py" region="workflow" />
+
+<$CodeSample path="python/testing/test_orders.py" region="imports" />
+
+---
+
+## Mocking tasks
+
+Mock each task by its registered name. A task the workflow calls without a mock raises `ValueError`, so a fixture that mocks them all keeps each test short:
+
+<$CodeSample path="python/testing/test_orders.py" region="fixture" />
+
+## Running a workflow
+
+`execute_workflow` takes the workflow function (or class) and its input, which reaches the workflow as a worker would pass it: a dict is spread into keyword arguments. It returns the workflow's result, or raises what the workflow raised:
+
+<$CodeSample path="python/testing/test_orders.py" region="basic" />
+
+---
+
+## Asserting on task calls
+
+Pass `TestWorkflowOptions(workflow_id=...)` to refer to the run afterwards. A mock receives the task's keyword arguments as one dict, which is what `assert_task_called_with` compares:
+
+<$CodeSample path="python/testing/test_orders.py" region="assertions" />
+
+The other assertions are `assert_task_not_called(name)` and `assert_workflow_failed(workflow_id)`; `get_execution_trace(workflow_id)` returns everything recorded about a run.
+
+---
+
+## Failures
+
+`.throws()` makes a mocked task raise. The exception reaches the workflow as raised, so a test can also cover a workflow that catches it:
+
+<$CodeSample path="python/testing/test_orders.py" region="failure" />
+
+In the environment a mocked task is called once: there are no retries, and a failure is not turned into the `TaskError` a real worker raises after the retries are used up. A workflow that catches `TaskError` needs the mock to throw one to take that path.
+
+---
+
+## Other mock strategies
+
+<$CodeSample path="python/testing/test_orders.py" region="strategies" />
+
+`MockTaskBuilder` also has `returns_once_then(first, rest)`, `throws_once_then(error, value)` and the aliases `resolves()` and `rejects()`.
+
+---
+
+## Time
+
+`ctx.sleep()` advances the environment's clock by its duration instead of waiting, so a workflow that sleeps for an hour finishes at once:
+
+<$CodeSample path="python/testing/test_orders.py" region="time" />
+
+`env.advance_time(ms)`, `env.advance_time_to(datetime)` and `env.set_current_time(datetime)` move the clock directly.
+
+---
+
+## What the environment supports
+
+The workflow runs with a test context, not a `WorkflowContext`, and in `orcher-sdk` 0.4.4 that context supports only part of the API:
+
+| Supported | Not supported |
+|---|---|
+| `execute_task`, `sleep`, `set_state`, `get_state(key)` (no default argument) | `execute`, `ctx.time`, `ctx.random`, `ctx.info`, events, child workflows, sessions, `restart_fresh`, queries and updates |
+
+A workflow that uses the unsupported parts fails in the environment with `AttributeError` or `TypeError`. Test those workflows against a real engine instead: the [quickstart](/guides/getting-started/quickstart) starts one locally.
+
+---
+
+## Testing task logic
+
+A task is an ordinary function, so test its logic directly. Keep the logic in plain functions and the task a thin wrapper around them, so the tests need no `TaskContext`:
+
+<$CodeSample path="python/testing/pricing.py" region="logic" />
+
+---
+
+## Next steps
+
+- [Workflows](/guides/sdk/python/workflows): what the workflows under test can do
+- [Tasks](/guides/sdk/python/tasks): task design for testability
+- [Patterns](/guides/sdk/python/patterns): workflows worth testing

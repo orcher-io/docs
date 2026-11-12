@@ -1,0 +1,281 @@
+---
+id: 'fan-out-dynamic'
+title: 'Dynamic Fan-Out'
+description: 'Determine the degree of parallelism from runtime data in fan-out operations'
+sidebar_label: 'Dynamic Fan-Out'
+---
+
+## Dynamic Fan-Out
+
+When the number of parallel operations isn't known at compile time, dynamic fan-out determines the degree of parallelism from runtime data. This is common when aggregating data from a configurable set of sources, processing items from a database query, or distributing work based on user input. The workflow iterates over the dynamic collection, spawns a task for each item, and then collects all results.
+
+<div className="not-prose my-8 max-w-md mx-auto">
+  <div className="flex flex-col items-center">
+    {/* Query */}
+    <div className="border bg-surface-75 px-5 py-2 text-center">
+      <div className="text-xs font-medium text-foreground">Fetch Items</div>
+      <div className="text-[10px] text-foreground-muted">DB query · API call · user input</div>
+    </div>
+    <div className="w-px h-4 bg-border-strong" />
+    {/* Runtime count */}
+    <div className="border bg-surface-100 px-4 py-1.5 text-center">
+      <div className="text-[10px] font-mono text-foreground-muted">N items returned</div>
+    </div>
+    <div className="w-px h-4 bg-border-strong" />
+    <div className="text-[10px] font-mono uppercase tracking-wider text-foreground-muted mb-1">fan-out</div>
+    {/* Dynamic operations */}
+    <div className="relative w-full">
+      <div className="absolute top-0 h-px bg-border-strong" style={{ left: 'calc(10% - 0.2rem)', right: 'calc(10% - 0.2rem)' }} />
+      <div className="grid grid-cols-5 gap-1.5">
+        {['Item 1', 'Item 2', 'Item 3', '...', 'Item N'].map((item, i) => (
+          <div key={i} className="flex flex-col items-center">
+            <div className="w-px h-4 bg-border-strong" />
+            <div className={`border w-full py-2 px-1 text-center ${item === '...' ? 'border-dashed bg-transparent' : 'bg-background'}`}>
+              <div className="text-[10px] font-medium text-foreground">{item}</div>
+            </div>
+            <div className="w-px h-4 bg-border-strong" />
+          </div>
+        ))}
+      </div>
+      <div className="absolute bottom-0 h-px bg-border-strong" style={{ left: 'calc(10% - 0.2rem)', right: 'calc(10% - 0.2rem)' }} />
+    </div>
+    <div className="text-[10px] font-mono uppercase tracking-wider text-foreground-muted mt-1">fan-in</div>
+    <div className="w-px h-4 bg-border-strong" />
+    {/* Collect */}
+    <div className="border bg-surface-75 px-5 py-2 text-center">
+      <div className="text-xs font-medium text-foreground">Collect Results</div>
+    </div>
+  </div>
+</div>
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DataSource {
+    source_id: String,
+    endpoint: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AggregatedData {
+    total_sources: usize,
+    total_records: usize,
+    data: Vec<SourceData>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SourceData {
+    source_id: String,
+    record_count: usize,
+}
+
+// Task to fetch data from a single source
+#[task(name = "fetch_source_data")]
+pub async fn fetch_source_data(
+    _ctx: TaskContext,
+    source: DataSource,
+) -> Result<SourceData> {
+    let record_count = (source.source_id.len() * 100) as usize;
+
+    Ok(SourceData {
+        source_id: source.source_id,
+        record_count,
+    })
+}
+
+// Dynamic fan-out based on runtime data
+#[workflow(name = "data_aggregator", version = "1.0.0")]
+pub async fn data_aggregator(
+    ctx: WorkflowContext,
+    sources: Vec<DataSource>,
+) -> Result<AggregatedData> {
+    println!("Aggregating data from {} sources", sources.len());
+
+    // Fan-Out: Query all sources in parallel
+    let mut task_handles = Vec::new();
+
+    for source in &sources {
+        println!("Starting query for source: {}", source.source_id);
+        let task = ctx.execute_task(fetch_source_data, source.clone());
+        task_handles.push(task);
+    }
+
+    // Fan-In: Collect data from all sources
+    let mut all_data = Vec::new();
+    let mut total_records = 0;
+
+    for task in task_handles {
+        let data: SourceData = task.await?;
+        total_records += data.record_count;
+        all_data.push(data);
+    }
+
+    println!("Aggregation complete: {} records from {} sources",
+        total_records, all_data.len());
+
+    Ok(AggregatedData {
+        total_sources: all_data.len(),
+        total_records,
+        data: all_data,
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import {
+  Workflow, Tasks, Task, WorkflowContext, TaskContext, createTaskRefs
+} from '@orcher/sdk';
+
+interface DataSource {
+  sourceId: string;
+  endpoint: string;
+}
+
+interface AggregatedData {
+  totalSources: number;
+  totalRecords: number;
+  data: SourceData[];
+}
+
+interface SourceData {
+  sourceId: string;
+  recordCount: number;
+}
+
+@Tasks()
+class DataTasks {
+  // Task to fetch data from a single source
+  @Task({ name: 'fetchSourceData' })
+  async fetchSourceData(ctx: TaskContext, source: DataSource): Promise<SourceData> {
+    const recordCount = source.sourceId.length * 100;
+
+    return {
+      sourceId: source.sourceId,
+      recordCount,
+    };
+  }
+}
+
+const tasks = createTaskRefs(DataTasks);
+
+// Dynamic fan-out based on runtime data
+@Workflow()
+class DataAggregator {
+  async run(
+    ctx: WorkflowContext,
+    sources: DataSource[],
+  ): Promise<AggregatedData> {
+    console.log(`Aggregating data from ${sources.length} sources`);
+
+    // Fan-Out: Query all sources in parallel
+    const taskPromises = sources.map((source) => {
+      console.log(`Starting query for source: ${source.sourceId}`);
+      return ctx.executeTask(tasks.fetchSourceData, source);
+    });
+
+    // Fan-In: Collect data from all sources
+    const allData = await Promise.all(taskPromises);
+
+    const totalRecords = allData.reduce((sum, d) => sum + d.recordCount, 0);
+
+    console.log(
+      `Aggregation complete: ${totalRecords} records from ${allData.length} sources`,
+    );
+
+    return {
+      totalSources: allData.length,
+      totalRecords,
+      data: allData,
+    };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext, TaskContext
+
+@task(name="fetch_source_data")
+async def fetch_source_data(ctx: TaskContext, source: dict) -> dict:
+    record_count = len(source["source_id"]) * 100
+
+    return {
+        "source_id": source["source_id"],
+        "record_count": record_count,
+    }
+
+# Dynamic fan-out based on runtime data
+@workflow(name="data_aggregator", version="1.0.0")
+async def data_aggregator(ctx: WorkflowContext, sources: list[dict]) -> dict:
+    print(f"Aggregating data from {len(sources)} sources")
+
+    # Fan-Out: Query all sources in parallel
+    task_handles = []
+    for source in sources:
+        print(f"Starting query for source: {source['source_id']}")
+        task_handles.append(ctx.execute_task(fetch_source_data, source))
+
+    # Fan-In: Collect data from all sources
+    all_data = []
+    total_records = 0
+
+    for task_handle in task_handles:
+        data = await task_handle
+        total_records += data["record_count"]
+        all_data.append(data)
+
+    print(f"Aggregation complete: {total_records} records from {len(all_data)} sources")
+
+    return {
+        "total_sources": len(all_data),
+        "total_records": total_records,
+        "data": all_data,
+    }
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/patterns/fan-out-fan-in/partial-failures" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Partial Failure Handling</h3>
+      <p className="text-sm text-foreground-light">
+        Continue processing when individual items fail
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/fan-out-fan-in/nested" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Nested Fan-Out/Fan-In</h3>
+      <p className="text-sm text-foreground-light">
+        Hierarchical parallel processing with child workflows
+      </p>
+    </div>
+  </Link>
+</div>

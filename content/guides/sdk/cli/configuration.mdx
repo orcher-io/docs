@@ -1,0 +1,239 @@
+---
+id: cli-configuration
+title: Configuration & Auth
+sidebar_label: Configuration
+---
+
+## `orcher config`
+
+Manage CLI configuration. The config file is stored at `~/.orcher/config.yaml` and uses kubectl-style contexts for managing multiple environments.
+
+### `config view`
+
+```bash
+orcher config view [--raw]
+```
+
+### `config get-contexts`
+
+```bash
+orcher config get-contexts
+```
+
+Lists all configured contexts.
+
+### `config use-context`
+
+```bash
+orcher config use-context <context>
+
+# Example
+orcher config use-context production
+```
+
+### `config set-context`
+
+```bash
+orcher config set-context <context> [OPTIONS]
+
+# Examples
+orcher config set-context production --server https://orcher.example.com --namespace prod --timeout 60
+orcher config set-context local --server http://localhost:8080
+```
+
+| Option | Description |
+|--------|-------------|
+| `--server` | Server URL |
+| `--namespace` | Default namespace |
+| `--timeout` | API timeout (seconds) |
+
+### `config set` / `config unset`
+
+```bash
+orcher config set <key> <value>
+orcher config unset <key>
+
+# Examples
+orcher config set namespace production
+orcher config set output json
+```
+
+### `config delete-context`
+
+```bash
+orcher config delete-context <context>
+```
+
+### `config test-connection`
+
+```bash
+orcher config test-connection [OPTIONS]
+
+# Examples
+orcher config test-connection
+orcher config test-connection --context production
+orcher config test-connection --server https://orcher.example.com
+```
+
+---
+
+## `orcher auth`
+
+Manage authentication. Tokens are stored securely in your platform's keychain (macOS Keychain, Linux Secret Service, Windows Credential Manager).
+
+### `auth login`
+
+```bash
+orcher auth login [OPTIONS]
+
+# Device flow (OAuth)
+orcher auth login --device --provider github
+
+# Token-based
+orcher auth login --token
+
+# Basic auth
+orcher auth login --username user@example.com
+
+# Specify server
+orcher auth login --server https://orcher.example.com --device
+```
+
+| Option | Description |
+|--------|-------------|
+| `--server` | Server URL to authenticate against |
+| `--token` | Token-based authentication (prompts for token) |
+| `--device` | OAuth device flow (opens browser) |
+| `--provider` | OAuth provider: github, google, microsoft (requires `--device`) |
+| `-u, --username` | Username for basic auth (prompts for password) |
+
+The `ORCHER_TOKEN` environment variable takes highest priority over any stored credentials.
+
+### `auth logout`
+
+```bash
+orcher auth logout
+```
+
+Removes stored credentials for the current context.
+
+### `auth status`
+
+```bash
+orcher auth status
+```
+
+Shows current authentication status.
+
+---
+
+## `orcher completion`
+
+Generate shell completion scripts.
+
+```bash
+orcher completion <shell>
+
+# Examples
+orcher completion bash >> ~/.bashrc
+orcher completion zsh >> ~/.zshrc
+orcher completion fish > ~/.config/fish/completions/orcher.fish
+```
+
+Supported shells: `bash`, `zsh`, `fish`, `powershell`, `elvish`
+
+---
+
+## Configuration File
+
+The CLI configuration lives at `~/.orcher/config.yaml` and uses kubectl-style contexts for managing multiple environments.
+
+### Example Configuration
+
+```yaml
+current-context: local
+current-profile: default
+
+contexts:
+  local:
+    server: "http://localhost:8080"
+    auth:
+      type: none
+    timeout: "30s"
+    namespace: default
+
+  production:
+    server: "https://orcher.example.com"
+    auth:
+      type: token
+      token-ref: prod-token
+    tls:
+      insecure: false
+      ca-cert: /path/to/ca.pem
+      client-cert: /path/to/cert.pem
+      client-key: /path/to/key.pem
+    timeout: "60s"
+    namespace: prod
+
+profiles:
+  default:
+    output: table
+    namespace: default
+    log-level: info
+    show-managed-fields: false
+```
+
+### Auth Types
+
+Each context can use one of four auth types:
+
+- **none** — No authentication (local development)
+- **token** — Bearer token (stored in keychain, referenced by `token-ref`)
+- **apikey** — API key (stored in keychain, referenced by `apikey-ref`)
+- **basic** — Username/password
+
+### TLS Configuration
+
+Each context can optionally configure TLS:
+
+```yaml
+contexts:
+  secure-server:
+    server: "https://orcher.example.com"
+    tls:
+      insecure: false        # Set true to skip verification
+      ca-cert: /path/to/ca.pem
+      client-cert: /path/to/cert.pem
+      client-key: /path/to/key.pem
+```
+
+---
+
+## Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `ORCHER_CONFIG` | Config file path (default: `~/.orcher/config.yaml`) |
+| `ORCHER_CONTEXT` | Override current context |
+| `ORCHER_NAMESPACE` | Override namespace |
+| `ORCHER_SERVER` | Override server URL |
+| `ORCHER_TOKEN` | API token (highest priority, overrides stored credentials) |
+| `ORCHER_REDIS_URL` | Redis connection string |
+| `ORCHER_API_URL` | REST API address (the engine's HTTP port); defaults to the `--server` host on port 8080 |
+| `ORCHER_VERBOSE` | Enable verbose logging |
+| `ORCHER_QUIET` | Quiet mode |
+| `NO_COLOR` | Disable colored output |
+| `DATABASE_URL` | Database URL (for `server start`) |
+
+---
+
+## File Paths
+
+| Item | Path |
+|------|------|
+| Config directory | `~/.orcher/` |
+| Config file | `~/.orcher/config.yaml` |
+| Templates | `~/.orcher/templates/` |
+| Cache | `~/.orcher/cache/` |
+| Logs | `~/.orcher/logs/` |
+| Credentials | OS keychain (not on disk) |

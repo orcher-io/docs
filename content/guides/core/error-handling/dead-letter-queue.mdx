@@ -1,0 +1,240 @@
+---
+id: 'error-dlq'
+title: 'Dead Letter Queue'
+sidebar_label: 'Dead Letter Queue'
+---
+
+## Dead Letter Queue
+
+When a task exhausts all its retries and still fails, you need a way to capture these persistent failures for manual investigation rather than silently dropping them. A dead letter queue (DLQ) pattern routes failed jobs to a separate storage location along with error context, retry history, and timestamps. Operations teams can then inspect, fix, and replay these jobs. This pattern is essential for any production workflow where data loss is unacceptable.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[workflow(name = "dlq_workflow", version = "1.0.0")]
+pub async fn dlq_workflow(
+  ctx: WorkflowContext,
+  job: Job,
+) -> Result<JobResult> {
+  // Try to process with retry
+  let result = ctx
+    .execute_task(process_job, job.clone())
+    .await;
+
+  match result {
+    Ok(output) => {
+      Ok(JobResult {
+        status: "completed".to_string(),
+        output: Some(output),
+      })
+    }
+    Err(e) if job.retry_count >= job.max_retries => {
+      // Exceeded max retries - move to DLQ
+      tracing::error!(
+        "Job {} exceeded max retries, moving to DLQ",
+        job.id
+      );
+
+      ctx.execute_task(move_to_dlq, (job, e.to_string()))
+        .await?;
+
+      Ok(JobResult {
+        status: "moved_to_dlq".to_string(),
+        output: None,
+      })
+    }
+    Err(e) => {
+      // Will retry
+      Err(e)
+    }
+  }
+}
+
+#[task(name = "move_to_dlq")]
+pub async fn move_to_dlq(
+  _ctx: TaskContext,
+  input: (Job, String),
+) -> Result<()> {
+  let (job, error) = input;
+
+  // Store in DLQ for manual inspection
+  let dlq_entry = DLQEntry {
+    job_id: job.id,
+    payload: job.payload,
+    error_message: error,
+    retry_count: job.retry_count,
+    failed_at: chrono::Utc::now(),
+  };
+
+  // Save to database or queue
+  dlq_storage::save(dlq_entry).await?;
+
+  // Alert operations team
+  alerting::send_alert("Job moved to DLQ", &job.id).await?;
+
+  Ok(())
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, WorkflowContext, TaskContext, createTaskRefs } from '@orcher/sdk';
+
+@Tasks()
+class JobTasks {
+  @Task({ name: 'processJob', retryPolicy: { maxAttempts: 3 } })
+  async processJob(ctx: TaskContext, job: Job): Promise<JobOutput> { /* ... */ }
+
+  @Task({ name: 'moveToDlq' })
+  async moveToDlq(ctx: TaskContext, input: { job: Job; error: string }): Promise<void> {
+    // Store in DLQ for manual inspection
+    const dlqEntry: DLQEntry = {
+      jobId: input.job.id,
+      payload: input.job.payload,
+      errorMessage: input.error,
+      retryCount: input.job.retryCount,
+      failedAt: new Date(),
+    };
+
+    // Save to database or queue
+    await dlqStorage.save(dlqEntry);
+
+    // Alert operations team
+    await alerting.sendAlert('Job moved to DLQ', input.job.id);
+  }
+}
+
+const tasks = createTaskRefs(JobTasks);
+
+@Workflow()
+class DlqWorkflow {
+  async execute(ctx: WorkflowContext, job: Job): Promise<JobResult> {
+    // Try to process with retry
+    try {
+      const output = await ctx.executeTask(tasks.processJob, job);
+
+      return {
+        status: 'completed',
+        output,
+      };
+    } catch (e) {
+      if (job.retryCount >= job.maxRetries) {
+        // Exceeded max retries - move to DLQ
+        console.error(
+          `Job ${job.id} exceeded max retries, moving to DLQ`
+        );
+
+        await ctx.executeTask(tasks.moveToDlq, { job, error: String(e) });
+
+        return {
+          status: 'moved_to_dlq',
+        };
+      }
+
+      // Will retry
+      throw e;
+    }
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from datetime import datetime, timezone
+from orcher import workflow, task, WorkflowContext, TaskContext
+
+@workflow(name="dlq_workflow", version="1.0.0")
+async def dlq_workflow(ctx: WorkflowContext, job: dict) -> dict:
+  # Try to process with retry
+  try:
+    output = await ctx.execute_task(process_job, job=job)
+
+    return {
+      "status": "completed",
+      "output": output,
+    }
+  except Exception as e:
+    if job["retry_count"] >= job["max_retries"]:
+      # Exceeded max retries - move to DLQ
+      print(
+        f"Job {job['id']} exceeded max retries, moving to DLQ"
+      )
+
+      await ctx.execute_task(
+        move_to_dlq, input={"job": job, "error": str(e)}
+      )
+
+      return {
+        "status": "moved_to_dlq",
+        "output": None,
+      }
+
+    # Will retry
+    raise
+
+
+@task(name="move_to_dlq")
+async def move_to_dlq(ctx: TaskContext, input: dict) -> None:
+  job = input["job"]
+  error = input["error"]
+
+  # Store in DLQ for manual inspection
+  dlq_entry = {
+    "job_id": job["id"],
+    "payload": job["payload"],
+    "error_message": error,
+    "retry_count": job["retry_count"],
+    "failed_at": datetime.now(timezone.utc).isoformat(),
+  }
+
+  # Save to database or queue
+  await dlq_storage.save(dlq_entry)
+
+  # Alert operations team
+  await alerting.send_alert("Job moved to DLQ", job["id"])
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/error-handling/best-practices" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Best Practices & Troubleshooting</h3>
+      <p className="text-sm text-foreground-light">
+        Guidelines for retry policies, idempotent compensation, logging, timeouts, and common issues
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/error-handling/retry-compensation" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Retry & Compensation</h3>
+      <p className="text-sm text-foreground-light">
+        Automatic retry with configurable backoff, plus saga compensation patterns you compose
+      </p>
+    </div>
+  </Link>
+</div>

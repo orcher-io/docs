@@ -1,0 +1,37 @@
+ORCHER Documentation
+Copyright 2026 The Orcher Authors
+
+This product includes software developed by Supabase, Inc.
+(https://github.com/supabase/supabase), licensed under the Apache
+License, Version 2.0:
+
+    Copyright 2024 Supabase
+
+The site code was derived from the Supabase monorepo (apps/docs and the
+packages it depends on) in April 2026. The upstream repository has no
+NOTICE file of its own. All files under the following paths are derived
+from that work and have been modified by The Orcher Authors:
+
+  app/
+  components/
+  features/
+  hooks/
+  layouts/
+  lib/
+  styles/
+  packages/common/
+  packages/config/
+  packages/ui/
+  packages/ui-patterns/
+
+The upstream package manifests of packages/common, packages/config,
+packages/ui and packages/ui-patterns carry a "license": "MIT" field; the
+upstream repository as a whole is licensed under the Apache License,
+Version 2.0, and its notice above applies to them as well.
+
+The documentation content (content/), code samples (samples/) and scripts
+(scripts/) are original work of The Orcher Authors.
+
+You may obtain a copy of the Apache License, Version 2.0 at
+
+    http://www.apache.org/licenses/LICENSE-2.0

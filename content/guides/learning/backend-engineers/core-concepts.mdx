@@ -1,0 +1,1741 @@
+---
+id: backend-engineers-core-concepts
+title: "Core Concepts"
+description: "Understanding durable execution, the workflow context, consistency models, and retry policies"
+sidebar_label: 'Core Concepts'
+---
+
+## Understanding Durable Execution
+
+Let's build a mental model of how durable execution works. This is the foundational concept that makes Orcher different from traditional backend architectures.
+
+### What Is Durable Execution?
+
+**Durable execution** means your code execution survives process crashes, network failures, and machine restarts. It's like having a built-in "save and resume" system for your business logic.
+
+In traditional programming, when your process crashes, you lose:
+- All in-memory state
+- The exact position in your code
+- Which operations completed vs. failed
+- Any partial results
+
+With durable execution, Orcher automatically preserves:
+- **Execution position**: Which line of code was executing
+- **Variable state**: Values of all task results
+- **Decision history**: Which branches (if/else) were taken
+- **Retry state**: How many attempts have been made
+
+This is achieved through **automatic journaling** - every significant operation is recorded to durable storage (PostgreSQL) before, during, and after execution.
+
+### The Problem: Partial Failures
+
+Traditional code executes top-to-bottom. When it crashes, you lose everything:
+
+```typescript
+async function processOrder(order) {
+  const charge = await stripe.charges.create({ amount: order.total }); // ← Succeeds
+  await db.orders.update({ status: 'paid' });                          // ← Succeeds
+  await emailService.send({ template: 'receipt' });                    // ← CRASHES
+  await inventory.reserve(order.items);                                 // ← Never runs
+  await analytics.track('order_completed');                             // ← Never runs
+}
+```
+
+**What happened?**
+- Customer was charged ✓
+- Database updated ✓
+- Email failed ✗
+- Inventory not reserved ✗
+- Analytics not tracked ✗
+
+**What do you do?**
+- Manually check Stripe for the charge
+- Manually reserve inventory
+- Manually send the email
+- Manually track analytics
+- Hope you didn't miss anything
+
+This is called a **partial failure**, and it's the source of countless production incidents.
+
+### The Solution: Automatic Journaling
+
+Orcher wraps each step in a `ctx.execute_task()` call. This does three things:
+
+1. **Before execution**: Checks if this step was already completed
+2. **During execution**: Runs your code
+3. **After execution**: Saves the result to the journal
+
+Here's what the journal looks like in PostgreSQL:
+
+```sql
+SELECT * FROM workflow_execution_journal WHERE workflow_id = 'wf_abc123';
+
+| step_id | task_name      | status    | result                    | created_at |
+|---------|----------------|-----------|---------------------------|------------|
+| 1       | charge_card    | completed | {"id": "ch_xyz", ...}     | 10:00:00   |
+| 2       | update_db      | completed | null                      | 10:00:01   |
+| 3       | send_email     | failed    | "SMTP timeout"            | 10:00:02   |
+```
+
+**On retry**, Orcher reads the journal:
+- Step 1: Already completed → Return cached result
+- Step 2: Already completed → Return cached result
+- Step 3: Failed → Try again
+- Step 4+: Not in journal → Execute normally
+
+This is called **deterministic replay**.
+
+### Execution Guarantees
+
+Orcher provides three execution guarantees:
+
+**1. A Completed Task Never Runs Again on Replay**
+
+Once a task's result is journaled, replay reuses that result instead of running the task again. A task that has not recorded its result yet can run again, if its worker dies or it times out, so make its side effects idempotent.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+// On replay, a completed charge_stripe returns its journaled result
+let charge = ctx.execute_task(charge_stripe, payment).await?; // ← not run again once completed
+ctx.execute_task(update_db, charge.id).await?; // ← not run again once completed
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// On replay, a completed chargeStripe returns its journaled result
+const charge = await ctx.executeTask(tasks.chargeStripe, payment); // ← not run again once completed
+await ctx.executeTask(tasks.updateDb, charge.id); // ← not run again once completed
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+# On replay, a completed charge_stripe returns its journaled result
+charge = await ctx.execute_task(charge_stripe, payment)  # ← not run again once completed
+await ctx.execute_task(update_db, charge.id)  # ← not run again once completed
+```
+
+</TabPanel>
+</Tabs>
+
+**2. Deterministic Replay**
+
+When a workflow resumes after a crash, it follows the exact same execution path. Decisions made in previous runs are preserved.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+let fraud_score = ctx.execute_task(check_fraud, user_id).await?;
+
+// On replay, this if-statement will take the SAME branch as the original run
+if fraud_score > 0.8 {
+    return Err(anyhow::anyhow!("Fraud detected"));
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+const fraudScore = await ctx.executeTask(tasks.checkFraud, userId);
+
+// On replay, this if-statement will take the SAME branch as the original run
+if (fraudScore > 0.8) {
+    throw new Error('Fraud detected');
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+fraud_score = await ctx.execute_task(check_fraud, user_id)
+
+# On replay, this if-statement will take the SAME branch as the original run
+if fraud_score > 0.8:
+    raise Exception("Fraud detected")
+```
+
+</TabPanel>
+</Tabs>
+
+This prevents bizarre bugs where a retry takes a different code path and produces inconsistent results.
+
+**3. Crash Recovery with Progress Preservation**
+
+If your workflow crashes at step 5 of 10, the retry starts at step 5. Steps 1-4 return their cached results instantly.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+// Original run crashes here ↓
+let step1 = ctx.execute_task(step_1, data).await?; // ✓ Completed
+let step2 = ctx.execute_task(step_2, step1).await?; // ✓ Completed
+let step3 = ctx.execute_task(step_3, step2).await?; // ✗ CRASH
+
+// Retry run:
+let step1 = ctx.execute_task(step_1, data).await?; // ← Returns cached result (instant)
+let step2 = ctx.execute_task(step_2, step1).await?; // ← Returns cached result (instant)
+let step3 = ctx.execute_task(step_3, step2).await?; // ← Executes for real
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Original run crashes here ↓
+const step1 = await ctx.executeTask(tasks.step1, data); // ✓ Completed
+const step2 = await ctx.executeTask(tasks.step2, step1); // ✓ Completed
+const step3 = await ctx.executeTask(tasks.step3, step2); // ✗ CRASH
+
+// Retry run:
+const step1 = await ctx.executeTask(tasks.step1, data); // ← Returns cached result (instant)
+const step2 = await ctx.executeTask(tasks.step2, step1); // ← Returns cached result (instant)
+const step3 = await ctx.executeTask(tasks.step3, step2); // ← Executes for real
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+# Original run crashes here ↓
+step1 = await ctx.execute_task(step_1, data)  # ✓ Completed
+step2 = await ctx.execute_task(step_2, step1)  # ✓ Completed
+step3 = await ctx.execute_task(step_3, step2)  # ✗ CRASH
+
+# Retry run:
+step1 = await ctx.execute_task(step_1, data)  # ← Returns cached result (instant)
+step2 = await ctx.execute_task(step_2, step1)  # ← Returns cached result (instant)
+step3 = await ctx.execute_task(step_3, step2)  # ← Executes for real
+```
+
+</TabPanel>
+</Tabs>
+
+**Why These Guarantees Matter**
+
+Traditional distributed systems achieve these guarantees through complex infrastructure:
+- Two-phase commit protocols
+- Distributed transaction coordinators
+- Consensus algorithms (Paxos, Raft)
+- Complex state machines
+
+Orcher achieves them through a simple journal in PostgreSQL. The complexity is hidden in the runtime, not your code.
+
+### Key Principle: Idempotency
+
+Because Orcher may replay your workflow, each task must be **idempotent**: running it twice produces the same result.
+
+**What is Idempotency?**
+
+An operation is idempotent if executing it multiple times has the same effect as executing it once. Think of it like pressing an elevator button - pressing it 10 times doesn't call 10 elevators.
+
+**Why Idempotency Matters in Orcher**
+
+Even though Orcher never repeats a completed step *within a workflow*, your tasks might be called more than once in other scenarios:
+- Workflow replays during development/testing
+- Manual workflow retries from the admin UI
+- Race conditions during deployments
+- External retries (e.g., user clicking "submit" twice)
+
+Making your tasks idempotent provides defense in depth.
+
+**Good (idempotent):**
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task]
+async fn update_user_balance(user_id: String, amount: i64) -> Result<()> {
+    // Uses database transaction - idempotent
+    db.query(
+        "UPDATE users SET balance = balance + $1 WHERE id = $2",
+        amount, user_id
+    ).await?;
+    Ok(())
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Task()
+async updateUserBalance(ctx: TaskContext, input: { userId: string; amount: number }): Promise<void> {
+    // Uses database transaction - idempotent
+    await db.query(
+        'UPDATE users SET balance = balance + $1 WHERE id = $2',
+        [input.amount, input.userId]
+    );
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@task(name="update_user_balance")
+async def update_user_balance(ctx: TaskContext, user_id: str, amount: int) -> None:
+    # Uses database transaction - idempotent
+    await db.execute(
+        "UPDATE users SET balance = balance + $1 WHERE id = $2",
+        amount, user_id,
+    )
+```
+
+</TabPanel>
+</Tabs>
+
+**Bad (not idempotent):**
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task]
+async fn update_user_balance(user_id: String, amount: i64) -> Result<()> {
+    // Fetches, modifies, writes - NOT idempotent if replayed
+    let user = db.get_user(user_id).await?;
+    user.balance += amount;  // ← Could double-add on replay!
+    db.save_user(user).await?;
+    Ok(())
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Task()
+async updateUserBalance(ctx: TaskContext, input: { userId: string; amount: number }): Promise<void> {
+    // Fetches, modifies, writes - NOT idempotent if replayed
+    const user = await db.getUser(input.userId);
+    user.balance += input.amount;  // ← Could double-add on replay!
+    await db.saveUser(user);
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@task(name="update_user_balance")
+async def update_user_balance(ctx: TaskContext, user_id: str, amount: int) -> None:
+    # Fetches, modifies, writes - NOT idempotent if replayed
+    user = await db.get_user(user_id)
+    user.balance += amount  # ← Could double-add on replay!
+    await db.save_user(user)
+```
+
+</TabPanel>
+</Tabs>
+
+**Why this matters**: If your task is idempotent, retries and replays have the same effect as running it once.
+
+### Deep Dive: The Journal Structure
+
+Let's look at what Orcher actually stores in PostgreSQL. Understanding this helps you reason about performance and debugging.
+
+**Journal Table Schema:**
+
+```sql
+CREATE TABLE workflow_execution_journal (
+    id UUID PRIMARY KEY,
+    workflow_id UUID NOT NULL,
+    step_id INTEGER NOT NULL,
+    task_name TEXT NOT NULL,
+    input JSONB NOT NULL,
+    result JSONB,
+    error TEXT,
+    status TEXT NOT NULL, -- 'pending', 'completed', 'failed'
+    attempt INTEGER NOT NULL DEFAULT 1,
+    created_at TIMESTAMPTZ NOT NULL,
+    completed_at TIMESTAMPTZ,
+
+    UNIQUE(workflow_id, step_id)
+);
+```
+
+**Example Journal Entries:**
+
+```sql
+-- Workflow: process_payment (wf_abc123)
+SELECT step_id, task_name, status, result FROM workflow_execution_journal
+WHERE workflow_id = 'wf_abc123'
+ORDER BY step_id;
+
+| step_id | task_name       | status    | result                                    |
+|---------|-----------------|-----------|-------------------------------------------|
+| 1       | validate_input  | completed | {"valid": true}                           |
+| 2       | check_fraud     | completed | {"score": 0.12, "risk": "low"}            |
+| 3       | charge_stripe   | completed | {"id": "ch_xyz", "amount": 5000, ...}     |
+| 4       | save_to_db      | completed | {"payment_id": "pay_123"}                 |
+| 5       | send_email      | failed    | null (error: "SMTP timeout")              |
+```
+
+**How Orcher Uses the Journal:**
+
+1. **Before task execution**: Check if `(workflow_id, step_id)` exists
+2. **If exists and completed**: Return `result` column (no execution)
+3. **If not exists**: Execute task and INSERT new row
+4. **If exists and failed**: Re-execute task and UPDATE row
+
+**Performance Implications:**
+
+- Each task execution = 1 SELECT + 1 INSERT/UPDATE query
+- Journal queries use a unique index (very fast)
+- Cached results return in ~1ms
+- Trade-off: Durability for slight overhead
+
+**Debugging with the Journal:**
+
+```sql
+-- Find all failed workflows
+SELECT workflow_id, task_name, error
+FROM workflow_execution_journal
+WHERE status = 'failed';
+
+-- See what a workflow did before crashing
+SELECT task_name, result, completed_at
+FROM workflow_execution_journal
+WHERE workflow_id = 'wf_abc123'
+ORDER BY step_id;
+
+-- Find slow tasks
+SELECT task_name, AVG(EXTRACT(EPOCH FROM (completed_at - created_at))) as avg_seconds
+FROM workflow_execution_journal
+WHERE status = 'completed'
+GROUP BY task_name
+ORDER BY avg_seconds DESC;
+```
+
+## The Workflow Context
+
+The `WorkflowContext` is your interface to Orcher's durability system. Think of it as a "time-traveling executor" that knows which steps have already run.
+
+**The Context API:**
+
+The `WorkflowContext` provides several key methods:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+pub struct WorkflowContext {
+    // Execute a task durably (most common)
+    pub async fn execute_task<F, I, O>(&self, task_fn: F, input: I) -> Result<O>;
+
+    // Start a child workflow
+    pub async fn start_child_workflow<F, I, O>(&self, workflow_fn: F, input: I) -> Result<O>;
+
+    // Sleep durably (survives crashes)
+    pub async fn sleep(&self, duration: Duration) -> Result<()>;
+
+    // Wait for an external event/signal
+    pub async fn wait_for_event(&self, event_name: &str) -> Result<Vec<u8>>;
+
+    // Get workflow metadata
+    pub fn workflow_id(&self) -> &str;
+    pub fn run_id(&self) -> &str;
+    pub fn attempt(&self) -> u32;
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+interface WorkflowContext {
+    // Execute a task durably (most common)
+    executeTask<I, O>(taskRef: TaskRef<I, O>, input: I): Promise<O>;
+
+    // Start a child workflow
+    startChildWorkflow<I, O>(workflow: WorkflowClass<I, O>, input: I): Promise<O>;
+
+    // Sleep durably (survives crashes)
+    sleep(duration: Duration): Promise<void>;
+
+    // Wait for an external event/signal
+    waitForEvent(eventName: string): Promise<any>;
+
+    // Get workflow metadata
+    workflowId(): string;
+    runId(): string;
+    attempt(): number;
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+class WorkflowContext:
+    # Execute a task durably (most common) - inputs passed as keyword args
+    async def execute_task(self, task_fn, **kwargs) -> Any: ...
+
+    # Start a child workflow
+    async def start_child_workflow(self, workflow_fn, input) -> Any: ...
+
+    # Sleep durably (survives crashes)
+    async def sleep(self, duration: timedelta) -> None: ...
+
+    # Wait for an external event/signal
+    async def wait_for_event(self, event_name: str) -> bytes: ...
+
+    # Get workflow metadata
+    def workflow_id(self) -> str: ...
+    def run_id(self) -> str: ...
+    def attempt(self) -> int: ...
+```
+
+</TabPanel>
+</Tabs>
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[workflow(name = "my_workflow")]
+pub async fn my_workflow(
+    ctx: WorkflowContext,  // ← Your durability interface
+    input: MyInput,
+) -> Result<MyOutput> {
+    // Use ctx.execute_task() for durable steps - pass the task function directly
+    let result = ctx.execute_task(my_task, data).await?;
+    Ok(result)
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Workflow({ name: 'my_workflow', version: '1.0.0' })
+class MyWorkflow {
+    async run(
+        ctx: WorkflowContext,  // ← Your durability interface
+        input: MyInput,
+    ): Promise<MyOutput> {
+        // Use ctx.executeTask() for durable steps - pass the task ref directly
+        const result = await ctx.executeTask(tasks.myTask, data);
+        return result;
+    }
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@workflow(name="my_workflow", version="1.0.0")
+async def my_workflow(
+    ctx: WorkflowContext,  # ← Your durability interface
+    input: MyInput,
+) -> MyOutput:
+    # Use ctx.execute_task() for durable steps - pass the task function directly
+    result = await ctx.execute_task(my_task, data)
+    return result
+```
+
+</TabPanel>
+</Tabs>
+
+**What `ctx.execute_task()` does:**
+
+1. **Generates a deterministic task ID** from the task name and workflow position
+2. **Checks the journal** for an existing result
+3. **If found**: Returns the cached result instantly (no execution)
+4. **If not found**: Executes the task and journals the result
+5. **On failure**: Throws an error (workflow can be retried)
+
+**Important**: Task results must be serializable (JSON). Orcher stores them in PostgreSQL.
+
+## Workflows vs Tasks
+
+Understanding the difference is crucial:
+
+**Workflow** = The orchestration logic
+- Defines the sequence of steps
+- Makes decisions (if/else, loops)
+- Handles errors and retries
+- Coordinates multiple tasks
+- Can call other workflows (child workflows)
+
+**Task** = A single unit of work
+- Performs one specific action
+- Should be idempotent
+- Returns a serializable result
+- Can be retried independently
+
+**Example:**
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+// This is a WORKFLOW - orchestrates tasks
+#[workflow(name = "process_payment")]
+pub async fn process_payment(
+    ctx: WorkflowContext,
+    payment: Payment,
+) -> Result<Receipt> {
+    // Decision logic lives in the workflow
+    let fraud_score = ctx.execute_task(check_fraud, payment.user_id).await?;
+
+    if fraud_score > 0.8 {
+        // Workflow decides to reject
+        return Err(anyhow::anyhow!("Payment flagged"));
+    }
+
+    // Workflow orchestrates multiple tasks
+    let charge = ctx.execute_task(charge_stripe, payment).await?;
+    ctx.execute_task(save_to_db, charge.id).await?;
+    ctx.execute_task(send_email, charge.receipt_url).await?;
+
+    Ok(Receipt { charge_id: charge.id })
+}
+
+// This is a TASK - does one thing
+#[task]
+async fn check_fraud(user_id: String) -> Result<f64> {
+    let response = fraud_api::check(user_id).await?;
+    Ok(response.score)
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// This is a TASK - does one thing
+@Tasks()
+class PaymentTasks {
+    @Task()
+    async checkFraud(ctx: TaskContext, userId: string): Promise<number> {
+        const response = await fraudApi.check(userId);
+        return response.score;
+    }
+
+    @Task()
+    async chargeStripe(ctx: TaskContext, payment: Payment): Promise<Charge> { /* ... */ }
+
+    @Task()
+    async saveToDb(ctx: TaskContext, chargeId: string): Promise<void> { /* ... */ }
+
+    @Task()
+    async sendEmail(ctx: TaskContext, receiptUrl: string): Promise<void> { /* ... */ }
+}
+const tasks = createTaskRefs(PaymentTasks);
+
+// This is a WORKFLOW - orchestrates tasks
+@Workflow({ name: 'process_payment', version: '1.0.0' })
+class ProcessPayment {
+    async run(ctx: WorkflowContext, payment: Payment): Promise<Receipt> {
+        // Decision logic lives in the workflow
+        const fraudScore = await ctx.executeTask(tasks.checkFraud, payment.userId);
+
+        if (fraudScore > 0.8) {
+            throw new Error('Payment flagged');
+        }
+
+        // Workflow orchestrates multiple tasks
+        const charge = await ctx.executeTask(tasks.chargeStripe, payment);
+        await ctx.executeTask(tasks.saveToDb, charge.id);
+        await ctx.executeTask(tasks.sendEmail, charge.receiptUrl);
+
+        return { chargeId: charge.id };
+    }
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+# This is a TASK - does one thing
+@task(name="check_fraud")
+async def check_fraud(ctx: TaskContext, user_id: str) -> float:
+    response = await fraud_api.check(user_id)
+    return response.score
+
+@task(name="charge_stripe")
+async def charge_stripe(ctx: TaskContext, payment: dict) -> dict: ...
+
+@task(name="save_to_db")
+async def save_to_db(ctx: TaskContext, charge_id: str) -> None: ...
+
+@task(name="send_email")
+async def send_email(ctx: TaskContext, receipt_url: str) -> None: ...
+
+# This is a WORKFLOW - orchestrates tasks
+@workflow(name="process_payment", version="1.0.0")
+async def process_payment(ctx: WorkflowContext, payment: dict) -> dict:
+    # Decision logic lives in the workflow
+    fraud_score = await ctx.execute_task(check_fraud, user_id=payment["user_id"])
+
+    if fraud_score > 0.8:
+        raise Exception("Payment flagged")
+
+    # Workflow orchestrates multiple tasks
+    charge = await ctx.execute_task(charge_stripe, payment=payment)
+    await ctx.execute_task(save_to_db, charge_id=charge["id"])
+    await ctx.execute_task(send_email, receipt_url=charge["receipt_url"])
+
+    return {"charge_id": charge["id"]}
+```
+
+</TabPanel>
+</Tabs>
+
+## Consistency Models Explained
+
+Understanding Orcher's consistency guarantees helps you build correct distributed systems.
+
+### Workflow Isolation
+
+Each workflow execution is isolated - they don't see each other's uncommitted state.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+// Workflow A
+let balance = ctx.execute_task(get_balance, user_id).await?; // Returns 100
+ctx.execute_task(add_credits, (user_id, 50)).await?; // Balance now 150
+
+// Workflow B (running concurrently for same user)
+let balance = ctx.execute_task(get_balance, user_id).await?; // Still returns 100!
+ctx.execute_task(add_credits, (user_id, 25)).await?; // Balance now 125 (lost update!)
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Workflow A
+const balance = await ctx.executeTask(tasks.getBalance, userId); // Returns 100
+await ctx.executeTask(tasks.addCredits, { userId, amount: 50 }); // Balance now 150
+
+// Workflow B (running concurrently for same user)
+const balance = await ctx.executeTask(tasks.getBalance, userId); // Still returns 100!
+await ctx.executeTask(tasks.addCredits, { userId, amount: 25 }); // Balance now 125 (lost update!)
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+# Workflow A
+balance = await ctx.execute_task(get_balance, user_id=user_id)  # Returns 100
+await ctx.execute_task(add_credits, user_id=user_id, amount=50)  # Balance now 150
+
+# Workflow B (running concurrently for same user)
+balance = await ctx.execute_task(get_balance, user_id=user_id)  # Still returns 100!
+await ctx.execute_task(add_credits, user_id=user_id, amount=25)  # Balance now 125 (lost update!)
+```
+
+</TabPanel>
+</Tabs>
+
+**Solution**: Use database-level locking or transactions within your tasks:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task]
+async fn add_credits_safely(user_id: String, amount: i64) -> Result<()> {
+    let mut tx = db.begin().await?;
+
+    // SELECT FOR UPDATE locks the row
+    tx.query("SELECT balance FROM users WHERE id = $1 FOR UPDATE", user_id).await?;
+    tx.query("UPDATE users SET balance = balance + $1 WHERE id = $2", amount, user_id).await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Task()
+async addCreditsSafely(ctx: TaskContext, input: { userId: string; amount: number }): Promise<void> {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        // SELECT FOR UPDATE locks the row
+        await client.query('SELECT balance FROM users WHERE id = $1 FOR UPDATE', [input.userId]);
+        await client.query('UPDATE users SET balance = balance + $1 WHERE id = $2', [input.amount, input.userId]);
+        await client.query('COMMIT');
+    } catch (e) {
+        await client.query('ROLLBACK');
+        throw e;
+    } finally {
+        client.release();
+    }
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@task(name="add_credits_safely")
+async def add_credits_safely(ctx: TaskContext, user_id: str, amount: int) -> None:
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # SELECT FOR UPDATE locks the row
+            await conn.fetchrow("SELECT balance FROM users WHERE id = $1 FOR UPDATE", user_id)
+            await conn.execute("UPDATE users SET balance = balance + $1 WHERE id = $2", amount, user_id)
+```
+
+</TabPanel>
+</Tabs>
+
+**Key Insight**: Orcher provides workflow-level consistency, but you still need database transactions for data-level consistency.
+
+### Once per Step, at Least Once per Task
+
+A workflow never re-runs a step whose result is journaled, but a task itself runs **at least once**: if its worker dies before reporting, or a timeout fires, it runs again, so its side effects must be idempotent.
+
+**What does this mean?**
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task]
+async fn send_notification(user_id: String, message: String) -> Result<()> {
+    // This code can run more than once if its worker dies before it reports...
+    let response = http_client.post("https://api.pushservice.com/send")
+        .json(&json!({
+            "user_id": user_id,
+            "message": message
+        }))
+        .send()
+        .await?;
+
+    // ...but if this task succeeds, then workflow fails later,
+    // the notification was already sent (can't be un-sent).
+    Ok(())
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Task()
+async sendNotification(ctx: TaskContext, input: { userId: string; message: string }): Promise<void> {
+    // This code can run more than once if its worker dies before it reports...
+    await fetch('https://api.pushservice.com/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: input.userId, message: input.message }),
+    });
+
+    // ...but if this task succeeds, then workflow fails later,
+    // the notification was already sent (can't be un-sent).
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@task(name="send_notification")
+async def send_notification(ctx: TaskContext, user_id: str, message: str) -> None:
+    # This code can run more than once if its worker dies before it reports...
+    async with httpx.AsyncClient() as client:
+        await client.post("https://api.pushservice.com/send", json={
+            "user_id": user_id,
+            "message": message,
+        })
+
+    # ...but if this task succeeds, then workflow fails later,
+    # the notification was already sent (can't be un-sent).
+```
+
+</TabPanel>
+</Tabs>
+
+**The task executes once, but the side effect persists.** This is unavoidable in distributed systems (you can't "unsend" a push notification).
+
+**Solution**: Make external APIs idempotent by including an idempotency key:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task]
+async fn send_notification(workflow_id: String, user_id: String, message: String) -> Result<()> {
+    let idempotency_key = format!("{}-notification", workflow_id);
+    let response = http_client.post("https://api.pushservice.com/send")
+        .json(&json!({
+            "idempotency_key": idempotency_key, // Key based on workflow
+            "user_id": user_id,
+            "message": message
+        }))
+        .send()
+        .await?;
+
+    Ok(())
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Task()
+async sendNotification(ctx: TaskContext, input: { workflowId: string; userId: string; message: string }): Promise<void> {
+    const idempotencyKey = `${input.workflowId}-notification`;
+    await fetch('https://api.pushservice.com/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            idempotency_key: idempotencyKey, // Key based on workflow
+            user_id: input.userId,
+            message: input.message,
+        }),
+    });
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@task(name="send_notification")
+async def send_notification(ctx: TaskContext, workflow_id: str, user_id: str, message: str) -> None:
+    idempotency_key = f"{workflow_id}-notification"
+    async with httpx.AsyncClient() as client:
+        await client.post("https://api.pushservice.com/send", json={
+            "idempotency_key": idempotency_key,  # Key based on workflow
+            "user_id": user_id,
+            "message": message,
+        })
+```
+
+</TabPanel>
+</Tabs>
+
+Now if the task is ever re-executed, the external API deduplicates using the idempotency key.
+
+### Failure Recovery Patterns
+
+Let's explore how Orcher handles different failure scenarios.
+
+**Pattern 1: Transient Failures (Network Blips)**
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task]
+async fn call_external_api(data: String) -> Result<String> {
+    // Temporary network issue, DNS failure, etc.
+    let response = http_client.get("https://api.example.com/data")
+        .send()
+        .await?; // ← May fail temporarily
+
+    Ok(response.text().await?)
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Task()
+async callExternalApi(ctx: TaskContext, data: string): Promise<string> {
+    // Temporary network issue, DNS failure, etc.
+    const response = await fetch('https://api.example.com/data'); // ← May fail temporarily
+    return await response.text();
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@task(name="call_external_api")
+async def call_external_api(ctx: TaskContext, data: str) -> str:
+    # Temporary network issue, DNS failure, etc.
+    async with httpx.AsyncClient() as client:
+        response = await client.get("https://api.example.com/data")  # ← May fail temporarily
+        return response.text
+```
+
+</TabPanel>
+</Tabs>
+
+**Orcher's Behavior:**
+- Task fails, throws error
+- Workflow pauses
+- Retry policy kicks in (exponential backoff)
+- Task re-executes after delay
+- Eventually succeeds
+
+**Pattern 2: Permanent Failures (Invalid Input)**
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task]
+async fn process_payment(amount: i64) -> Result<String> {
+    if amount <= 0 {
+        // This will never succeed, no matter how many retries
+        return Err(anyhow::anyhow!("Invalid amount"));
+    }
+
+    // ... process payment
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Task()
+async processPayment(ctx: TaskContext, amount: number): Promise<string> {
+    if (amount <= 0) {
+        // This will never succeed, no matter how many retries
+        throw new Error('Invalid amount');
+    }
+
+    // ... process payment
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@task(name="process_payment")
+async def process_payment(ctx: TaskContext, amount: int) -> str:
+    if amount <= 0:
+        # This will never succeed, no matter how many retries
+        raise ValueError("Invalid amount")
+
+    # ... process payment
+```
+
+</TabPanel>
+</Tabs>
+
+**Orcher's Behavior:**
+- Task fails immediately
+- Workflow fails
+- Retries happen but keep failing
+- Eventually hits max retry limit
+- Workflow moves to "failed" state
+- Requires manual intervention or compensation
+
+**Pattern 3: Partial Progress (Long-Running Tasks)**
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task]
+async fn process_large_file(file_url: String) -> Result<String> {
+    // Download 1GB file
+    let data = download_file(file_url).await?; // ← Crashes here
+
+    // Transform data (expensive)
+    let transformed = transform_data(data).await?;
+
+    // Upload result
+    let result_url = upload_file(transformed).await?;
+
+    Ok(result_url)
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Task()
+async processLargeFile(ctx: TaskContext, fileUrl: string): Promise<string> {
+    // Download 1GB file
+    const data = await downloadFile(fileUrl); // ← Crashes here
+
+    // Transform data (expensive)
+    const transformed = await transformData(data);
+
+    // Upload result
+    const resultUrl = await uploadFile(transformed);
+
+    return resultUrl;
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@task(name="process_large_file")
+async def process_large_file(ctx: TaskContext, file_url: str) -> str:
+    # Download 1GB file
+    data = await download_file(file_url)  # ← Crashes here
+
+    # Transform data (expensive)
+    transformed = await transform_data(data)
+
+    # Upload result
+    result_url = await upload_file(transformed)
+
+    return result_url
+```
+
+</TabPanel>
+</Tabs>
+
+**Problem**: If crash happens after download, retry downloads again (wastes time/bandwidth).
+
+**Solution**: Break into smaller tasks:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[workflow]
+pub async fn process_large_file_workflow(ctx: WorkflowContext, file_url: String) -> Result<String> {
+    // Each task is a checkpoint
+    let downloaded_path = ctx.execute_task(download, file_url).await?;
+    let transformed_path = ctx.execute_task(transform, downloaded_path).await?;
+    let result_url = ctx.execute_task(upload, transformed_path).await?;
+
+    Ok(result_url)
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Workflow({ name: 'process_large_file', version: '1.0.0' })
+class ProcessLargeFileWorkflow {
+    async run(ctx: WorkflowContext, fileUrl: string): Promise<string> {
+        // Each task is a checkpoint
+        const downloadedPath = await ctx.executeTask(tasks.download, fileUrl);
+        const transformedPath = await ctx.executeTask(tasks.transform, downloadedPath);
+        const resultUrl = await ctx.executeTask(tasks.upload, transformedPath);
+
+        return resultUrl;
+    }
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@workflow(name="process_large_file", version="1.0.0")
+async def process_large_file_workflow(ctx: WorkflowContext, file_url: str) -> str:
+    # Each task is a checkpoint
+    downloaded_path = await ctx.execute_task(download, file_url=file_url)
+    transformed_path = await ctx.execute_task(transform, path=downloaded_path)
+    result_url = await ctx.execute_task(upload, path=transformed_path)
+
+    return result_url
+```
+
+</TabPanel>
+</Tabs>
+
+Now if crash happens after download, the retry skips re-downloading.
+
+## Architecture Deep Dive
+
+Let's understand how Orcher fits into your system and the engineering decisions behind its design.
+
+### Component Overview
+
+Orcher uses a **client-server architecture**: an Orchestrator server handles workflow state, journaling, and queue management, while SDK Workers connect to it via gRPC to execute your workflow and task code. The architecture has three layers:
+
+<div className="not-prose my-8 max-w-md mx-auto">
+  <div className="border bg-surface-75 px-4 py-3 text-center">
+    <div className="text-[11px] font-medium font-mono text-foreground">SDK Workers</div>
+    <div className="text-[10px] text-foreground-muted mt-0.5">your app process — runs workflows & tasks, holds no state</div>
+  </div>
+  <div className="flex justify-center">
+    <div className="flex items-center gap-1.5">
+      <div className="w-px h-6 bg-border-strong" />
+      <span className="text-[10px] font-mono text-foreground-muted">gRPC :50051 — long-poll for work</span>
+    </div>
+  </div>
+  <div className="border bg-surface-100 px-4 py-3 text-center">
+    <div className="text-[11px] font-medium font-mono text-foreground">Orchestrator Server</div>
+    <div className="text-[10px] text-foreground-muted mt-0.5">workflow engine · journaling · retries · queue dispatch</div>
+    <div className="text-[9px] text-foreground-muted mt-1">gRPC :50051 · HTTP :8001</div>
+  </div>
+  <div className="flex justify-center">
+    <div className="flex items-center gap-1.5">
+      <div className="w-px h-6 bg-border-strong" />
+      <span className="text-[10px] font-mono text-foreground-muted">reads & writes</span>
+    </div>
+  </div>
+  <div className="border bg-background px-4 py-3 text-center">
+    <div className="text-[11px] font-medium font-mono text-foreground">PostgreSQL</div>
+    <div className="text-[10px] text-foreground-muted mt-0.5">journal · queue (SKIP LOCKED) · app data — one database</div>
+  </div>
+  <p className="text-[10px] text-foreground-muted text-center mt-3 mb-0">
+    Workers are stateless and disposable; all durability lives in the Orchestrator's Postgres. No message broker.
+  </p>
+</div>
+
+**Layer 1 — Orchestrator Server**
+
+- **gRPC API** (port 50051): Accepts workflow start requests, polls from workers, and delivers task assignments
+- **HTTP API** (port 8001): Provides management endpoints, health checks, and observability
+- **Workflow Engine**: Manages workflow state, journaling, deterministic replay, retry policies, and queue dispatch
+
+The Orchestrator server is a standalone process that you deploy alongside your application infrastructure.
+
+**Layer 2 — SDK Workers (your application process)**
+
+- **Worker**: Connects to the Orchestrator server via gRPC and registers your workflows and tasks
+- **Worker Pool**: Long-polls the Orchestrator for pending workflows and tasks, then executes them locally
+- **API Server** (optional): Your HTTP server can use the Orcher client SDK to start workflows by calling the Orchestrator's gRPC API
+
+Workers run your business logic. They do not store workflow state themselves -- all state lives in the Orchestrator's database.
+
+**Layer 3 — PostgreSQL**
+
+- Workflow journal (execution history)
+- Queue table (pending workflows)
+- Task execution tracking
+- Managed entirely by the Orchestrator server
+
+**Key Points:**
+
+1. **Client-Server Model**: The Orchestrator server is a separate process; SDK Workers connect to it over the network
+2. **Single Database**: The Orchestrator stores everything in PostgreSQL (simpler operations)
+3. **Worker Pattern**: Your application runs as one or more SDK Workers that long-poll the Orchestrator for work
+4. **No Message Queue**: PostgreSQL acts as the queue (SKIP LOCKED queries), managed by the Orchestrator
+
+### Execution Flow
+
+Let's trace a request through the system — from the HTTP call that starts a workflow to its completion or retry:
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">A Request's Lifecycle</div>
+  </div>
+  {[
+    { who: 'API', label: 'start_workflow', detail: 'non-blocking — returns a workflow_id immediately' },
+    { who: 'Orchestrator', label: 'enqueue', detail: 'row written to workflow_queue as pending' },
+    { who: 'Worker', label: 'long-poll → assigned', detail: 'picks up the workflow, runs it locally' },
+    { who: 'Worker', label: 'execute_task × N', detail: 'each result journaled to Postgres via the Orchestrator' },
+    { who: 'Orchestrator', label: 'complete / retry', detail: 'mark completed — or re-queue as pending with a backoff' },
+  ].map((row, i, arr) => (
+    <div key={i}>
+      <div className="px-4 py-2 flex items-center gap-3">
+        <span className="text-[9px] font-mono uppercase tracking-wider text-foreground-muted w-[4.5rem] shrink-0 text-right">{row.who}</span>
+        <div className="w-px self-stretch bg-border-strong" />
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{row.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{row.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-[5.1rem]">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">The API returns in milliseconds; the workflow runs durably in the background.</span>
+  </div>
+</div>
+
+**Step 1: API receives request**
+```rust
+// API handler
+async fn create_payment(
+    Extension(orcher): Extension<Orcher>,
+    Json(payment): Json<PaymentRequest>,
+) -> Result<Json<Response>, StatusCode> {
+    // Start workflow (non-blocking)
+    let workflow_id = orcher
+        .start_workflow("process_payment", payment)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Return immediately (workflow runs in background)
+    Ok(Json(Response { workflow_id }))
+}
+```
+
+**Step 2: Workflow queued**
+```sql
+-- Orchestrator writes to queue table
+INSERT INTO workflow_queue (id, workflow_name, input, status, created_at)
+VALUES ('wf_abc123', 'process_payment', '{"amount": 5000, ...}', 'pending', NOW());
+```
+
+**Step 3: Worker picks up workflow**
+```rust
+// SDK Worker long-polls the Orchestrator via gRPC
+// When a workflow is available, the Orchestrator assigns it to the worker
+// The worker executes the workflow function locally
+```
+
+**Step 4: Workflow executes with journaling**
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+// Each execute_task() call journals to PostgreSQL via the Orchestrator
+ctx.execute_task(charge_stripe, payment).await?;
+// Orchestrator writes: INSERT INTO workflow_execution_journal (workflow_id, step_id, task_name, result, ...)
+
+ctx.execute_task(update_db, charge_id).await?;
+// Orchestrator writes: INSERT INTO workflow_execution_journal (workflow_id, step_id, task_name, result, ...)
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Each executeTask() call journals to PostgreSQL via the Orchestrator
+await ctx.executeTask(tasks.chargeStripe, payment);
+// Orchestrator writes: INSERT INTO workflow_execution_journal (workflow_id, step_id, task_name, result, ...)
+
+await ctx.executeTask(tasks.updateDb, chargeId);
+// Orchestrator writes: INSERT INTO workflow_execution_journal (workflow_id, step_id, task_name, result, ...)
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+# Each execute_task() call journals to PostgreSQL via the Orchestrator
+await ctx.execute_task(charge_stripe, payment)
+# Orchestrator writes: INSERT INTO workflow_execution_journal (workflow_id, step_id, task_name, result, ...)
+
+await ctx.execute_task(update_db, charge_id)
+# Orchestrator writes: INSERT INTO workflow_execution_journal (workflow_id, step_id, task_name, result, ...)
+```
+
+</TabPanel>
+</Tabs>
+
+**Step 5: Completion or retry**
+
+If successful:
+```sql
+UPDATE workflow_queue SET status = 'completed', completed_at = NOW() WHERE id = 'wf_abc123';
+```
+
+If failed:
+```sql
+UPDATE workflow_queue
+SET status = 'pending', retry_count = retry_count + 1, next_retry_at = NOW() + INTERVAL '30 seconds'
+WHERE id = 'wf_abc123';
+```
+
+### Why This Architecture Matters
+
+**Single Point of Truth**: Everything is in PostgreSQL
+- Workflow state
+- Execution history
+- Queue management
+- Application data
+
+**Benefits:**
+- **Debugging**: Query the journal table to see exactly what happened
+- **Consistency**: Database transactions ensure atomic updates
+- **No clock skew**: Single source of time
+- **Simple backups**: One database to backup
+- **Easy local dev**: Just PostgreSQL, no Redis/Kafka/etc.
+
+## Retry Policies and Error Handling
+
+Orcher provides sophisticated retry mechanisms out of the box.
+
+### Default Retry Behavior
+
+When a task fails, Orcher automatically retries with exponential backoff:
+
+```text
+Attempt 1: Immediate
+Attempt 2: 1 second later
+Attempt 3: 2 seconds later
+Attempt 4: 4 seconds later
+Attempt 5: 8 seconds later
+Attempt 6: 16 seconds later
+...
+Max: 24 hours between retries
+```
+
+**Why exponential backoff?**
+- Transient errors (network blip) resolve quickly → fast retry
+- Service outages need time to recover → don't overwhelm
+- Cascading failures prevented by increasing delays
+
+### Custom Retry Policies
+
+You can configure retries per task:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task(
+    retry_policy(
+        max_attempts = 5,
+        initial_interval = 1,
+        max_interval = 60,
+        backoff_coefficient = 2.0,
+    )
+)]
+async fn call_external_api(data: Data) -> Result<Response> {
+    // This task will retry up to 5 times with exponential backoff
+    Ok(external_api::call(data).await?)
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Task({
+    retryPolicy: {
+        maxAttempts: 5,
+        initialInterval: 1000,
+        maxInterval: 60000,
+        backoffCoefficient: 2.0,
+    },
+})
+async callExternalApi(ctx: TaskContext, data: Data): Promise<Response> {
+    // This task will retry up to 5 times with exponential backoff
+    return await externalApi.call(data);
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@task(
+    name="call_external_api",
+    retry_policy=RetryPolicy(
+        max_attempts=5,
+        initial_interval=timedelta(seconds=1),
+        max_interval=timedelta(minutes=1),
+        backoff_coefficient=2.0,
+    ),
+)
+async def call_external_api(ctx: TaskContext, data: dict) -> dict:
+    # This task will retry up to 5 times with exponential backoff
+    return await external_api.call(data)
+```
+
+</TabPanel>
+</Tabs>
+
+### Handling Different Error Types
+
+Not all errors should retry:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task]
+async fn process_payment(payment: Payment) -> Result<Charge> {
+    match stripe::charge(&payment).await {
+        Ok(charge) => Ok(charge),
+
+        // Transient error - will retry automatically
+        Err(e) if e.is_network_error() => Err(e.into()),
+
+        // Permanent error - don't retry
+        Err(e) if e.is_card_declined() => {
+            // Log and return a permanent failure
+            log_payment_declined(&payment, &e).await?;
+            Err(anyhow::anyhow!("Card declined: {}", e))
+        }
+
+        Err(e) => Err(e.into()),
+    }
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Task()
+async processPayment(ctx: TaskContext, payment: Payment): Promise<Charge> {
+    try {
+        return await stripe.charges.create(payment);
+    } catch (e: any) {
+        if (e.type === 'StripeConnectionError') {
+            // Transient error - will retry automatically
+            throw e;
+        }
+        if (e.code === 'card_declined') {
+            // Permanent error - don't retry
+            await logPaymentDeclined(payment, e);
+            throw new Error(`Card declined: ${e.message}`);
+        }
+        throw e;
+    }
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@task(name="process_payment")
+async def process_payment(ctx: TaskContext, payment: dict) -> dict:
+    try:
+        return stripe.Charge.create(**payment)
+    except stripe.error.APIConnectionError as e:
+        # Transient error - will retry automatically
+        raise
+    except stripe.error.CardError as e:
+        # Permanent error - don't retry
+        await log_payment_declined(payment, e)
+        raise Exception(f"Card declined: {e}")
+```
+
+</TabPanel>
+</Tabs>
+
+**Best Practice**: Distinguish between:
+- **Retriable errors**: Network timeouts, 5xx responses, rate limits
+- **Permanent errors**: Invalid input, 4xx responses, business rule violations
+
+### Compensating Actions
+
+For multi-step workflows, you need to handle partial completion:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[workflow(name = "book_flight")]
+pub async fn book_flight(ctx: WorkflowContext, booking: Booking) -> Result<Confirmation> {
+    // Step 1: Reserve seat
+    let reservation = ctx.execute_task(reserve_seat, booking.seat_id).await?;
+
+    // Step 2: Charge payment
+    let charge = match ctx.execute_task(charge_card, booking.payment).await {
+        Ok(c) => c,
+        Err(e) => {
+            // Payment failed - compensate by releasing seat
+            ctx.execute_task(release_seat, reservation.id).await?;
+            return Err(e);
+        }
+    };
+
+    // Step 3: Send confirmation
+    ctx.execute_task(send_confirmation, charge.receipt).await?;
+
+    Ok(Confirmation { booking_id: charge.id })
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Workflow({ name: 'book_flight', version: '1.0.0' })
+class BookFlight {
+    async run(ctx: WorkflowContext, booking: Booking): Promise<Confirmation> {
+        // Step 1: Reserve seat
+        const reservation = await ctx.executeTask(tasks.reserveSeat, booking.seatId);
+
+        // Step 2: Charge payment
+        let charge: Charge;
+        try {
+            charge = await ctx.executeTask(tasks.chargeCard, booking.payment);
+        } catch (e) {
+            // Payment failed - compensate by releasing seat
+            await ctx.executeTask(tasks.releaseSeat, reservation.id);
+            throw e;
+        }
+
+        // Step 3: Send confirmation
+        await ctx.executeTask(tasks.sendConfirmation, charge.receipt);
+
+        return { bookingId: charge.id };
+    }
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@workflow(name="book_flight", version="1.0.0")
+async def book_flight(ctx: WorkflowContext, booking: dict) -> dict:
+    # Step 1: Reserve seat
+    reservation = await ctx.execute_task(reserve_seat, seat_id=booking["seat_id"])
+
+    # Step 2: Charge payment
+    try:
+        charge = await ctx.execute_task(charge_card, payment=booking["payment"])
+    except Exception as e:
+        # Payment failed - compensate by releasing seat
+        await ctx.execute_task(release_seat, reservation_id=reservation["id"])
+        raise
+
+    # Step 3: Send confirmation
+    await ctx.execute_task(send_confirmation, receipt=charge["receipt"])
+
+    return {"booking_id": charge["id"]}
+```
+
+</TabPanel>
+</Tabs>
+
+**This is the Saga pattern**: Each step has a compensating action that undoes it.
+
+---
+
+## Next Steps
+
+- [Part 2: Building Patterns](/guides/learning/backend-engineers/building-patterns) -- Real-world patterns
+- [Back to Overview](/guides/learning/backend-engineers) -- Learning path overview

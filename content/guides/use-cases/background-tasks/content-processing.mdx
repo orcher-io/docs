@@ -1,0 +1,391 @@
+---
+id: 'bg-content-processing'
+title: 'Content Processing Pipeline'
+sidebar_label: 'Content Processing'
+---
+
+File processing tasks — image resizing, video transcoding, PDF generation — are naturally long-running and prone to failure. By modeling each processing step as a task, Orcher checkpoints progress automatically. If transcoding a 2-hour video fails at the thumbnail generation step, the workflow resumes from there instead of re-transcoding the entire video.
+
+## How it works
+
+The pipeline is a small DAG: a serial spine of download → transcode → thumbnail → upload → record, with two stages fanning out because their branches are independent. Each box is a journaled task, so the graph is also the checkpoint map.
+
+<div className="not-prose my-8 max-w-md mx-auto">
+  <div className="flex justify-center">
+    <div className="border bg-surface-75 px-4 py-2 text-center">
+      <div className="text-[11px] font-medium font-mono text-foreground">download_source</div>
+    </div>
+  </div>
+  <div className="flex justify-center"><div className="w-px h-4 bg-border-strong" /></div>
+  <div className="flex justify-center">
+    <span className="text-[9px] font-mono text-foreground-muted">try_join — parallel</span>
+  </div>
+  <div className="grid grid-cols-2 gap-3">
+    <div className="border bg-surface-75 px-2 py-2 text-center">
+      <div className="text-[11px] font-medium font-mono text-foreground">transcode</div>
+      <div className="text-[9px] text-foreground-muted">mp4 · 720p</div>
+    </div>
+    <div className="border bg-surface-75 px-2 py-2 text-center">
+      <div className="text-[11px] font-medium font-mono text-foreground">transcode</div>
+      <div className="text-[9px] text-foreground-muted">webm · 720p</div>
+    </div>
+  </div>
+  <div className="flex justify-center"><div className="w-px h-4 bg-border-strong" /></div>
+  <div className="flex justify-center">
+    <div className="border bg-surface-75 px-4 py-2 text-center">
+      <div className="text-[11px] font-medium font-mono text-foreground">generate_thumbnail</div>
+    </div>
+  </div>
+  <div className="flex justify-center"><div className="w-px h-4 bg-border-strong" /></div>
+  <div className="flex justify-center">
+    <span className="text-[9px] font-mono text-foreground-muted">try_join — parallel</span>
+  </div>
+  <div className="grid grid-cols-3 gap-2">
+    {['mp4', 'webm', 'thumb'].map((a) => (
+      <div key={a} className="border bg-surface-75 px-1 py-2 text-center">
+        <div className="text-[10px] font-medium font-mono text-foreground">upload</div>
+        <div className="text-[9px] text-foreground-muted">{a}</div>
+      </div>
+    ))}
+  </div>
+  <div className="flex justify-center"><div className="w-px h-4 bg-border-strong" /></div>
+  <div className="flex justify-center">
+    <div className="border bg-background px-4 py-2 text-center">
+      <div className="text-[11px] font-medium font-mono text-foreground">update_database</div>
+      <div className="text-[9px] text-foreground-muted">status: ready</div>
+    </div>
+  </div>
+  <p className="text-[10px] text-foreground-muted text-center mt-3 mb-0">
+    Fan-out stages run their branches concurrently; each branch is checkpointed on its own.
+  </p>
+</div>
+
+## Example: a video-processing pipeline
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="typescript"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[task]
+async fn download_source(url: String) -> Result<FilePath> {
+    let bytes = http_client::get(&url).await?;
+    storage::save_temp("source", &bytes).await
+}
+
+#[task]
+async fn transcode_video(input: TranscodeInput) -> Result<FilePath> {
+    ffmpeg::transcode(&input.source, &input.format, &input.quality).await
+}
+
+#[task]
+async fn generate_thumbnail(video_path: FilePath) -> Result<FilePath> {
+    ffmpeg::extract_frame(&video_path, 10.0).await
+}
+
+#[task]
+async fn upload_to_cdn(input: UploadInput) -> Result<CdnUrl> {
+    cdn::upload(&input.path, &input.key).await
+}
+
+#[task]
+async fn update_database(input: MediaRecord) -> Result<()> {
+    db::update_media(input).await
+}
+
+#[workflow(name = "process_video_upload", version = "1.0.0")]
+async fn process_video_upload(
+    ctx: WorkflowContext,
+    input: VideoUpload,
+) -> Result<ProcessedVideo> {
+    // Step 1: Download source file
+    let source = ctx.execute_task(download_source, input.source_url).await?;
+
+    // Step 2: Transcode to multiple formats in parallel
+    let (mp4, webm) = tokio::try_join!(
+        ctx.execute_task(transcode_video, TranscodeInput {
+            source: source.clone(), format: "mp4".into(), quality: "720p".into(),
+        }),
+        ctx.execute_task(transcode_video, TranscodeInput {
+            source: source.clone(), format: "webm".into(), quality: "720p".into(),
+        }),
+    )?;
+
+    // Step 3: Generate thumbnail
+    let thumbnail = ctx.execute_task(generate_thumbnail, source).await?;
+
+    // Step 4: Upload all assets to CDN
+    let (mp4_url, webm_url, thumb_url) = tokio::try_join!(
+        ctx.execute_task(upload_to_cdn, UploadInput {
+            path: mp4, key: format!("{}/video.mp4", input.video_id),
+        }),
+        ctx.execute_task(upload_to_cdn, UploadInput {
+            path: webm, key: format!("{}/video.webm", input.video_id),
+        }),
+        ctx.execute_task(upload_to_cdn, UploadInput {
+            path: thumbnail, key: format!("{}/thumb.jpg", input.video_id),
+        }),
+    )?;
+
+    // Step 5: Update database
+    ctx.execute_task(update_database, MediaRecord {
+        video_id: input.video_id.clone(),
+        mp4_url: mp4_url.clone(),
+        webm_url: webm_url.clone(),
+        thumbnail_url: thumb_url.clone(),
+        status: "ready".into(),
+    }).await?;
+
+    Ok(ProcessedVideo { mp4_url, webm_url, thumbnail_url: thumb_url })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import {
+  Workflow,
+  Tasks,
+  Task,
+  WorkflowContext,
+  createTaskRefs,
+} from '@orcher/sdk';
+
+@Tasks()
+class VideoTasks {
+  @Task()
+  async downloadSource(url: string): Promise<string> {
+    const bytes = await httpClient.get(url);
+    return await storage.saveTemp('source', bytes);
+  }
+
+  @Task()
+  async transcodeVideo(input: TranscodeInput): Promise<string> {
+    return await ffmpeg.transcode(input.source, input.format, input.quality);
+  }
+
+  @Task()
+  async generateThumbnail(videoPath: string): Promise<string> {
+    return await ffmpeg.extractFrame(videoPath, 10.0);
+  }
+
+  @Task()
+  async uploadToCdn(input: UploadInput): Promise<string> {
+    return await cdn.upload(input.path, input.key);
+  }
+
+  @Task()
+  async updateDatabase(input: MediaRecord): Promise<void> {
+    await db.updateMedia(input);
+  }
+}
+
+const tasks = createTaskRefs(VideoTasks);
+
+@Workflow({ name: 'process_video_upload', version: '1.0.0' })
+class ProcessVideoUpload {
+  async run(
+    ctx: WorkflowContext,
+    input: VideoUpload,
+  ): Promise<ProcessedVideo> {
+    // Step 1: Download source file
+    const source = await ctx.executeTask(tasks.downloadSource, input.sourceUrl);
+
+    // Step 2: Transcode to multiple formats in parallel
+    const [mp4, webm] = await Promise.all([
+      ctx.executeTask(tasks.transcodeVideo, {
+        source, format: 'mp4', quality: '720p',
+      }),
+      ctx.executeTask(tasks.transcodeVideo, {
+        source, format: 'webm', quality: '720p',
+      }),
+    ]);
+
+    // Step 3: Generate thumbnail
+    const thumbnail = await ctx.executeTask(tasks.generateThumbnail, source);
+
+    // Step 4: Upload all assets to CDN
+    const [mp4Url, webmUrl, thumbUrl] = await Promise.all([
+      ctx.executeTask(tasks.uploadToCdn, {
+        path: mp4, key: `${input.videoId}/video.mp4`,
+      }),
+      ctx.executeTask(tasks.uploadToCdn, {
+        path: webm, key: `${input.videoId}/video.webm`,
+      }),
+      ctx.executeTask(tasks.uploadToCdn, {
+        path: thumbnail, key: `${input.videoId}/thumb.jpg`,
+      }),
+    ]);
+
+    // Step 5: Update database
+    await ctx.executeTask(tasks.updateDatabase, {
+      videoId: input.videoId,
+      mp4Url,
+      webmUrl,
+      thumbnailUrl: thumbUrl,
+      status: 'ready',
+    });
+
+    return { mp4Url, webmUrl, thumbnailUrl: thumbUrl };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+import asyncio
+from orcher import workflow, task, WorkflowContext
+
+@task
+async def download_source(url: str) -> str:
+    bytes_data = await http_client.get(url)
+    return await storage.save_temp("source", bytes_data)
+
+@task
+async def transcode_video(input: TranscodeInput) -> str:
+    return await ffmpeg.transcode(input.source, input.format, input.quality)
+
+@task
+async def generate_thumbnail(video_path: str) -> str:
+    return await ffmpeg.extract_frame(video_path, 10.0)
+
+@task
+async def upload_to_cdn(input: UploadInput) -> str:
+    return await cdn.upload(input.path, input.key)
+
+@task
+async def update_database(input: MediaRecord) -> None:
+    await db.update_media(input)
+
+@workflow(name="process_video_upload", version="1.0.0")
+async def process_video_upload(
+    ctx: WorkflowContext, input: VideoUpload
+) -> ProcessedVideo:
+    # Step 1: Download source file
+    source = await ctx.execute_task(download_source, input.source_url)
+
+    # Step 2: Transcode to multiple formats in parallel
+    mp4, webm = await asyncio.gather(
+        ctx.execute_task(transcode_video, TranscodeInput(
+            source=source, format="mp4", quality="720p",
+        )),
+        ctx.execute_task(transcode_video, TranscodeInput(
+            source=source, format="webm", quality="720p",
+        )),
+    )
+
+    # Step 3: Generate thumbnail
+    thumbnail = await ctx.execute_task(generate_thumbnail, source)
+
+    # Step 4: Upload all assets to CDN
+    mp4_url, webm_url, thumb_url = await asyncio.gather(
+        ctx.execute_task(upload_to_cdn, UploadInput(
+            path=mp4, key=f"{input.video_id}/video.mp4",
+        )),
+        ctx.execute_task(upload_to_cdn, UploadInput(
+            path=webm, key=f"{input.video_id}/video.webm",
+        )),
+        ctx.execute_task(upload_to_cdn, UploadInput(
+            path=thumbnail, key=f"{input.video_id}/thumb.jpg",
+        )),
+    )
+
+    # Step 5: Update database
+    await ctx.execute_task(update_database, MediaRecord(
+        video_id=input.video_id,
+        mp4_url=mp4_url,
+        webm_url=webm_url,
+        thumbnail_url=thumb_url,
+        status="ready",
+    ))
+
+    return ProcessedVideo(
+        mp4_url=mp4_url, webm_url=webm_url, thumbnail_url=thumb_url,
+    )
+```
+
+</TabPanel>
+
+</Tabs>
+
+The parallel transcode and upload steps run concurrently for better throughput. Each step is independently checkpointed — the expensive transcode work is never repeated on replay.
+
+## The expensive work is done once
+
+This is the payoff for long, costly steps. A crash during upload doesn't re-run the twenty-minute transcode — its output was journaled the moment it finished, and replay hands that result straight back:
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Resume Without Re-Transcoding</div>
+  </div>
+  {[
+    { label: 'transcode mp4 · webm', detail: '~20 min of ffmpeg — outputs journaled', icon: '✓', state: 'done' },
+    { label: 'generate_thumbnail', detail: 'Frame extracted — journaled', icon: '✓', state: 'done' },
+    { label: 'upload mp4', detail: 'CDN push fails — network blip', icon: '✗', state: 'crash' },
+    { label: 'replay', detail: 'transcode + thumbnail return journaled paths — ffmpeg never runs again', icon: '↻', state: 'resume' },
+    { label: 'upload mp4 · webm · thumb', detail: 'Retried from the upload stage', icon: '✓', state: 'done' },
+  ].map((row, i, arr) => (
+    <div key={i}>
+      <div className={`px-4 py-2 flex items-center gap-3 ${row.state === 'crash' ? 'bg-red-500/5' : ''} ${row.state === 'resume' ? 'bg-surface-75' : ''}`}>
+        <span className={`w-5 h-5 flex items-center justify-center text-[10px] shrink-0 ${row.state === 'crash' ? 'text-red-400' : 'text-foreground-muted'}`}>{row.icon}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{row.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{row.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">The journal stores the file <em>path</em>, not the file — so replay is instant and cheap.</span>
+  </div>
+</div>
+
+## Design notes
+
+- **Pass file references, never bytes.** Every task here returns a `FilePath` or URL, not the media itself. Task inputs and outputs are journaled, so threading a multi-gigabyte video through them would bloat the journal and slow every replay. Keep the payload a pointer; keep the bytes in object storage.
+- **Intermediate artifacts must outlive the worker.** Replay after a crash may land on a *different* worker, so a transcode output saved to local `/tmp` won't be there. Write intermediate files to shared storage (S3, GCS) keyed by video ID — then the journaled path resolves no matter which worker resumes.
+- **Make uploads idempotent by key.** A resumed upload re-pushes to the same CDN key (`{video_id}/video.mp4`), overwriting rather than duplicating. Deterministic keys turn a retry into a harmless no-op.
+- **The DAG's shape is your throughput.** `try_join` runs the transcodes concurrently because neither depends on the other; the database write is last because it depends on all of them. When adding steps, parallelize any that don't share inputs — the fan-out is free structure, the same idea as [parallel ETL](/guides/use-cases/data-processing/parallel-etl).
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/use-cases/background-tasks/best-practices" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Best Practices</h3>
+      <p className="text-sm text-foreground-light">
+        Guidelines for designing reliable background jobs, plus performance benchmarks.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/use-cases/background-tasks/email-campaigns" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Email Campaigns</h3>
+      <p className="text-sm text-foreground-light">
+        Bulk email sends with batching, rate limiting, and progress tracking.
+      </p>
+    </div>
+  </Link>
+</div>

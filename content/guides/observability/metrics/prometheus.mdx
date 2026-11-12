@@ -1,0 +1,190 @@
+---
+id: 'metrics-prometheus'
+title: 'Prometheus Setup'
+description: 'Configure Prometheus scraping for Orcher metrics and useful PromQL queries'
+sidebar_label: 'Prometheus Setup'
+---
+
+## Scrape Configuration
+
+Add the orchestrator to your `prometheus.yml`:
+
+```yaml
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Orcher orchestrator metrics
+  - job_name: 'orcher-orchestrator'
+    static_configs:
+      - targets: ['orchestrator:8001']
+        labels:
+          service: 'orchestrator'
+    metrics_path: /metrics
+    scrape_interval: 10s
+
+  # Orchestrator health (for up/down detection)
+  - job_name: 'orcher-orchestrator-health'
+    static_configs:
+      - targets: ['orchestrator:8001']
+    metrics_path: /health
+    scrape_interval: 30s
+```
+
+For infrastructure metrics, add exporters for your backing services:
+
+```yaml
+  # Redis (via redis_exporter)
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis-exporter:9121']
+
+  # PostgreSQL (via postgres_exporter)
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+
+  # PgBouncer (via pgbouncer_exporter)
+  - job_name: 'pgbouncer'
+    static_configs:
+      - targets: ['pgbouncer-exporter:9127']
+```
+
+## Docker Compose
+
+The monitoring stack is available via the `observability` profile:
+
+```bash
+cd docker
+docker compose --profile observability up -d
+```
+
+This starts Prometheus (port 9090) and Grafana (port 3000) alongside the orchestrator.
+
+## Kubernetes
+
+Use a ServiceMonitor with the Prometheus Operator:
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: orcher-orchestrator
+spec:
+  selector:
+    matchLabels:
+      app: orcher-orchestrator
+  endpoints:
+    - port: metrics
+      interval: 10s
+      path: /metrics
+```
+
+Or annotate pods for discovery:
+
+```yaml
+metadata:
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8001"
+    prometheus.io/path: "/metrics"
+```
+
+---
+
+## Useful PromQL Queries
+
+### Workflow Performance
+
+```promql
+# Workflow success rate (5-minute window)
+sum(rate(orcher_workflows_completed_total[5m]))
+/
+(sum(rate(orcher_workflows_completed_total[5m])) + sum(rate(orcher_workflows_failed_total[5m])))
+
+# Average workflow duration
+rate(orcher_workflow_duration_seconds_sum[5m])
+/
+rate(orcher_workflow_duration_seconds_count[5m])
+
+# Active workflows over time
+orcher_workflows_executing
+```
+
+### Task Performance
+
+```promql
+# Task failure rate
+sum(rate(orcher_tasks_failed_total[5m]))
+/
+sum(rate(orcher_tasks_submitted_total[5m]))
+
+# Average task duration
+rate(orcher_task_duration_seconds_sum[5m])
+/
+rate(orcher_task_duration_seconds_count[5m])
+
+# Task throughput (tasks/second)
+sum(rate(orcher_tasks_completed_total[5m]))
+```
+
+### Queue Health
+
+```promql
+# Queue depth by queue
+orcher_queue_depth
+
+# Publish latency (p99)
+histogram_quantile(0.99, rate(orcher_queue_publish_latency_seconds_bucket[5m]))
+
+# End-to-end dispatch latency (LPUSH to BRPOP)
+histogram_quantile(0.99, rate(orcher_push_to_claim_latency_seconds_bucket[5m]))
+```
+
+### Database Health
+
+```promql
+# Connection pool utilization
+orcher_db_pool_utilization_ratio
+
+# Query latency (p95)
+histogram_quantile(0.95, rate(orcher_db_query_duration_seconds_bucket[5m]))
+
+# Pool acquisition timeouts (should be 0)
+rate(orcher_db_pool_acquisition_timeouts_total[5m])
+```
+
+### Cache Efficiency
+
+```promql
+# Journal cache hit ratio
+orcher_journal_cache_hit_ratio
+
+# DB reads avoided by cache
+rate(orcher_journal_cache_db_reads_avoided[5m])
+
+# Storage cache hit ratio
+orcher_storage_cache_hit_ratio
+```
+
+### Retry & DLQ
+
+```promql
+# Retry exhaustion rate (tasks going to DLQ)
+rate(orcher_retry_exhausted_total[5m])
+
+# DLQ depth
+orcher_dlq_current_depth
+
+# DLQ net growth trend
+rate(orcher_dlq_net_growth[1h])
+```
+
+---
+
+## Next Steps
+
+- [Alerting](/guides/observability/metrics/alerting) — Recommended alert rules
+- [Metric Reference](/guides/observability/metrics/reference) — Full list of all exposed metrics
+- [Metrics Overview](/guides/observability/metrics) — Endpoint configuration

@@ -1,0 +1,19 @@
+{
+  "name": "orcher-docs-samples-typescript",
+  "private": true,
+  "description": "TypeScript samples shown in the ORCHER guides, type-checked against the published SDK by scripts/check-samples.sh",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@orcher/sdk": "0.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}

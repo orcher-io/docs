@@ -1,0 +1,81 @@
+---
+id: 'operations'
+title: 'Cloud Operations'
+description: 'High availability, monitoring, and secrets management for Orcher cloud deployments'
+sidebar_label: 'Operations'
+---
+
+## High Availability
+
+The orchestrator is designed for active-active deployment with multiple replicas:
+
+- **Stateless** — No shared in-process state between instances. All coordination happens through PostgreSQL.
+- **Claim-based work distribution** — `SELECT FOR UPDATE SKIP LOCKED` ensures each workflow execution is processed by exactly one orchestrator instance.
+- **Automatic failover** — If an instance crashes, the reclaimer releases its claims after the claim timeout (default: 300 seconds in production) so another instance picks up the work.
+
+Recommended production topology:
+
+| Component | Replicas | Rationale |
+|-----------|----------|-----------|
+| Orchestrator | 3+ | Minimum for HPA and PDB (minAvailable: 2) |
+| PostgreSQL | 2 (primary + standby) | Multi-AZ for automated failover |
+| Redis | 2 (primary + replica) | Failover without dispatch interruption |
+
+---
+
+## Monitoring in the Cloud
+
+### Prometheus on Managed Kubernetes
+
+All orchestrator pods expose metrics at `/metrics` on port 8080 with Prometheus scrape annotations. If you use the Prometheus Operator (common on EKS, GKE, AKS), add a ServiceMonitor:
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: orchestrator
+  namespace: orcher
+spec:
+  selector:
+    matchLabels:
+      app: orchestrator
+  endpoints:
+    - port: http
+      interval: 10s
+      path: /metrics
+```
+
+### Cloud-Native Monitoring
+
+Alternatively, use your cloud provider's monitoring:
+
+- **AWS CloudWatch** — Export metrics via CloudWatch Agent or ADOT Collector. JSON logs on stdout are natively ingested by CloudWatch Logs.
+- **GCP Cloud Monitoring** — Use the Managed Service for Prometheus (GMP) which scrapes Prometheus endpoints automatically on GKE.
+- **Azure Monitor** — Azure Monitor managed Prometheus scrapes pods with standard annotations on AKS.
+
+The orchestrator outputs structured JSON logs to stdout (when `LOG_FORMAT=json`), which is the standard format for all cloud log aggregation services.
+
+---
+
+## Secrets Management
+
+For production deployments, avoid plain Kubernetes secrets. Use your cloud provider's secrets manager:
+
+| Provider | Service | Integration |
+|----------|---------|-------------|
+| AWS | Secrets Manager | External Secrets Operator or ECS native secrets |
+| GCP | Secret Manager | External Secrets Operator or workload identity |
+| Azure | Key Vault | External Secrets Operator or CSI Secret Store Driver |
+| Multi-cloud | HashiCorp Vault | CSI driver or sidecar injector |
+
+The orchestrator reads `DATABASE_URL` and `REDIS_URL` from environment variables, so any mechanism that injects environment variables works.
+
+---
+
+## Next Steps
+
+- [Cloud Platforms Overview](/guides/deployment/cloud) — Architecture and container image setup
+- [Managed Databases](/guides/deployment/cloud/managed-databases) — PostgreSQL, PgBouncer, and Redis configuration
+- [Cloud Providers](/guides/deployment/cloud/providers) — AWS, GCP, and Azure deployment guides
+- [Configuration](/guides/deployment/configuration) — Full configuration reference
+- [Metrics](/guides/observability/metrics) — Prometheus metrics reference

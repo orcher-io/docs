@@ -1,0 +1,266 @@
+---
+id: 'workflows-lifecycle'
+title: 'Versioning, Lifecycle & Queries'
+description: 'Manage workflow versions, understand lifecycle states, and query workflows from external code.'
+sidebar_label: 'Lifecycle'
+---
+
+## Workflow Versioning
+
+As your application evolves, you'll need to change workflow logic — adding steps, changing inputs, or modifying behavior. The `version` field labels each workflow definition so you can track which version produced a given run and roll out new code deliberately.
+
+The version you set is recorded with each execution, but it is an **observability label — not an automatic router**. Orcher dispatches work by workflow name and task queue, not by version, and it does not pin an in-flight workflow to the code version it started on. Determinism is why this matters: a workflow already in progress replays its journal against your _current_ code, so changing the step sequence of a running workflow causes non-determinism errors on replay.
+
+To change workflow logic safely while executions are in flight, avoid editing code that in-progress workflows will replay. Instead:
+
+- **Run versions side by side** — register the new logic under a distinct workflow name and route new executions there, keeping the old definition deployed until existing runs finish.
+- **Drain, then cut over** — stop starting new executions on the old code, let in-flight ones complete, then deploy the change.
+- **Restart-fresh** — for long-running workflows, [restart-fresh](/guides/core/workflows/patterns) onto the new logic from a clean journal at a safe point.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+  <TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+// Version 1.0.0
+#[workflow(
+    name = "order_workflow",
+    version = "1.0.0"
+)]
+pub async fn order_workflow_v1(
+    ctx: WorkflowContext,
+    order_id: String,
+) -> Result<String> {
+    // Original implementation
+    Ok(order_id)
+}
+
+// Version 2.0.0 (with new features)
+#[workflow(
+    name = "order_workflow_v2",
+    version = "2.0.0"
+)]
+pub async fn order_workflow_v2(
+    ctx: WorkflowContext,
+    input: OrderInput,  // New input type
+) -> Result<OrderOutput> {  // New output type
+    // Enhanced implementation
+    Ok(OrderOutput { order_id: input.order_id })
+}
+```
+
+  </TabPanel>
+  <TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, WorkflowContext } from '@orcher/sdk';
+
+// Version 1.0.0
+@Workflow({ name: 'order_workflow', version: '1.0.0' })
+export class OrderWorkflowV1 {
+  async run(ctx: WorkflowContext, orderId: string): Promise<string> {
+    // Original implementation
+    return orderId;
+  }
+}
+
+// Version 2.0.0 (with new features)
+@Workflow({ name: 'order_workflow_v2', version: '2.0.0' })
+export class OrderWorkflowV2 {
+  async run(ctx: WorkflowContext, input: OrderInput): Promise<OrderOutput> {
+    // Enhanced implementation
+    return { orderId: input.orderId };
+  }
+}
+```
+
+  </TabPanel>
+  <TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, WorkflowContext
+
+# Version 1.0.0
+@workflow(name="order_workflow", version="1.0")
+async def order_workflow_v1(ctx: WorkflowContext, order_id: str) -> str:
+    # Original implementation
+    return order_id
+
+# Version 2.0.0 (with new features)
+@workflow(name="order_workflow_v2", version="2.0")
+async def order_workflow_v2(ctx: WorkflowContext, order_id: str, priority: int = 0) -> dict:
+    # Enhanced implementation
+    return {"order_id": order_id}
+```
+
+  </TabPanel>
+</Tabs>
+
+---
+
+## Workflow Lifecycle
+
+Every workflow progresses through a set of states. Understanding these states helps you reason about what your workflow is doing at any point and how to handle different scenarios.
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Workflow Lifecycle</div>
+  </div>
+  <div className="px-5 py-6 flex flex-col items-center">
+    <div className="border bg-background px-5 py-1.5">
+      <code className="text-[11px] text-foreground">Pending</code>
+    </div>
+    <div className="w-px h-3 bg-border-strong" />
+    <span className="text-[9px] font-mono uppercase tracking-wider text-foreground-muted mb-1">dispatched to a worker</span>
+    <div className="flex items-center gap-2">
+      <div className="border bg-surface-100 px-5 py-1.5">
+        <code className="text-[11px] text-foreground">Running</code>
+      </div>
+      <div className="flex flex-col items-center text-foreground-muted">
+        <span className="text-[9px] font-mono leading-tight">suspend →</span>
+        <div className="h-px w-6 bg-border-strong my-0.5" />
+        <span className="text-[9px] font-mono leading-tight">← resume</span>
+      </div>
+      <div className="border bg-surface-75 px-4 py-1.5">
+        <code className="text-[11px] text-foreground">Suspended</code>
+      </div>
+    </div>
+    <div className="w-px h-3 bg-border-strong" />
+    <span className="text-[9px] font-mono uppercase tracking-wider text-foreground-muted mb-2">reaches one terminal state</span>
+    <div className="flex flex-wrap justify-center gap-1.5 max-w-xs">
+      {[
+        { name: 'Completed', bad: false },
+        { name: 'Failed', bad: true },
+        { name: 'Timed Out', bad: true },
+        { name: 'Canceled', bad: false },
+        { name: 'Terminated', bad: false },
+        { name: 'Reset', bad: false },
+        { name: 'Restarted-Fresh', bad: false },
+      ].map((t) => (
+        <div key={t.name} className={`border px-2.5 py-1 ${t.bad ? 'bg-red-500/5 border-red-400/20' : 'bg-background'}`}>
+          <code className={`text-[10px] ${t.bad ? 'text-red-400' : 'text-foreground'}`}>{t.name}</code>
+        </div>
+      ))}
+    </div>
+  </div>
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">A workflow runs — suspending and resuming as needed — until it settles into exactly one terminal state.</span>
+  </div>
+</div>
+
+- **Pending** — The workflow has been created (via `start_workflow`) but not yet picked up by a worker. It waits in a task queue for dispatch — typically brief unless every worker is busy.
+
+- **Running** — A worker is actively executing the workflow code, progressing through steps, executing tasks, and writing journal entries. A workflow may move between Running and Suspended many times over its life.
+
+- **Suspended** — The workflow is waiting for something: a durable timer to fire, an event to arrive, or a child workflow to finish. The worker releases it while it waits, so no resources are consumed. When the condition is met, it is re-dispatched and returns to Running.
+
+- **Completed** — The workflow function returned successfully. The result is stored and can be retrieved from the client (for example, `handle.result()`). Terminal.
+
+- **Failed** — The workflow function returned an error (or threw an uncaught exception). The error is stored for inspection. Depending on the retry policy, the workflow may be retried before reaching this state. Terminal.
+
+- **Timed Out** — The workflow exceeded its configured execution or run timeout before finishing. Terminal.
+
+- **Canceled** — Cancellation was requested through the API and the workflow stopped cooperatively, with an opportunity to run cleanup logic. Terminal.
+
+- **Terminated** — The workflow was forcefully terminated through the API. It stops immediately, without a chance to clean up — the blunter counterpart to Canceled. Terminal.
+
+- **Reset** — The workflow was rewound to an earlier journal point via the reset API. A new execution replays the journal up to the target event, then re-executes from there making fresh decisions; the original execution is marked Reset. Useful for recovering from a bad deploy or debugging a production failure without re-running from scratch.
+
+- **Restarted-Fresh** — The workflow called restart-fresh: the current execution ends and a new one continues the work with a clean journal, keeping history bounded. Terminal for this execution.
+
+---
+
+## Querying Workflows
+
+You can inspect the state of running or completed workflows from outside the workflow. This is useful for building dashboards, checking on long-running processes, or retrieving results.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+  <TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let client = Client::connect("http://localhost:50051").await?;
+
+    // Start workflow
+    let handle = client
+        .start_workflow("process_payment", payment_input)
+        .await?;
+
+    // Get result (waits for completion)
+    let result: PaymentOutput = handle.result().await?;
+
+    Ok(())
+}
+```
+
+  </TabPanel>
+  <TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Client } from '@orcher/sdk';
+
+const client = new Client({ serverUrl: 'http://localhost:50051' });
+
+// Start workflow
+const handle = await client.startWorkflow({
+  workflowType: 'process_payment',
+  workflowId: 'payment-001',
+  taskQueue: 'default',
+  args: [paymentInput],
+});
+
+// Get result (waits for completion)
+const result = await handle.result<PaymentOutput>();
+```
+
+  </TabPanel>
+  <TabPanel id="python" label="Python">
+
+```python
+from orcher import Client
+
+async with Client(server_url="http://localhost:50051") as client:
+    # Start workflow
+    handle = await client.start_workflow(
+        workflow_type="process_payment",
+        workflow_id="payment-001",
+        task_queue="default",
+        args=(payment_input,),
+    )
+
+    # Get result (waits for completion)
+    result = await handle.result()
+```
+
+  </TabPanel>
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/workflows/best-practices" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Best Practices</h3>
+      <p className="text-sm text-foreground-light">
+        Guidelines for writing maintainable, reliable, and performant workflows
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/tasks" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Tasks</h3>
+      <p className="text-sm text-foreground-light">
+        Learn how to define and execute tasks within workflows
+      </p>
+    </div>
+  </Link>
+</div>

@@ -1,0 +1,578 @@
+---
+id: 'state-best-practices'
+title: 'Best Practices & Performance'
+description: 'Best practices for workflow state management, performance optimization, and troubleshooting common issues.'
+sidebar_label: 'Best Practices'
+---
+
+## Best Practices
+
+### 1. Use Descriptive Keys
+
+Choose clear, descriptive state keys that communicate the value's purpose. This makes workflows easier to debug and query handlers easier to write.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+<TabPanel id="rust" label="Rust">
+
+```rust
+// Good: Clear, descriptive keys
+ctx.set_state("payment_id", &payment_id)?;
+ctx.set_state("shipping_status", &status)?;
+ctx.set_state("total_items_processed", &count)?;
+
+// Bad: Vague keys — hard to query, debug, or understand
+ctx.set_state("id", &payment_id)?;
+ctx.set_state("s", &status)?;
+ctx.set_state("n", &count)?;
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Good: Clear, descriptive keys
+ctx.setState('paymentId', paymentId);
+ctx.setState('shippingStatus', status);
+ctx.setState('totalItemsProcessed', count);
+
+// Bad: Vague keys — hard to query, debug, or understand
+ctx.setState('id', paymentId);
+ctx.setState('s', status);
+ctx.setState('n', count);
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+# Good: Clear, descriptive keys
+ctx.set_state("payment_id", payment_id)
+ctx.set_state("shipping_status", status)
+ctx.set_state("total_items_processed", count)
+
+# Bad: Vague keys — hard to query, debug, or understand
+ctx.set_state("id", payment_id)
+ctx.set_state("s", status)
+ctx.set_state("n", count)
+```
+
+</TabPanel>
+</Tabs>
+
+### 2. Initialize State Early
+
+Set all state keys at the beginning of the workflow so query handlers and monitoring tools always have values to return, even if the workflow hasn't progressed far.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[workflow]
+pub async fn order_workflow(
+    ctx: WorkflowContext,
+    input: OrderInput,
+) -> Result<OrderResult> {
+    // Initialize all state upfront — queries always return a value
+    ctx.set_state("order_id", &input.order_id)?;
+    ctx.set_state("status", &"pending")?;
+    ctx.set_state("total_amount", &0.0)?;
+    ctx.set_state("items_count", &input.items.len())?;
+
+    // Process workflow...
+    Ok(result)
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Workflow()
+class OrderWorkflow {
+  async run(ctx: WorkflowContext, input: OrderInput): Promise<OrderResult> {
+    // Initialize all state upfront — queries always return a value
+    ctx.setState('orderId', input.orderId);
+    ctx.setState('status', 'pending');
+    ctx.setState('totalAmount', 0);
+    ctx.setState('itemsCount', input.items.length);
+
+    // Process workflow...
+    return result;
+  }
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@workflow(name="order_workflow")
+async def order_workflow(ctx: WorkflowContext, input: OrderInput) -> OrderResult:
+    # Initialize all state upfront — queries always return a value
+    ctx.set_state("order_id", input.order_id)
+    ctx.set_state("status", "pending")
+    ctx.set_state("total_amount", 0.0)
+    ctx.set_state("items_count", len(input.items))
+
+    # Process workflow...
+    return result
+```
+
+</TabPanel>
+</Tabs>
+
+### 3. Use Typed State
+
+Define structured types for complex state values instead of storing many individual keys. This provides compile-time safety and makes it easier to serialize, deserialize, and query state as a unit.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+// Define a typed struct for state
+#[derive(Serialize, Deserialize, Clone)]
+struct OrderState {
+    order_id: String,
+    status: OrderStatus,
+    payment_id: Option<String>,
+    tracking_number: Option<String>,
+}
+
+// Store as a single typed value
+let state = OrderState {
+    order_id: input.order_id.clone(),
+    status: OrderStatus::Processing,
+    payment_id: None,
+    tracking_number: None,
+};
+ctx.set_state("order_state", &state)?;
+
+// Retrieve with type safety
+let current: Option<OrderState> = ctx.get_state("order_state")?;
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Define an interface for state
+interface OrderState {
+  orderId: string;
+  status: OrderStatus;
+  paymentId?: string;
+  trackingNumber?: string;
+}
+
+// Store as a single typed value
+const state: OrderState = {
+  orderId: input.orderId,
+  status: OrderStatus.Processing,
+};
+ctx.setState('orderState', state);
+
+// Retrieve with type safety
+const current = ctx.getState<OrderState>('orderState');
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from dataclasses import dataclass
+from enum import Enum
+from typing import Optional
+
+
+class OrderStatus(str, Enum):
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+@dataclass
+class OrderState:
+    order_id: str
+    status: OrderStatus
+    payment_id: Optional[str] = None
+    tracking_number: Optional[str] = None
+
+
+# Store as a single typed value
+state = OrderState(
+    order_id=input.order_id,
+    status=OrderStatus.PROCESSING,
+)
+ctx.set_state("order_state", state)
+
+# Retrieve state
+current_state = ctx.get_state("order_state")
+```
+
+</TabPanel>
+
+</Tabs>
+
+### 4. Don't Store Sensitive Data
+
+Workflow state is stored in the database and may be queryable by external systems. Never store sensitive information like credentials, credit card numbers, or personal identifiers directly — use tokenized references instead.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+<TabPanel id="rust" label="Rust">
+
+```rust
+// Bad: Storing sensitive data in queryable state
+ctx.set_state("credit_card_number", &card_number)?;
+ctx.set_state("ssn", &ssn)?;
+
+// Good: Store only tokenized references
+ctx.set_state("payment_token", &token_id)?;
+ctx.set_state("card_last_four", &"1234")?;
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Bad: Storing sensitive data in queryable state
+ctx.setState('creditCardNumber', cardNumber);
+ctx.setState('ssn', ssn);
+
+// Good: Store only tokenized references
+ctx.setState('paymentToken', tokenId);
+ctx.setState('cardLastFour', '1234');
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+# Bad: Storing sensitive data in queryable state
+ctx.set_state("credit_card_number", card_number)
+ctx.set_state("ssn", ssn)
+
+# Good: Store only tokenized references
+ctx.set_state("payment_token", token_id)
+ctx.set_state("card_last_four", "1234")
+```
+
+</TabPanel>
+</Tabs>
+
+### 5. Update State Atomically
+
+When multiple state values are logically related, store them as a single struct instead of individual keys. This prevents inconsistent state if the workflow crashes between two separate `set_state()` calls.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+<TabPanel id="rust" label="Rust">
+
+```rust
+// Bad: Multiple related updates — can be inconsistent if crash occurs between them
+ctx.set_state("processed", &processed)?;
+ctx.set_state("failed", &failed)?;
+ctx.set_state("total", &total)?;
+
+// Good: Single atomic state object
+#[derive(Serialize, Deserialize)]
+struct ProcessingStats {
+    processed: usize,
+    failed: usize,
+    total: usize,
+}
+
+let stats = ProcessingStats { processed, failed, total };
+ctx.set_state("processing_stats", &stats)?;
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Bad: Multiple related updates — can be inconsistent if crash occurs between them
+ctx.setState('processed', processed);
+ctx.setState('failed', failed);
+ctx.setState('total', total);
+
+// Good: Single atomic state object
+interface ProcessingStats {
+  processed: number;
+  failed: number;
+  total: number;
+}
+
+const stats: ProcessingStats = { processed, failed, total };
+ctx.setState('processingStats', stats);
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+# Bad: Multiple related updates — can be inconsistent if crash occurs between them
+ctx.set_state("processed", processed)
+ctx.set_state("failed", failed)
+ctx.set_state("total", total)
+
+# Good: Single atomic state object
+@dataclass
+class ProcessingStats:
+    processed: int
+    failed: int
+    total: int
+
+stats = ProcessingStats(processed=processed, failed=failed, total=total)
+ctx.set_state("processing_stats", stats)
+```
+
+</TabPanel>
+</Tabs>
+
+### 6. Clean Up State
+
+Remove large temporary state values after they are no longer needed. This reduces storage footprint and speeds up serialization during replay.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[workflow]
+pub async fn cleanup_example(
+    ctx: WorkflowContext,
+    input: Input,
+) -> Result<Output> {
+    // Set temporary state for intermediate processing
+    ctx.set_state("temp_data", &large_data)?;
+
+    // Use it
+    let result = process_data(&large_data)?;
+
+    // Clean up — set to None to free storage
+    ctx.set_state("temp_data", &Option::<String>::None)?;
+
+    Ok(result)
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Workflow()
+class CleanupExample {
+  async run(ctx: WorkflowContext, input: Input): Promise<Output> {
+    // Set temporary state for intermediate processing
+    ctx.setState('tempData', largeData);
+
+    // Use it
+    const result = processData(largeData);
+
+    // Clean up — set to null to free storage
+    ctx.setState('tempData', null);
+
+    return result;
+  }
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@workflow(name="cleanup_example")
+async def cleanup_example(ctx: WorkflowContext, input: dict) -> Output:
+    # Set temporary state for intermediate processing
+    ctx.set_state("temp_data", large_data)
+
+    # Use it
+    result = process_data(large_data)
+
+    # Clean up — set to None to free storage
+    ctx.set_state("temp_data", None)
+
+    return result
+```
+
+</TabPanel>
+</Tabs>
+
+---
+
+## Performance Considerations
+
+### State Size
+
+Keep state values small to minimize serialization overhead and database storage. Store references (IDs, keys) rather than full objects — fetch the full data in a task when you need it.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+<TabPanel id="rust" label="Rust">
+
+```rust
+// Bad: Storing full object in state (10KB per entry)
+ctx.set_state("full_user_data", &user_object)?;
+
+// Good: Store only the ID (36 bytes), fetch the rest in a task
+ctx.set_state("user_id", &user.id)?;
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Bad: Storing full object in state (10KB per entry)
+ctx.setState('fullUserData', userObject);
+
+// Good: Store only the ID (36 bytes), fetch the rest in a task
+ctx.setState('userId', user.id);
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+# Bad: Storing full object in state (10KB per entry)
+ctx.set_state("full_user_data", user_object)
+
+# Good: Store only the ID (36 bytes), fetch the rest in a task
+ctx.set_state("user_id", user.id)
+```
+
+</TabPanel>
+</Tabs>
+
+### State Frequency
+
+Minimize the number of `set_state()` calls in tight loops. Accumulate values in local variables and write the final result to state once. Each `set_state()` call involves serialization, so batching reduces overhead.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+<TabPanel id="rust" label="Rust">
+
+```rust
+// Bad: State write on every iteration
+for item in items {
+    let count: usize = ctx.get_state("count")?.unwrap_or(0);
+    ctx.set_state("count", &(count + 1))?; // N serialization calls
+}
+
+// Good: Accumulate locally, write once
+let mut count = 0;
+for item in items {
+    count += 1;
+}
+ctx.set_state("count", &count)?; // 1 serialization call
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Bad: State write on every iteration
+for (const item of items) {
+  const count = ctx.getState<number>('count') || 0;
+  ctx.setState('count', count + 1); // N serialization calls
+}
+
+// Good: Accumulate locally, write once
+let count = 0;
+for (const item of items) {
+  count += 1;
+}
+ctx.setState('count', count); // 1 serialization call
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+# Bad: State write on every iteration
+for item in items:
+    count = ctx.get_state("count") or 0
+    ctx.set_state("count", count + 1)  # N serialization calls
+
+# Good: Accumulate locally, write once
+count = 0
+for item in items:
+    count += 1
+ctx.set_state("count", count)  # 1 serialization call
+```
+
+</TabPanel>
+</Tabs>
+
+---
+
+## Troubleshooting
+
+### State Not Persisting
+
+**Symptom**: State values are lost after workflow restart.
+
+**Solutions**:
+- Verify that `set_state()` is called before the crash point — state set after a failed task may not be reached
+- Check for serialization errors in logs — if the value can't be serialized to JSON, the state write silently fails
+- Ensure the workflow is deterministic — non-deterministic code paths may skip `set_state()` calls on replay
+
+### State Type Errors
+
+**Symptom**: Deserialization errors when calling `get_state()`.
+
+**Solutions**:
+- Use consistent types for the same key across `set_state()` and `get_state()` calls
+- Handle `None`/`undefined` cases for keys that may not be set yet
+- Use explicit type annotations to catch mismatches at compile time
+
+```rust
+// Handle missing state gracefully
+let status: String = ctx
+    .get_state("status")?
+    .unwrap_or_else(|| "unknown".to_string());
+```
+
+### State Too Large
+
+**Symptom**: Slow workflow performance, high serialization overhead.
+
+**Solutions**:
+- Store IDs and references instead of full objects — fetch the data in a task when needed
+- Clean up temporary state with `set_state("key", None)` after use
+- Use external storage (S3, database) for large blobs and store only the reference in state
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/state-management/patterns" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">State Patterns</h3>
+      <p className="text-sm text-foreground-light">
+        Common patterns for progress tracking, status machines, and querying state
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/journaling" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Automatic Journaling</h3>
+      <p className="text-sm text-foreground-light">
+        Understand how state is persisted through journaling
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/events" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Events & Signals</h3>
+      <p className="text-sm text-foreground-light">
+        Handle events and external signals in workflows
+      </p>
+    </div>
+  </Link>
+</div>

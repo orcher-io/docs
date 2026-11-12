@@ -1,0 +1,254 @@
+---
+id: 'backend-engineers-learning-path'
+title: 'Learning Path: Backend Engineers'
+description: 'A comprehensive guide for backend engineers to master Orcher for building reliable APIs, microservices, and distributed systems.'
+sidebar_label: 'Backend Engineers'
+---
+
+Welcome to Orcher! This guide will teach you how to build production-ready backend services with automatic fault tolerance, distributed transactions, and durable workflows. By the end, you'll understand not just how to use Orcher, but *why* it fundamentally changes how we build reliable systems.
+
+## What You'll Learn
+
+This learning path takes you from zero to production-ready in a structured way:
+
+**Part 1: Understanding the Core** (30-45 minutes)
+- What durable execution really means and why it matters
+- How Orcher's architecture eliminates entire classes of bugs
+- The mental model shift from traditional backend development
+
+**Part 2: Building with Orcher** (2-3 hours)
+- Payment processing that survives crashes without charging twice
+- Webhook handling that never misses events
+- Distributed transactions without distributed transaction coordinators
+- Long-running background jobs with progress tracking
+
+**Part 3: Production Excellence** (1-2 hours)
+- Monitoring and observability patterns
+- Testing strategies for workflows
+- Performance optimization and scaling
+
+**Time to Complete**: 5-7 hours
+**Prerequisites**: REST API experience, basic database knowledge
+**Difficulty**: Beginner to Advanced
+
+---
+
+## Why Orcher for Backend Engineering?
+
+Let's start with a real problem you've probably encountered.
+
+### The Reliability Problem
+
+Imagine you're building a payment processing endpoint. A user submits their credit card, and you need to:
+
+1. Charge the card via Stripe
+2. Update your database with the payment record
+3. Send a receipt email
+4. Update the user's subscription status
+5. Notify your analytics system
+
+**What happens if step 3 fails?**
+
+With traditional approaches, you have three bad options:
+
+**Option 1: Fail the entire request**
+- User's card was charged
+- But they see an error page
+- You have to manually issue refunds
+- Customer support nightmare
+
+**Option 2: Retry everything**
+- You charge the card again (double charge!)
+- Database gets duplicate records
+- User receives multiple emails
+- Stripe complains about duplicate requests
+
+**Option 3: Manual state management**
+- Store "step completed" flags in Redis
+- Check each flag before executing
+- Handle partial completions
+- Debug distributed state across services
+- Write hundreds of lines of error-handling code
+
+**None of these are good.**
+
+### The Orcher Solution
+
+Orcher provides **durable execution** as a primitive. Here's what that means:
+
+Orcher uses a **client-server architecture**: an Orchestrator server (gRPC port 50051, HTTP port 8001) paired with SDK Workers that connect via gRPC. Every step in your workflow is automatically journaled to PostgreSQL. If anything fails, Orcher replays from the journal instead of re-executing completed steps. It's like having an automatic "save game" system for your business logic.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+// Each step is automatically checkpointed
+let charge = ctx.execute_task(charge_card, payment).await?;      // ✓ Journaled
+ctx.execute_task(update_db, charge.id).await?;                   // ✓ Journaled
+ctx.execute_task(send_email, user.email).await?;                 // ✓ Journaled
+ctx.execute_task(update_subscription, user.id).await?;           // ✓ Journaled
+
+// If crash happens after send_email, next run:
+// - charge_card: Returns cached result (no API call)
+// - update_db: Returns cached result (no DB write)
+// - send_email: Returns cached result (no duplicate email)
+// - update_subscription: Executes for the first time ✓
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Each step is automatically checkpointed
+const charge = await ctx.executeTask(tasks.chargeCard, payment);      // ✓ Journaled
+await ctx.executeTask(tasks.updateDb, charge.id);                     // ✓ Journaled
+await ctx.executeTask(tasks.sendEmail, user.email);                   // ✓ Journaled
+await ctx.executeTask(tasks.updateSubscription, user.id);             // ✓ Journaled
+
+// If crash happens after sendEmail, next run:
+// - chargeCard: Returns cached result (no API call)
+// - updateDb: Returns cached result (no DB write)
+// - sendEmail: Returns cached result (no duplicate email)
+// - updateSubscription: Executes for the first time ✓
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+# Each step is automatically checkpointed
+charge = await ctx.execute_task(charge_card, payment=payment)       # ✓ Journaled
+await ctx.execute_task(update_db, charge_id=charge.id)              # ✓ Journaled
+await ctx.execute_task(send_email, email=user.email)               # ✓ Journaled
+await ctx.execute_task(update_subscription, user_id=user.id)       # ✓ Journaled
+
+# If crash happens after send_email, next run:
+# - charge_card: Returns cached result (no API call)
+# - update_db: Returns cached result (no DB write)
+# - send_email: Returns cached result (no duplicate email)
+# - update_subscription: Executes for the first time ✓
+```
+
+</TabPanel>
+</Tabs>
+
+**The magic**: This code looks like normal, sequential business logic. But it's actually durable, recoverable, and idempotent—without any manual state management. Here's the recovery in the crash-after-`send_email` case, step by step:
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Crash After the Email — What Reruns</div>
+  </div>
+  {[
+    { label: 'charge_card', detail: 'card charged — result journaled', icon: '✓', state: 'done' },
+    { label: 'update_db', detail: 'payment recorded — journaled', icon: '✓', state: 'done' },
+    { label: 'send_email', detail: 'receipt sent — journaled', icon: '✓', state: 'done' },
+    { label: 'server crashes', detail: 'before update_subscription', icon: '✗', state: 'crash' },
+    { label: 'replay', detail: 'first three return journaled results — no re-charge, no duplicate email', icon: '↻', state: 'resume' },
+    { label: 'update_subscription', detail: 'runs for the first time — the pipeline finishes', icon: '▶', state: 'done' },
+  ].map((row, i, arr) => (
+    <div key={i}>
+      <div className={`px-4 py-2 flex items-center gap-3 ${row.state === 'crash' ? 'bg-red-500/5' : ''} ${row.state === 'resume' ? 'bg-surface-75' : ''}`}>
+        <span className={`w-5 h-5 flex items-center justify-center text-[10px] shrink-0 ${row.state === 'crash' ? 'text-red-400' : 'text-foreground-muted'}`}>{row.icon}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{row.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{row.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">The card is charged once and the email sent once — no matter where the crash lands.</span>
+  </div>
+</div>
+
+### Comparing Approaches
+
+The reliability above usually costs you a pile of infrastructure. Durable execution folds most of it away — the stack you operate shrinks from five-plus moving parts to two you already run.
+
+<div className="not-prose my-8 grid md:grid-cols-2 gap-6 max-w-3xl mx-auto">
+  <div className="border">
+    <div className="bg-surface-75 px-4 py-2 border-b text-center">
+      <div className="text-xs font-medium text-foreground">Traditional Stack</div>
+      <div className="text-[10px] text-foreground-muted">state scattered across systems</div>
+    </div>
+    <div className="p-4 flex flex-col items-center gap-1">
+      {['Load Balancer', 'API Servers', 'Redis Queue', 'Worker Pools', 'Database', 'Dead Letter Queue', '"Step completed" flags'].map((box, i) => (
+        <div key={box} className="w-full">
+          <div className="border bg-background px-3 py-1.5 text-center text-[10px] text-foreground-light">{box}</div>
+          {i < 6 && <div className="flex justify-center"><div className="w-px h-2 bg-border-strong" /></div>}
+        </div>
+      ))}
+    </div>
+    <div className="border-t px-4 py-2 text-center">
+      <span className="text-[10px] text-foreground-muted">5+ parts · manual retries · no auto-recovery</span>
+    </div>
+  </div>
+  <div className="border">
+    <div className="bg-surface-75 px-4 py-2 border-b text-center">
+      <div className="text-xs font-medium text-foreground">Orcher Stack</div>
+      <div className="text-[10px] text-foreground-muted">all state in one place</div>
+    </div>
+    <div className="p-4 flex flex-col items-center gap-1">
+      <div className="border bg-background px-3 py-1.5 text-center text-[10px] text-foreground-light w-full">Load Balancer</div>
+      <div className="flex justify-center"><div className="w-px h-2 bg-border-strong" /></div>
+      <div className="border bg-background px-3 py-1.5 text-center text-[10px] text-foreground-light w-full">API Servers</div>
+      <div className="flex justify-center"><div className="w-px h-2 bg-border-strong" /></div>
+      <div className="border bg-surface-100 px-3 py-2 text-center w-full">
+        <div className="text-[11px] font-medium font-mono text-foreground">Orchestrator</div>
+        <div className="text-[9px] text-foreground-muted">gRPC :50051 · HTTP :8001</div>
+      </div>
+      <div className="flex justify-center items-center gap-1.5"><div className="w-px h-2 bg-border-strong" /><span className="text-[9px] font-mono text-foreground-muted">journal + data</span></div>
+      <div className="border bg-surface-75 px-3 py-2 text-center w-full">
+        <div className="text-[11px] font-medium font-mono text-foreground">PostgreSQL</div>
+        <div className="text-[9px] text-foreground-muted">app data + workflow journal</div>
+      </div>
+      <div className="flex justify-center items-center gap-1.5"><div className="w-px h-2 bg-border-strong" /><span className="text-[9px] font-mono text-foreground-muted">gRPC</span></div>
+      <div className="border bg-background px-3 py-1.5 text-center text-[10px] text-foreground-light w-full">SDK Workers (your code)</div>
+    </div>
+    <div className="border-t px-4 py-2 text-center">
+      <span className="text-[10px] text-foreground-muted">One server + one database · built-in retries · auto-recovery</span>
+    </div>
+  </div>
+</div>
+
+The point isn't fewer boxes for their own sake — it's that the recovery logic, retry state, and dead-letter handling that used to be *your* code and *your* infrastructure are now properties of the runtime.
+
+---
+
+## The path
+
+<div className="not-prose my-8 max-w-2xl mx-auto">
+  {[
+    { n: '01', href: '/guides/learning/backend-engineers/core-concepts', title: 'Core Concepts', body: 'What durable execution really means, how automatic journaling works, and the mental-model shift from traditional backends.', learn: 'durable execution · the journal · idempotency' },
+    { n: '02', href: '/guides/learning/backend-engineers/building-patterns', title: 'Building Patterns', body: 'Payment processing, webhook handling, and background jobs — real endpoints built step by step.', learn: 'payments · webhooks · jobs' },
+    { n: '03', href: '/guides/learning/backend-engineers/distributed-systems', title: 'Distributed Systems Deep Dive', body: 'CAP trade-offs, saga vs. 2PC, event sourcing, and human-in-the-loop workflows.', learn: 'consistency · sagas · event sourcing' },
+    { n: '04', href: '/guides/learning/backend-engineers/production', title: 'Production Excellence', body: 'Observability, testing strategies, and performance for workflows you can trust in production.', learn: 'monitoring · testing · scaling' },
+  ].map((s, i, arr) => (
+    <div key={s.n}>
+      <Link href={s.href} className="no-underline group flex gap-4 border p-5 hover:bg-surface-75 transition-colors">
+        <span className="font-mono text-sm text-foreground-muted shrink-0 pt-0.5">{s.n}</span>
+        <div className="flex-1">
+          <div className="text-sm font-medium text-foreground group-hover:underline">{s.title}</div>
+          <p className="m-0 mt-1 text-xs text-foreground-light leading-relaxed">{s.body}</p>
+          <div className="mt-2 font-mono text-[10px] uppercase tracking-widest text-foreground-muted">{s.learn}</div>
+        </div>
+      </Link>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-[1.65rem]">
+          <div className="w-px h-4 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+</div>

@@ -1,0 +1,107 @@
+---
+id: 'state-management'
+title: 'State Management'
+description: 'Learn how to manage workflow state in Orcher. Understand state persistence, workflow variables, state queries, and best practices.'
+sidebar_label: 'State Management'
+---
+
+State management in Orcher allows workflows to maintain persistent key-value state that survives restarts, crashes, and replays. You can store progress indicators, intermediate results, and status flags using `set_state()` and `get_state()` — and external systems can query that state in real time via registered query handlers, all without blocking the workflow.
+
+### Key Characteristics
+
+- **Durable** — State is reconstructed from the journal on replay, so it survives crashes
+- **Scoped** — Each workflow execution has its own isolated state
+- **Type-Safe** — Compile-time type checking via serialization/deserialization (JSON)
+- **Queryable** — External systems can query state through `registerQueryHandler` without blocking execution
+- **Replay-Safe** — State is consistent across first execution and replay
+
+<div className="not-prose my-8 max-w-md mx-auto">
+  <div className="flex gap-4 items-start">
+    {/* Workflow side */}
+    <div className="flex-1 flex flex-col items-center">
+      <div className="border bg-surface-100 w-full px-4 py-2 text-center">
+        <div className="text-xs font-medium text-foreground">Workflow</div>
+      </div>
+      <div className="w-px h-2 bg-border-strong" />
+      <div className="border bg-background w-full px-3 py-1.5 text-center">
+        <div className="text-[10px] font-mono text-foreground">set_state("status", "processing")</div>
+      </div>
+      <div className="w-px h-2 bg-border-strong" />
+      <div className="border bg-background w-full px-3 py-1.5 text-center">
+        <div className="text-[10px] font-mono text-foreground">execute_task(work)</div>
+      </div>
+      <div className="w-px h-2 bg-border-strong" />
+      <div className="border bg-background w-full px-3 py-1.5 text-center">
+        <div className="text-[10px] font-mono text-foreground">set_state("progress", "75%")</div>
+      </div>
+      <div className="w-px h-2 bg-border-strong" />
+      <div className="border bg-background w-full px-3 py-1.5 text-center">
+        <div className="text-[10px] font-mono text-foreground">set_state("status", "done")</div>
+      </div>
+    </div>
+    {/* Arrow */}
+    <div className="flex flex-col items-center pt-12">
+      <div className="flex items-center">
+        <span className="text-[8px] text-foreground-muted">◄</span>
+        <div className="h-px w-3 bg-border-strong" />
+        <span className="text-[8px] text-foreground-muted">►</span>
+      </div>
+    </div>
+    {/* State store */}
+    <div className="flex flex-col items-center" style={{ minWidth: '8rem' }}>
+      <div className="border bg-surface-75 w-full px-3 py-2 text-center">
+        <div className="text-[10px] font-mono uppercase tracking-wider text-foreground-muted mb-2">State (KV)</div>
+        <div className="flex flex-col gap-1">
+          {[
+            { key: 'status', value: '"done"' },
+            { key: 'progress', value: '"75%"' },
+          ].map((kv) => (
+            <div key={kv.key} className="border bg-background px-2 py-1 flex justify-between text-[9px]">
+              <span className="font-mono text-foreground-muted">{kv.key}</span>
+              <span className="font-mono text-foreground">{kv.value}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="w-px h-3 bg-border-strong" />
+      <div className="text-[10px] font-mono text-foreground-muted mb-1">query</div>
+      <div className="border border-dashed bg-background w-full px-3 py-2 text-center">
+        <div className="text-[10px] font-medium text-foreground">External Client</div>
+        <div className="text-[9px] text-foreground-muted mt-0.5">read state anytime</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+---
+
+## Explore State Management
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/state-management/basics" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Setting & Getting State</h3>
+      <p className="text-sm text-foreground-light">
+        Learn how to set, get, and persist state values across workflow executions and replays.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/state-management/patterns" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">State Patterns</h3>
+      <p className="text-sm text-foreground-light">
+        Common patterns for progress tracking, status machines, query handlers, and state vs variables.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/state-management/best-practices" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Best Practices & Performance</h3>
+      <p className="text-sm text-foreground-light">
+        Guidelines for descriptive keys, typed state, performance optimization, and troubleshooting.
+      </p>
+    </div>
+  </Link>
+</div>

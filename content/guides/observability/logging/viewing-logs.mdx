@@ -1,0 +1,76 @@
+---
+id: 'viewing-logs'
+title: 'Viewing Logs'
+description: 'View Orcher logs via CLI, Docker, and direct database queries'
+sidebar_label: 'Viewing Logs'
+---
+
+## CLI
+
+The `orcher logs` command retrieves workflow execution logs from the server:
+
+```bash
+# View recent logs for a workflow
+orcher logs workflow/my-workflow
+
+# Follow logs in real-time (SSE streaming)
+orcher logs workflow/my-workflow --follow
+
+# View event-sourced journal entries
+orcher logs workflow/my-workflow --journal
+
+# View task execution details
+orcher logs workflow/my-workflow --tasks
+
+# Filter by log level
+orcher logs workflow/my-workflow --level error
+
+# Filter by time range
+orcher logs workflow/my-workflow --since "2024-01-15T10:00:00Z"
+
+# Search logs
+orcher logs workflow/my-workflow --grep "payment failed"
+
+# Tail last N entries
+orcher logs workflow/my-workflow --tail 50
+```
+
+## Docker
+
+When running with Docker Compose, view service logs:
+
+```bash
+# Orchestrator logs (gRPC and REST API)
+docker compose logs -f orchestrator
+
+# All services
+docker compose logs -f
+```
+
+## Database
+
+Execution logs are stored in the `workflow_execution_logs` table and can be queried directly:
+
+```sql
+-- Recent errors
+SELECT timestamp, level, message
+FROM workflow_execution_logs
+WHERE level = 'ERROR'
+  AND timestamp > NOW() - INTERVAL '1 hour'
+ORDER BY timestamp DESC
+LIMIT 50;
+
+-- Timeline for a specific workflow
+SELECT timestamp, level, message
+FROM workflow_execution_logs
+WHERE workflow_id = 'my-workflow-id'
+ORDER BY timestamp ASC;
+```
+
+---
+
+## Next Steps
+
+- [Log Aggregation](/guides/observability/logging/aggregation) — Kubernetes, Grafana Loki, Elasticsearch, and performance
+- [Structured Logging](/guides/observability/logging/structured-logging) — Using tracing fields, `#[instrument]`, and span context
+- [Logging Overview](/guides/observability/logging) — Configuration, formats, and log levels

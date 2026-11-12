@@ -1,0 +1,338 @@
+---
+id: 'data-processing-validation'
+title: 'Data Validation Pipeline'
+description: 'Validate, transform, and quarantine data with configurable rules and error handling'
+sidebar_label: 'Data Validation'
+---
+
+Before loading data into a warehouse, validate records against a schema, quarantine invalid rows for review, and only load clean data. This pattern separates validation from loading so you can fix and re-process quarantined records without rerunning the entire pipeline.
+
+The key mindset: **an invalid record is data, not an error.** The workflow doesn't fail when it meets bad rows — it forks the stream, loads what's clean, and files the rest with a reason attached. Failure is reserved for real faults (the source is down, the warehouse rejects writes), which retry as usual.
+
+## How it works
+
+One extract, one validation pass, then the stream splits. Both destinations are ordinary tasks, so both paths get the same durability guarantees.
+
+<div className="not-prose my-8 max-w-lg mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Validate, Then Fork</div>
+  </div>
+  <div className="px-4 py-3 flex flex-col items-center gap-1">
+    <div className="border px-4 py-1.5 text-center">
+      <div className="text-xs font-medium font-mono text-foreground">extract_records</div>
+      <div className="text-[9px] text-foreground-muted">5,000 records</div>
+    </div>
+    <div className="text-[10px] text-foreground-muted leading-none py-0.5">▼</div>
+    <div className="border px-4 py-1.5 text-center">
+      <div className="text-xs font-medium font-mono text-foreground">validate_records</div>
+      <div className="text-[9px] text-foreground-muted">schema check per record</div>
+    </div>
+    <div className="text-[10px] text-foreground-muted leading-none py-0.5">▼ split</div>
+    <div className="grid grid-cols-2 gap-2 w-full">
+      <div className="border px-2 py-2 text-center">
+        <div className="text-[10px] font-medium font-mono text-foreground">load_valid_records</div>
+        <div className="text-[9px] text-foreground-muted">4,940 clean rows</div>
+        <div className="text-[9px] text-foreground-muted">→ warehouse.clean_data</div>
+      </div>
+      <div className="border border-dashed px-2 py-2 text-center">
+        <div className="text-[10px] font-medium font-mono text-foreground">quarantine_invalid</div>
+        <div className="text-[9px] text-foreground-muted">60 rows + failure reasons</div>
+        <div className="text-[9px] text-foreground-muted">→ quarantine table</div>
+      </div>
+    </div>
+  </div>
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">The workflow succeeds either way — bad rows are routed, not fatal.</span>
+  </div>
+</div>
+
+## Example: a validated ETL pipeline
+
+Note the quarantine step is conditional — it only runs when the validation task reported invalid records. Branching like this is replay-safe because the condition derives from a journaled task result: on replay, `validate_records` returns the same recorded result, so the workflow always takes the same path. See the [determinism rules](/guides/core/workflows/determinism).
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ValidationResult {
+    valid_records: Vec<serde_json::Value>,
+    invalid_records: Vec<(serde_json::Value, String)>,  // (record, reason)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PipelineResult {
+    loaded: usize,
+    quarantined: usize,
+    total: usize,
+}
+
+#[task]
+async fn extract_records(source: String, batch_size: usize) -> Result<Vec<serde_json::Value>> {
+    let records = db::fetch_all(&source, batch_size).await?;
+    Ok(records)
+}
+
+#[task]
+async fn validate_records(records: Vec<serde_json::Value>) -> Result<ValidationResult> {
+    let mut valid = Vec::new();
+    let mut invalid = Vec::new();
+
+    for record in records {
+        match schema::validate(&record) {
+            Ok(_) => valid.push(record),
+            Err(reason) => invalid.push((record, reason.to_string())),
+        }
+    }
+
+    Ok(ValidationResult {
+        valid_records: valid,
+        invalid_records: invalid,
+    })
+}
+
+#[task]
+async fn load_valid_records(dest: String, records: Vec<serde_json::Value>) -> Result<usize> {
+    let count = db::upsert_batch(&dest, &records).await?;
+    Ok(count)
+}
+
+#[task]
+async fn quarantine_invalid(records: Vec<(serde_json::Value, String)>) -> Result<usize> {
+    // Store invalid records with their failure reasons for manual review
+    let count = db::insert_quarantine(&records).await?;
+    Ok(count)
+}
+
+#[workflow(name = "validated_etl", version = "1.0.0")]
+pub async fn validated_etl(
+    ctx: WorkflowContext,
+    source: String,
+) -> Result<PipelineResult> {
+    // Extract
+    let records = ctx.execute_task(extract_records, (source, 5000usize)).await?;
+    let total = records.len();
+
+    // Validate
+    let validation = ctx.execute_task(validate_records, records).await?;
+
+    // Load valid records
+    let loaded = ctx.execute_task(
+        load_valid_records, ("warehouse.clean_data".to_string(), validation.valid_records)
+    ).await?;
+
+    // Quarantine invalid records
+    let quarantined = if !validation.invalid_records.is_empty() {
+        ctx.execute_task(quarantine_invalid, validation.invalid_records).await?
+    } else {
+        0
+    };
+
+    Ok(PipelineResult { loaded, quarantined, total })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, WorkflowContext, createTaskRefs } from '@orcher/sdk';
+
+interface ValidationResult {
+  validRecords: Record<string, unknown>[];
+  invalidRecords: { record: Record<string, unknown>; reason: string }[];
+}
+
+interface PipelineResult {
+  loaded: number;
+  quarantined: number;
+  total: number;
+}
+
+@Tasks()
+class ValidationTasks {
+  @Task()
+  async extractRecords(source: string, batchSize: number): Promise<Record<string, unknown>[]> {
+    return await db.fetchAll(source, batchSize);
+  }
+
+  @Task()
+  async validateRecords(records: Record<string, unknown>[]): Promise<ValidationResult> {
+    const valid: Record<string, unknown>[] = [];
+    const invalid: { record: Record<string, unknown>; reason: string }[] = [];
+
+    for (const record of records) {
+      const result = schema.validate(record);
+      if (result.ok) {
+        valid.push(record);
+      } else {
+        invalid.push({ record, reason: result.error });
+      }
+    }
+    return { validRecords: valid, invalidRecords: invalid };
+  }
+
+  @Task()
+  async loadValidRecords(dest: string, records: Record<string, unknown>[]): Promise<number> {
+    return await db.upsertBatch(dest, records);
+  }
+
+  @Task()
+  async quarantineInvalid(records: { record: Record<string, unknown>; reason: string }[]): Promise<number> {
+    return await db.insertQuarantine(records);
+  }
+}
+
+const tasks = createTaskRefs(ValidationTasks);
+
+@Workflow({ name: 'validated_etl', version: '1.0.0' })
+class ValidatedETL {
+  async run(ctx: WorkflowContext, source: string): Promise<PipelineResult> {
+    const records = await ctx.executeTask(tasks.extractRecords, source, 5000);
+    const total = records.length;
+
+    const validation = await ctx.executeTask(tasks.validateRecords, records);
+
+    const loaded = await ctx.executeTask(
+      tasks.loadValidRecords, 'warehouse.clean_data', validation.validRecords
+    );
+
+    let quarantined = 0;
+    if (validation.invalidRecords.length > 0) {
+      quarantined = await ctx.executeTask(
+        tasks.quarantineInvalid, validation.invalidRecords
+      );
+    }
+
+    return { loaded, quarantined, total };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext
+from dataclasses import dataclass
+
+@dataclass
+class ValidationResult:
+    valid_records: list[dict]
+    invalid_records: list[tuple[dict, str]]  # (record, reason)
+
+@dataclass
+class PipelineResult:
+    loaded: int
+    quarantined: int
+    total: int
+
+@task
+async def extract_records(source: str, batch_size: int) -> list[dict]:
+    return await db.fetch_all(source, batch_size)
+
+@task
+async def validate_records(records: list[dict]) -> ValidationResult:
+    valid, invalid = [], []
+    for record in records:
+        try:
+            schema.validate(record)
+            valid.append(record)
+        except ValidationError as e:
+            invalid.append((record, str(e)))
+    return ValidationResult(valid_records=valid, invalid_records=invalid)
+
+@task
+async def load_valid_records(dest: str, records: list[dict]) -> int:
+    return await db.upsert_batch(dest, records)
+
+@task
+async def quarantine_invalid(records: list[tuple[dict, str]]) -> int:
+    return await db.insert_quarantine(records)
+
+@workflow(name="validated_etl", version="1.0.0")
+async def validated_etl(ctx: WorkflowContext, source: str) -> PipelineResult:
+    records = await ctx.execute_task(extract_records, source, 5000)
+    total = len(records)
+
+    validation = await ctx.execute_task(validate_records, records)
+
+    loaded = await ctx.execute_task(
+        load_valid_records, "warehouse.clean_data", validation.valid_records
+    )
+
+    quarantined = 0
+    if validation.invalid_records:
+        quarantined = await ctx.execute_task(
+            quarantine_invalid, validation.invalid_records
+        )
+
+    return PipelineResult(loaded=loaded, quarantined=quarantined, total=total)
+```
+
+</TabPanel>
+
+</Tabs>
+
+## The quarantine loop
+
+Quarantine is only useful if records leave it. Because each quarantined row carries its failure reason, the review loop is targeted: fix the cause, then re-run the *same* pipeline with the quarantine table as the source — only the previously-bad rows flow through again.
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Reprocessing Quarantined Records</div>
+  </div>
+  {[
+    { label: 'review', detail: '60 rows, grouped by failure reason', icon: '1' },
+    { label: 'fix the cause', detail: 'Patch the mapping, backfill the field, or amend the schema', icon: '2' },
+    { label: 'validated_etl(quarantine)', detail: 'Re-run the same workflow, quarantine table as source', icon: '3' },
+    { label: 'load / re-quarantine', detail: '58 now clean → warehouse; 2 still invalid → back to quarantine', icon: '✓', state: 'done' },
+  ].map((step, i, arr) => (
+    <div key={i}>
+      <div className="px-4 py-2 flex items-center gap-3">
+        <span className={`w-5 h-5 flex items-center justify-center text-[10px] shrink-0 text-foreground-muted ${step.icon !== '✓' ? 'font-mono border border-default' : ''}`}>{step.icon}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{step.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{step.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Only the 60 quarantined rows re-run — never the 4,940 that already loaded.</span>
+  </div>
+</div>
+
+Crash recovery follows the usual replay rules. The valid/invalid split is stable across replays because it lives in the journaled validation result — and if the worker dies between loading and quarantining, the load result is already journaled, so only the quarantine step retries.
+
+## Design notes
+
+- **Store the reason with the record.** A quarantine table without failure reasons is a dead-letter queue; with them (as `quarantine_invalid` does here) it's an actionable work queue you can group, triage, and fix in bulk.
+- **Validate in a task, not in the workflow.** Per-record schema checks are real compute. Keeping them inside `validate_records` means the work runs once, its verdict is journaled, and the workflow only orchestrates — which is also what keeps the conditional quarantine branch deterministic.
+- **Scale it with batching or fan-out.** This example validates one 5,000-record extract. For millions of rows, run this pipeline per chunk with [Batch Processing](/guides/use-cases/data-processing/batch-processing), or per source with [Parallel ETL](/guides/use-cases/data-processing/parallel-etl) — the fork works the same at any width.
+- **Decide what "too dirty" means.** Routing 1% of rows to quarantine is routine; routing 90% usually means the schema or mapping is wrong. Consider failing the workflow when the invalid ratio crosses a threshold so a systemic problem surfaces as an error instead of a full quarantine table.
+
+---
+
+## Next Steps
+
+- Next: [Best Practices & Performance](/guides/use-cases/data-processing/best-practices)
+- Previous: [Scheduled Sync](/guides/use-cases/data-processing/scheduled-sync)
+- Back to [Data Pipelines & ETL overview](/guides/use-cases/data-processing)

@@ -1,0 +1,338 @@
+---
+id: 'workflows-best-practices'
+title: 'Best Practices'
+description: 'Guidelines for writing maintainable, reliable, and performant workflows.'
+sidebar_label: 'Best Practices'
+---
+
+### 1. Keep Workflows Simple
+
+Workflows should be thin orchestration layers that coordinate tasks. Put complex business logic, calculations, and external interactions inside tasks, not in the workflow itself. This keeps your workflow deterministic and makes individual pieces easier to test and reuse.
+
+**Good:** Simple orchestration logic
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+  <TabPanel id="rust" label="Rust">
+
+```rust
+#[workflow(name = "process_order", version = "1.0.0")]
+pub async fn process_order(ctx: WorkflowContext, order_id: String) -> Result<String> {
+    ctx.execute_task(validate, order_id.clone()).await?;
+    ctx.execute_task(charge, order_id.clone()).await?;
+    ctx.execute_task(fulfill, order_id).await?;
+    Ok("Done".to_string())
+}
+```
+
+  </TabPanel>
+  <TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, WorkflowContext, createTaskRefs } from '@orcher/sdk';
+import { OrderTasks } from '../tasks/order.tasks';
+
+const orderTasks = createTaskRefs(OrderTasks);
+
+@Workflow({ name: 'process_order', version: '1.0.0' })
+export class ProcessOrderWorkflow {
+  async run(ctx: WorkflowContext, orderId: string): Promise<string> {
+    await ctx.executeTask(orderTasks.validate, { orderId });
+    await ctx.executeTask(orderTasks.charge, { orderId });
+    await ctx.executeTask(orderTasks.fulfill, { orderId });
+    return 'Done';
+  }
+}
+```
+
+  </TabPanel>
+  <TabPanel id="python" label="Python">
+
+```python
+@workflow(name="process_order", version="1.0")
+async def process_order(ctx: WorkflowContext, order_id: str) -> str:
+    await ctx.execute_task(validate, order_id=order_id)
+    await ctx.execute_task(charge, order_id=order_id)
+    await ctx.execute_task(fulfill, order_id=order_id)
+    return "Done"
+```
+
+  </TabPanel>
+</Tabs>
+
+**Bad:** Complex business logic in workflow
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+  <TabPanel id="rust" label="Rust">
+
+```rust
+#[workflow(name = "complex_order", version = "1.0.0")]
+pub async fn complex_order(ctx: WorkflowContext, order_id: String) -> Result<String> {
+    // Don't put complex calculations in workflows — they must be deterministic
+    // and this logic is harder to test in isolation
+    let tax = calculate_complex_tax(&order_id)?;
+    let discount = apply_promotional_rules(&order_id)?;
+    // ... more complex logic
+    Ok("Done".to_string())
+}
+```
+
+  </TabPanel>
+  <TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Workflow({ name: 'complex_order', version: '1.0.0' })
+export class ComplexOrderWorkflow {
+  async run(ctx: WorkflowContext, orderId: string): Promise<string> {
+    // Don't put complex calculations in workflows — they must be deterministic
+    // and this logic is harder to test in isolation
+    const tax = calculateComplexTax(orderId);
+    const discount = applyPromotionalRules(orderId);
+    // ... more complex logic
+    return 'Done';
+  }
+}
+```
+
+  </TabPanel>
+  <TabPanel id="python" label="Python">
+
+```python
+@workflow(name="complex_order", version="1.0")
+async def complex_order(ctx: WorkflowContext, order_id: str) -> str:
+    # Don't put complex calculations in workflows — they must be deterministic
+    # and this logic is harder to test in isolation
+    tax = calculate_complex_tax(order_id)
+    discount = apply_promotional_rules(order_id)
+    # ... more complex logic
+    return "Done"
+```
+
+  </TabPanel>
+</Tabs>
+
+### 2. Use Descriptive Names
+
+Task and workflow names appear in logs, dashboards, and the execution history. Clear names make debugging and monitoring significantly easier. Choose names that describe the action being performed, not generic labels.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+  <TabPanel id="rust" label="Rust">
+
+```rust
+// Good: Clear intent — you know exactly what each step does
+ctx.execute_task(charge_credit_card, payment_info).await?;
+ctx.execute_task(send_confirmation_email, email_data).await?;
+
+// Bad: Vague names — impossible to debug from logs
+ctx.execute_task(task1, data).await?;
+ctx.execute_task(process, info).await?;
+```
+
+  </TabPanel>
+  <TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Good: Clear intent — you know exactly what each step does
+await ctx.executeTask(paymentTasks.chargeCreditCard, paymentInfo);
+await ctx.executeTask(emailTasks.sendConfirmationEmail, emailData);
+
+// Bad: Vague names — impossible to debug from logs
+await ctx.executeTask(tasks.task1, data);
+await ctx.executeTask(tasks.process, info);
+```
+
+  </TabPanel>
+  <TabPanel id="python" label="Python">
+
+```python
+# Good: Clear intent — you know exactly what each step does
+await ctx.execute_task(charge_credit_card, payment_info=payment_info)
+await ctx.execute_task(send_confirmation_email, email_data=email_data)
+
+# Bad: Vague names — impossible to debug from logs
+await ctx.execute_task(task1, data=data)
+await ctx.execute_task(process, info=info)
+```
+
+  </TabPanel>
+</Tabs>
+
+### 3. Handle Errors Explicitly
+
+Don't let errors silently propagate. If a step fails, decide whether to retry, compensate, or fail the workflow. Explicit error handling makes your workflow's behavior predictable and makes failures easier to diagnose.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+  <TabPanel id="rust" label="Rust">
+
+```rust
+let result = ctx.execute_task(risky_operation, data).await;
+
+match result {
+    Ok(value) => {
+        // Handle success
+    }
+    Err(e) => {
+        // Run compensation or retry logic
+        ctx.execute_task(rollback, data).await?;
+    }
+}
+```
+
+  </TabPanel>
+  <TabPanel id="typescript" label="TypeScript">
+
+```typescript
+try {
+  const value = await ctx.executeTask(tasks.riskyOperation, data);
+  // Handle success
+} catch (e) {
+  // Run compensation or retry logic
+  await ctx.executeTask(tasks.rollback, data);
+}
+```
+
+  </TabPanel>
+  <TabPanel id="python" label="Python">
+
+```python
+try:
+    value = await ctx.execute_task(risky_operation, data=data)
+    # Handle success
+except Exception:
+    # Run compensation or retry logic
+    await ctx.execute_task(rollback, data=data)
+```
+
+  </TabPanel>
+</Tabs>
+
+### 4. Use Timeouts
+
+Always set timeouts on `wait_for_event` calls. Without a timeout, a workflow waiting for an event that never arrives will remain suspended forever. Timeouts give you a way to handle the "no response" case — sending a reminder, escalating, or failing gracefully.
+
+Durable sleeps are also useful for implementing retry delays, rate limiting, and scheduled actions.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+  <TabPanel id="rust" label="Rust">
+
+```rust
+use std::time::Duration;
+
+// Set reasonable timeouts for external events
+ctx.wait_for_event_with_timeout("approval", Duration::from_secs(86400)).await?;
+
+// Use sleep for durable delays
+ctx.sleep(Duration::from_secs(3600)).await?;
+```
+
+  </TabPanel>
+  <TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Duration } from '@orcher/sdk';
+
+// Set reasonable timeouts for external events
+await ctx.waitForEventWithTimeout('approval', Duration.fromHours(24));
+
+// Use sleep for durable delays
+await ctx.sleep(Duration.fromHours(1));
+```
+
+  </TabPanel>
+  <TabPanel id="python" label="Python">
+
+```python
+from datetime import timedelta
+
+# Set reasonable timeouts for external events
+await ctx.wait_for_event("approval", timeout=timedelta(hours=24))
+
+# Use sleep for durable delays
+await ctx.sleep(timedelta(hours=1))
+```
+
+  </TabPanel>
+</Tabs>
+
+### 5. Make Tasks Idempotent
+
+**Idempotent** means "safe to execute more than once with the same effect." While Orcher's journaling prevents duplicate execution during normal replay, tasks can be retried due to transient failures (network timeouts, worker crashes). If a task makes an external API call, use idempotency keys to ensure the external system doesn't process the request twice.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+  <TabPanel id="rust" label="Rust">
+
+```rust
+#[task(name = "charge_card", retry = 3)]
+pub async fn charge_card(_ctx: TaskContext, input: PaymentInput) -> Result<ChargeResult> {
+    // Use idempotency keys for external APIs
+    stripe::Charge::create(&stripe_client, ChargeParams {
+        idempotency_key: Some(format!("charge_{}", input.order_id)),
+        amount: input.amount,
+        // ...
+    }).await?;
+}
+```
+
+  </TabPanel>
+  <TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Task({ name: 'chargeCard', timeout: 30000 })
+async chargeCard(_ctx: TaskContext, input: PaymentInput): Promise<ChargeResult> {
+  // Use idempotency keys for external APIs
+  return await stripe.charges.create({
+    idempotencyKey: `charge_${input.orderId}`,
+    amount: input.amount,
+    // ...
+  });
+}
+```
+
+  </TabPanel>
+  <TabPanel id="python" label="Python">
+
+```python
+@task(name="charge_card", retry_policy={"max_attempts": 3})
+async def charge_card(ctx: TaskContext, order_id: str, amount: int) -> dict:
+    # Use idempotency keys for external APIs
+    return stripe.Charge.create(
+        idempotency_key=f"charge_{order_id}",
+        amount=amount,
+        # ...
+    )
+```
+
+  </TabPanel>
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/tasks" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Tasks</h3>
+      <p className="text-sm text-foreground-light">
+        Learn how to define and execute tasks within workflows
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/use-cases/distributed-systems" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Use Cases</h3>
+      <p className="text-sm text-foreground-light">
+        Explore real-world workflow patterns and examples
+      </p>
+    </div>
+  </Link>
+</div>
+
+---
+
+## Related Guides
+
+- [Tasks](/guides/core/tasks) - Define durable task implementations
+- [State Management](/guides/core/state-management) - Manage workflow state
+- [Error Handling](/guides/core/error-handling) - Handle failures gracefully
+- [Saga Pattern](/guides/use-cases/distributed-systems/saga-pattern) - Distributed transactions

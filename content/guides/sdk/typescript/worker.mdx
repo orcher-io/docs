@@ -1,0 +1,156 @@
+---
+id: typescript-worker
+title: Worker Configuration
+description: Configure and run a TypeScript SDK worker — options, registering workflows and tasks, authentication, graceful shutdown and scaling
+sidebar_label: 'Worker'
+---
+
+A `Worker` is the process that connects to the ORCHER engine, polls a task queue for workflow
+and task work, and runs your code.
+
+---
+
+## Creating a Worker
+
+Pass the options to the constructor:
+
+<$CodeSample path="typescript/src/worker/options.ts" region="options" />
+
+Or build it fluently. `build()` is async, because it can import files first (see
+[auto-discovery](#auto-discovery)):
+
+<$CodeSample path="typescript/src/worker/options.ts" region="builder" />
+
+The worker starts polling as soon as it is constructed. `run()` connects its client, waits
+until the pollers are up, and resolves; it does not wait for shutdown, and it rejects if the
+worker could not start polling. The worker then runs until `shutdown()`.
+
+---
+
+## Configuration
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `serverUrl` | (required) | Engine gRPC address. `https://` turns TLS on. |
+| `namespace` | (required) | Namespace to work in |
+| `taskQueue` | (required) | Queue this worker polls |
+| `identity` | hostname, process id and start time | Name the worker reports itself under |
+| `maxConcurrentWorkflows` | `100` | Workflow activations running at once |
+| `maxConcurrentTasks` | `100` | Tasks running at once |
+| `workflowPollerCount` | `4` | Parallel workflow pollers (at least 1) |
+| `taskPollerCount` | `4` | Parallel task pollers (at least 1) |
+| `maxConcurrentActorOperations` | `100` | Actor operations running at once |
+| `actorPollerCount` | `2` | Parallel actor pollers, started only when actors are registered |
+| `shutdownGraceTime` | 30 seconds | How long `shutdown()` waits for in-flight work; a `Duration` or milliseconds |
+| `versionId` | `ORCHER_VERSION_ID` | The code release this worker runs, such as a git sha or image tag |
+| `apiKey` | none | API key, sent as a bearer token on every request |
+| `tls` | on for `https://` | `caPath`, `certPath`, `keyPath`; see [Client](/guides/sdk/typescript/client#api-keys-and-tls) |
+| `organizationId` | none | Sent as `X-Organization-Id` on every request |
+| `logger` | console | An object with `debug`, `info`, `warn` and `error` methods |
+
+The builder has a setter for each option except `apiKey`, `tls`, `maxConcurrentActorOperations`
+and `actorPollerCount`. To use those, pass options to the constructor.
+
+`versionId` is opaque: it is sent on every poll and never parsed or compared. Set it from your
+build (the worker reads `ORCHER_VERSION_ID` when the option is not given). The engine records
+it on an execution the first time a worker claims that execution.
+
+### API Keys and TLS
+
+An engine that requires authentication rejects a worker without a valid API key. Pass it as
+`apiKey`; it is sent as `authorization: Bearer <key>` on every request the worker makes. The SDK
+doesn't read `ORCHER_API_KEY`, so read it yourself:
+
+<$CodeSample path="typescript/src/worker/options.ts" region="api-key" />
+
+TLS follows the URL scheme. An `https://` URL connects over TLS and verifies the engine against
+the system trust store, with no other setting. An `http://` URL connects in plaintext, so use
+`https://` whenever the engine expects TLS. The `tls` option adds certificates: a CA certificate
+to trust a private or self-signed authority, and a client certificate and key for mutual TLS.
+Setting `tls` at all turns TLS on:
+
+<$CodeSample path="typescript/src/worker/options.ts" region="mtls" />
+
+---
+
+## Registering Workflows and Tasks
+
+`workflow()`, `task()`, `@Workflow()` and `@Task()` register what they define when their module
+is loaded. By default a worker serves every workflow and task registered in its process at the
+moment it is constructed, so import those modules before you create the worker:
+
+<$CodeSample path="typescript/src/overview/worker.ts" region="worker" />
+
+To serve only some of them, pass `workflows` and `tasks`: the references `workflow()` and
+`task()` return, and those from `createTaskRefs()`. The modules must still be imported.
+
+<$CodeSample path="typescript/src/worker/options.ts" region="only" />
+
+Pass references, not `@Workflow()` classes: in `@orcher/sdk` 0.5.4 a class given in `workflows`
+is registered under its JavaScript class name rather than its workflow name.
+
+Names are global within a process: a second task or workflow registered under a name already
+in use replaces the first, with a warning in the log.
+
+### Auto-Discovery
+
+`Worker.builder().autoDiscover()` imports matching files for you before it builds the worker:
+
+<$CodeSample path="typescript/src/worker/options.ts" region="auto-discover" />
+
+| `autoDiscover` option | Default | Description |
+|-----------------------|---------|-------------|
+| `patterns` | `./src/**/*.ts`, `./src/**/*.js` | Globs of files to import |
+| `exclude` | tests, specs, `.d.ts`, `node_modules`, `dist`, `build`, `.next`, `coverage` | Globs to skip. Setting it replaces the default list. |
+| `baseDir` | `process.cwd()` | Directory the globs are resolved against |
+| `throwOnError` | `false` | Fail on the first file that cannot be imported, instead of logging it and going on |
+
+The defaults suit a worker run from TypeScript source. A worker run from compiled JavaScript
+must point the patterns at its output, and replace the exclude list, which skips `dist/` and
+`build/`:
+
+<$CodeSample path="typescript/src/worker/options.ts" region="auto-discover-dist" />
+
+Auto-discovery is a builder option only. With the constructor, import your modules yourself.
+
+---
+
+## Graceful Shutdown
+
+`shutdown()` stops polling, gives in-flight work up to `shutdownGraceTime` to finish, then
+stops the worker. Calling it again while it runs returns the same promise.
+
+<$CodeSample path="typescript/src/worker/options.ts" region="shutdown" />
+
+To override the grace time for one shutdown, or not to wait at all, pass one of:
+
+<$CodeSample path="typescript/src/worker/options.ts" region="shutdown-options" />
+
+Work a stopped worker had claimed is released by the engine and handed to another worker. In a
+container, start Node in exec form so the signal reaches it rather than a shell:
+
+```dockerfile
+# Exec form: SIGTERM reaches node
+CMD ["node", "dist/worker.js"]
+
+# Not shell form: the signal goes to /bin/sh
+# CMD node dist/worker.js
+```
+
+---
+
+## Scaling
+
+Run more worker processes on the same task queue to add capacity; each polls independently,
+and the engine hands each piece of work to one of them. Within a process,
+`maxConcurrentWorkflows` and `maxConcurrentTasks` bound how much runs at once. Apart from
+`ORCHER_VERSION_ID`, the SDK reads no environment variables for the worker's settings, so read
+your own (as the samples above do with `process.env`) and pass them in.
+
+---
+
+## Next Steps
+
+- [Workflows](/guides/sdk/typescript/workflows): the `WorkflowContext` API
+- [Tasks](/guides/sdk/typescript/tasks): task options and injection
+- [Workers](/guides/operations/workers): running workers in production

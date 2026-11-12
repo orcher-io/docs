@@ -1,0 +1,394 @@
+---
+id: 'parent-child-best-practices'
+title: 'Best Practices & Performance'
+description: 'Guidelines for designing efficient parent-child workflow hierarchies with Orcher'
+sidebar_label: 'Best Practices'
+---
+
+## Best Practices
+
+### 1. Keep Children Independent
+
+Each child workflow should be self-contained and receive all the data it needs through its input parameters. Avoid having children fetch their own context from external databases or shared state — this makes them brittle and harder to test in isolation.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+<TabPanel id="rust" label="Rust">
+
+```rust
+// Good - Child receives all necessary data
+#[workflow(name = "process_order", version = "1.0.0")]
+pub async fn process_order(
+    ctx: WorkflowContext,
+    order: OrderData,  // Complete, self-contained input
+) -> Result<OrderResult> {
+    ctx.execute_task(validate_order, order.clone()).await?;
+    ctx.execute_task(charge_payment, order.total).await?;
+    Ok(OrderResult::success(order.id))
+}
+
+// Bad - Child depends on external state
+#[workflow(name = "process_order_bad", version = "1.0.0")]
+pub async fn process_order_bad(
+    ctx: WorkflowContext,
+    order_id: String,  // Must fetch order from external source - brittle!
+) -> Result<OrderResult> {
+    let order = fetch_from_database(&order_id).await?;
+    // ...
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Good - Child receives all necessary data
+@Workflow()
+class ProcessOrder {
+  async execute(ctx: WorkflowContext, order: OrderData): Promise<OrderResult> {
+    await ctx.executeTask(tasks.validateOrder, order);
+    await ctx.executeTask(tasks.chargePayment, order.total);
+    return { orderId: order.id, status: 'success' };
+  }
+}
+
+// Bad - Child depends on external state
+@Workflow()
+class ProcessOrderBad {
+  async execute(ctx: WorkflowContext, orderId: string): Promise<OrderResult> {
+    const order = await fetchFromDatabase(orderId); // Brittle!
+    // ...
+  }
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+# Good - Child receives all necessary data
+@workflow(name="process_order", version="1.0.0")
+async def process_order(ctx: WorkflowContext, order: dict) -> dict:
+    await ctx.execute_task(validate_order, order=order)
+    await ctx.execute_task(charge_payment, total=order["total"])
+    return {"order_id": order["id"], "status": "success"}
+
+# Bad - Child depends on external state
+@workflow(name="process_order_bad", version="1.0.0")
+async def process_order_bad(ctx: WorkflowContext, order_id: str) -> dict:
+    order = await fetch_from_database(order_id)  # Brittle!
+    # ...
+```
+
+</TabPanel>
+</Tabs>
+
+### 2. Limit Hierarchy Depth
+
+Keep hierarchies shallow (2-3 levels maximum) for better observability, easier debugging, and simpler error propagation. Deep nesting makes it hard to trace failures and understand the overall execution flow.
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">How Deep to Nest</div>
+  </div>
+  {[
+    { verdict: 'Good', chain: 'Parent → Child', note: '2 levels — trivial to trace', tone: 'ok' },
+    { verdict: 'Acceptable', chain: 'Parent → Child → Grandchild', note: '3 levels for complex domains', tone: 'ok' },
+    { verdict: 'Avoid', chain: 'Parent → Child → Grandchild → Great-grandchild', note: '4+ levels — failures get hard to follow', tone: 'bad' },
+  ].map((row, i, arr) => (
+    <div key={i}>
+      <div className={`px-4 py-2.5 flex items-center gap-3 ${row.tone === 'bad' ? 'bg-red-500/5' : ''}`}>
+        <span className={`text-[9px] font-mono uppercase tracking-wider w-[4.5rem] shrink-0 ${row.tone === 'bad' ? 'text-red-400' : 'text-foreground-muted'}`}>{row.verdict}</span>
+        <div className="flex-1">
+          <div className="text-xs font-mono text-foreground">{row.chain}</div>
+          <div className="text-[10px] text-foreground-muted mt-0.5">{row.note}</div>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-[5.7rem]">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Each level you add multiplies the places a failure can hide — stay shallow by default.</span>
+  </div>
+</div>
+
+### 3. Handle Child Failures Gracefully
+
+Always catch and handle child workflow errors to prevent parent crashes. Decide explicitly whether to retry, fall back, or continue with partial results.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+<TabPanel id="rust" label="Rust">
+
+```rust
+// Good - Graceful error handling
+match child_handle.result::<PaymentResult>().await {
+    Ok(result) => process_success(result),
+    // Re-throw the suspend signal — never handle it as a child failure.
+    Err(e) if e.is_suspend() => return Err(e.into()),
+    Err(e) => {
+        eprintln!("Child failed: {}", e);
+        handle_fallback().await?
+    }
+}
+
+// Bad - Unhandled errors crash parent
+let result = child_handle.result::<PaymentResult>().await?; // Crashes on error
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Good - Graceful error handling
+try {
+  const result = await childHandle.result<PaymentResult>();
+  processSuccess(result);
+} catch (e) {
+  // Re-throw the suspend signal — never handle it as a child failure.
+  if (isWorkflowSuspension(e)) throw e;
+  console.error('Child failed:', e);
+  await handleFallback();
+}
+
+// Bad - Unhandled errors crash parent
+const result = await childHandle.result<PaymentResult>(); // Crashes on error
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+# Good - Graceful error handling
+try:
+    result = await child_handle.result()
+    process_success(result)
+except Exception as e:
+    print(f"Child failed: {e}")
+    await handle_fallback()
+
+# Bad - Unhandled errors crash parent
+result = await child_handle.result()  # Crashes on error
+```
+
+</TabPanel>
+</Tabs>
+
+### 4. Control Concurrency for Large Fan-Outs
+
+Spawning thousands of children simultaneously can overwhelm the database and workers. Process items in batches with a concurrency limit, waiting for each batch to complete before starting the next.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+<TabPanel id="rust" label="Rust">
+
+```rust
+// Good - Batch processing with concurrency control
+const MAX_CONCURRENT: usize = 50;
+
+for chunk in items.chunks(MAX_CONCURRENT) {
+    let mut handles = Vec::new();
+
+    for item in chunk {
+        handles.push(ctx.start_child_workflow("process", item).await?);
+    }
+
+    // Wait for batch to complete before starting next
+    for handle in handles {
+        handle.result::<ProcessResult>().await?;
+    }
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Good - Batch processing with concurrency control
+const MAX_CONCURRENT = 50;
+
+for (let i = 0; i < items.length; i += MAX_CONCURRENT) {
+  const batch = items.slice(i, i + MAX_CONCURRENT);
+
+  const handles = await Promise.all(
+    batch.map((item) => ctx.startChildWorkflow('process', item)),
+  );
+
+  // Wait for batch to complete before starting next
+  await Promise.allSettled(
+    handles.map((h) => h.result<ProcessResult>()),
+  );
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+# Good - Batch processing with concurrency control
+MAX_CONCURRENT = 50
+
+for i in range(0, len(items), MAX_CONCURRENT):
+    batch = items[i:i + MAX_CONCURRENT]
+
+    handles = []
+    for item in batch:
+        handles.append(await ctx.start_child_workflow("process", args=(item,)))
+
+    # Wait for batch to complete before starting next
+    for handle in handles:
+        await handle.result()
+```
+
+</TabPanel>
+</Tabs>
+
+### 5. Use Events for Dynamic Control
+
+Send events to children to change their behavior at runtime — expedite processing, change priority, or request graceful cancellation — without restarting them.
+
+```rust
+// Good - Dynamic control via events
+// NOTE: sending events to (or canceling) a child from inside a workflow via the
+// child handle is not yet implemented in the Rust SDK — these methods currently
+// return an unimplemented error. Deliver control events to the child from an
+// external client, addressing it by the child's workflow id.
+child_handle.send_event("cancel", true).await?;
+child_handle.send_event("priority_changed", Priority::High).await?;
+
+// Bad - Canceling and restarting is expensive
+child_handle.cancel().await?;
+let new_child = ctx.start_child_workflow("new_child", data).await?;
+```
+
+---
+
+## Performance Considerations
+
+### Child Workflow Overhead
+
+Each child workflow carries its own overhead — a database record, an execution journal, state storage, and an event buffer. For very fast operations (under 1 second), the overhead of creating a child workflow may exceed the operation itself. Use tasks for lightweight operations and reserve child workflows for operations that involve multiple steps, need independent error handling, or take more than a few seconds.
+
+### When to Use Tasks vs Child Workflows
+
+| Criteria | Use a Task | Use a Child Workflow |
+|----------|-----------|---------------------|
+| Duration | < 1 second | > 1 second, multi-step |
+| Error handling | Retry policy is sufficient | Needs saga/compensation |
+| Reusability | Single-purpose operation | Reusable across parents |
+| State | Stateless | Needs its own state/journal |
+| Monitoring | Part of parent's journal | Independent status tracking |
+
+---
+
+## Common Patterns Summary
+
+| Pattern | Use Case | Example |
+|---------|----------|---------|
+| **Sequential Children** | Multi-phase processing | Validate -> Process -> Notify |
+| **Parallel Children** | Batch processing | Process 100 invoices concurrently |
+| **Dynamic Spawning** | Variable workload | Spawn N children based on input |
+| **Event Coordination** | Runtime control | Parent signals child to expedite |
+| **Hierarchical** | Complex orchestration | Order -> Payment -> Notification |
+| **Map-Reduce** | Large dataset processing | Split data, process, aggregate |
+| **Fallback Chain** | Resilience | Primary child fails -> Try fallback |
+
+---
+
+## Real-World Use Cases
+
+### E-commerce Order Fulfillment
+
+<div className="not-prose my-8 max-w-md mx-auto">
+  <div className="border bg-surface-100 p-3">
+    <div className="text-xs font-medium text-foreground">Order Processing</div>
+    <div className="text-[10px] font-mono text-foreground-muted mt-0.5">parent</div>
+  </div>
+  <div className="ml-4 border-l border-border-strong pl-4 mt-2 space-y-2">
+    <div className="border bg-surface-75 p-2.5"><div className="text-xs text-foreground">Payment Authorization</div></div>
+    <div className="border bg-surface-75 p-2.5"><div className="text-xs text-foreground">Inventory Reservation</div></div>
+    <div className="border bg-surface-75 p-2.5">
+      <div className="text-xs text-foreground">Shipping Coordination</div>
+      <div className="ml-4 border-l border-border-strong pl-4 mt-2 space-y-2">
+        <div className="border bg-background p-2"><div className="text-[11px] text-foreground-muted">Label Generation</div></div>
+        <div className="border bg-background p-2"><div className="text-[11px] text-foreground-muted">Carrier Selection</div></div>
+      </div>
+    </div>
+    <div className="border bg-surface-75 p-2.5"><div className="text-xs text-foreground">Customer Notification</div></div>
+  </div>
+  <p className="text-xs text-foreground-muted mt-3">Surface tint marks nesting depth: parent → child → grandchild. Each child is an independent workflow with its own journal.</p>
+</div>
+
+### Multi-Region Deployment
+
+<div className="not-prose my-8 max-w-md mx-auto">
+  <div className="border bg-surface-100 p-3">
+    <div className="text-xs font-medium text-foreground">Global Deployment</div>
+    <div className="text-[10px] font-mono text-foreground-muted mt-0.5">parent</div>
+  </div>
+  <div className="ml-4 border-l border-border-strong pl-4 mt-2 space-y-2">
+    <div className="border bg-surface-75 p-2.5"><div className="text-xs text-foreground">Deploy US-East</div></div>
+    <div className="border bg-surface-75 p-2.5"><div className="text-xs text-foreground">Deploy US-West</div></div>
+    <div className="border bg-surface-75 p-2.5"><div className="text-xs text-foreground">Deploy EU-Central</div></div>
+    <div className="border bg-surface-75 p-2.5"><div className="text-xs text-foreground">Deploy Asia-Pacific</div></div>
+  </div>
+  <p className="text-xs text-foreground-muted mt-3">Four regional children run in parallel; the parent completes when all succeed.</p>
+</div>
+
+### Content Moderation Pipeline
+
+<div className="not-prose my-8 max-w-md mx-auto">
+  <div className="border bg-surface-100 p-3">
+    <div className="text-xs font-medium text-foreground">Content Moderation</div>
+    <div className="text-[10px] font-mono text-foreground-muted mt-0.5">parent</div>
+  </div>
+  <div className="ml-4 border-l border-border-strong pl-4 mt-2 space-y-2">
+    <div className="border bg-surface-75 p-2.5">
+      <div className="text-xs text-foreground">Image Analysis</div>
+      <div className="ml-4 border-l border-border-strong pl-4 mt-2 space-y-2">
+        <div className="border bg-background p-2"><div className="text-[11px] text-foreground-muted">NSFW Detection</div></div>
+        <div className="border bg-background p-2"><div className="text-[11px] text-foreground-muted">Text Extraction</div></div>
+      </div>
+    </div>
+    <div className="border bg-surface-75 p-2.5"><div className="text-xs text-foreground">Text Analysis</div></div>
+    <div className="border border-dashed bg-surface-75 p-2.5">
+      <div className="text-xs text-foreground">Human Review</div>
+      <div className="text-[10px] font-mono text-foreground-muted mt-0.5">conditional</div>
+    </div>
+  </div>
+  <p className="text-xs text-foreground-muted mt-3">Surface tint marks nesting depth; the dashed child runs only when earlier steps flag content.</p>
+</div>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/patterns/parent-child" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Overview</h3>
+      <p className="text-sm text-foreground-light">
+        Return to the parent-child orchestration overview
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/workflows" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Workflows</h3>
+      <p className="text-sm text-foreground-light">
+        Learn the basics of workflows, execution model, and determinism
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/events" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Events</h3>
+      <p className="text-sm text-foreground-light">
+        Deep dive into events, signals, and inter-workflow communication
+      </p>
+    </div>
+  </Link>
+</div>

@@ -1,0 +1,194 @@
+---
+id: 'debugging-scenarios'
+title: 'Scenarios & Management'
+description: 'Manage running workflows, troubleshoot common debugging scenarios, and reference CLI commands'
+sidebar_label: 'Scenarios & Management'
+---
+
+## Managing Running Workflows
+
+### Cancel a Workflow
+
+Gracefully cancel a running workflow:
+
+```bash
+orcher workflow cancel <execution-id>
+```
+
+### Terminate a Workflow
+
+Immediately terminate a workflow:
+
+```bash
+orcher workflow terminate <execution-id>
+```
+
+### Send an Event
+
+Send an event to a running workflow (for signal-based coordination):
+
+```bash
+orcher workflow event <execution-id> --name "approval_received" --data '{"approved": true}'
+```
+
+---
+
+## Common Debugging Scenarios
+
+### Task Failing Intermittently
+
+**Symptoms:** A task succeeds sometimes but fails with timeouts or connection errors.
+
+```bash
+# View recent task failures
+orcher logs workflow/my-workflow --tasks
+orcher logs workflow/my-workflow --level error --grep "timeout"
+```
+
+**Common causes:**
+- External service instability — add retries with exponential backoff via the `retry` task attribute
+- Network timeouts — increase task timeout or use task heartbeats for long-running operations
+- Resource contention — check database connection pool utilization via metrics
+
+### Workflow Stuck / Not Progressing
+
+**Symptoms:** Workflow stays in `running` status but doesn't complete.
+
+```bash
+# Check the journal to see where it stopped
+orcher logs workflow/my-workflow --journal
+
+# Check task execution status
+orcher logs workflow/my-workflow --tasks
+
+# Check queue depth (tasks might not be claimed)
+orcher queue depth
+orcher queue pollers <queue-name>
+```
+
+**Common causes:**
+- **No workers polling the queue** — Check `orcher queue pollers <queue>` for connected workers
+- **Task stuck in `started` state** — Worker may have crashed. The reclaimer will reset stuck tasks after the claim timeout expires.
+- **Waiting for an event** — The workflow called `wait_for_event()` and the event hasn't arrived yet. Use `orcher workflow event` to send it.
+- **Wrong namespace** — Worker and workflow are in different namespaces
+
+### Workflow Failed
+
+**Symptoms:** Workflow completed with `failed` status.
+
+```bash
+# Get execution details
+orcher workflow get <execution-id>
+
+# View error logs
+orcher logs workflow/my-workflow --level error
+
+# View the journal to see which step failed
+orcher logs workflow/my-workflow --journal
+```
+
+**Common causes:**
+- Task exceeded max retries — check the dead letter queue via `orcher_dlq_current_depth` metric
+- Unhandled error in workflow code — check the error message in execution details
+- Timeout — workflow or task exceeded its configured timeout
+
+### Slow Workflow Execution
+
+**Symptoms:** Workflow takes longer than expected.
+
+```bash
+# View task durations
+orcher logs workflow/my-workflow --tasks
+```
+
+Look at which task takes the most time. Common fixes:
+
+- **Sequential tasks that could be parallel** — Use fan-out/fan-in pattern
+- **Slow external API calls** — Consider caching or async patterns
+- **Queue latency** — Check queue depth and worker count. Enable Redis so workers are woken when work is queued.
+- **No eager dispatch** — Sequential workflows benefit from eager task return (enabled by default)
+
+---
+
+## Diagnostic Logging in Code
+
+Add strategic `tracing` calls to aid debugging:
+
+```rust
+#[workflow]
+async fn order_processing(ctx: Ctx, order: Order) -> Result<Receipt> {
+    tracing::info!(
+        order_id = %order.id,
+        items = order.items.len(),
+        "Starting order processing"
+    );
+
+    let validation = ctx.execute_task(validate_order, order.clone()).await?;
+
+    tracing::info!(
+        valid = validation.is_valid,
+        checks = validation.checks_passed,
+        "Validation completed"
+    );
+
+    if !validation.is_valid {
+        tracing::warn!(
+            reason = %validation.rejection_reason,
+            "Order rejected"
+        );
+        return Err(anyhow!("Order validation failed"));
+    }
+
+    let payment = ctx.execute_task(charge_payment, order.amount).await?;
+
+    tracing::info!(
+        transaction_id = %payment.id,
+        "Payment processed"
+    );
+
+    ctx.execute_task(send_confirmation, payment.id).await
+}
+```
+
+Use structured fields (not string interpolation) so logs are machine-parseable in JSON format. See [Logging](/guides/observability/logging) for format configuration.
+
+---
+
+## CLI Commands Summary
+
+```bash
+# Inspect
+orcher describe <resource-type> <name>
+orcher workflow list [--status <status>] [--workflow <name>]
+orcher workflow get <execution-id>
+orcher workflow history <execution-id>
+
+# Logs
+orcher logs <resource> [--follow] [--level <level>] [--grep <pattern>]
+orcher logs <resource> --journal          # Event-sourced journal
+orcher logs <resource> --tasks            # Task execution details
+orcher logs <resource> --tail <n>         # Last N entries
+orcher logs <resource> --since <time>     # Time filter
+
+# Manage
+orcher workflow cancel <execution-id>
+orcher workflow terminate <execution-id>
+orcher workflow event <execution-id> --name <event> --data <json>
+
+# Queue inspection
+orcher queue depth
+orcher queue stats <queue-name>
+orcher queue pollers <queue-name>
+```
+
+---
+
+## Next Steps
+
+- [Debugging Overview](/guides/observability/debugging) — Inspecting executions with describe, list, and get commands
+- [Viewing Logs](/guides/observability/debugging/logs) — Text logs, journal entries, task execution details, and workflow history
+- [Understanding Replay](/guides/observability/debugging/replay) — How deterministic replay works and how to debug it
+- [Logging](/guides/observability/logging) — Configure structured logging formats
+- [Metrics](/guides/observability/metrics) — Monitor performance with Prometheus
+- [Tracing](/guides/observability/tracing) — Distributed tracing with OpenTelemetry
+- [Queues](/guides/operations/queue) — Queue monitoring and troubleshooting

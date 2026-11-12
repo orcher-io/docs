@@ -1,0 +1,362 @@
+---
+id: 'distributed-event-gates'
+title: 'Event Gates for Human Approvals'
+sidebar_label: 'Event Gates'
+---
+
+Many distributed workflows need to pause and wait for external input — a manager approving an expense, a webhook confirming a payment, or a compliance officer clearing a transaction. Event gates let the workflow suspend without consuming resources, preserving full state in PostgreSQL until the event arrives. You can attach timeouts that automatically escalate or reject when nobody responds.
+
+## How it works
+
+The example chains two gates into an escalation ladder. The manager's timeout isn't a failure — it's a routing decision that notifies the director and opens a second, longer gate. On the slowest path the workflow lives for ten days; an approval at either gate exits early.
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">The Escalation Ladder</div>
+  </div>
+  {[
+    { label: 'submit_for_review', detail: 'Manager notified with the report', icon: '✓', state: 'done' },
+    { label: 'gate: manager_approval', detail: 'Suspended — up to 3 days', icon: '⏸', state: 'suspend' },
+    { label: 'timeout', detail: 'No decision in 3 days — this is routing, not failure', icon: '⏱', state: 'crash' },
+    { label: 'escalate_to_director', detail: 'Director notified', icon: '✓', state: 'done' },
+    { label: 'gate: director_approval', detail: 'Suspended — up to 7 more days', icon: '⏸', state: 'suspend' },
+    { label: 'decision', detail: 'Approved → reimburse · rejected → notify employee', icon: '=', state: 'resume' },
+  ].map((row, i, arr) => (
+    <div key={i}>
+      <div className={`px-4 py-2 flex items-center gap-3 ${row.state === 'crash' ? 'bg-red-500/5' : ''} ${row.state === 'suspend' || row.state === 'resume' ? 'bg-surface-75' : ''}`}>
+        <span className={`w-5 h-5 flex items-center justify-center text-[10px] shrink-0 ${row.state === 'crash' ? 'text-red-400' : 'text-foreground-muted'}`}>{row.icon}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{row.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{row.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Ten days on the slowest path, zero resources the whole time — approval at either gate exits early.</span>
+  </div>
+</div>
+
+For the anatomy of a single gate — the event/timeout race and its three outcomes — see [fraud detection's review gate](/guides/use-cases/financial-workflows/fraud-detection#the-review-gate). This page adds what happens when you chain them.
+
+## Example: expense approval with escalation
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="typescript"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use std::time::Duration;
+
+#[task]
+async fn submit_for_review(report: ExpenseReport) -> Result<()> {
+    email_client::notify_manager(&report.manager_id, &report.id).await
+}
+
+#[task]
+async fn reimburse_employee(input: ReimbursementInput) -> Result<String> {
+    payroll_client::reimburse(input).await
+}
+
+#[task]
+async fn notify_rejection(input: RejectionNotice) -> Result<()> {
+    email_client::send_rejection(input).await
+}
+
+#[task]
+async fn escalate_to_director(report_id: String) -> Result<()> {
+    email_client::escalate(&report_id).await
+}
+
+#[workflow(name = "expense_approval", version = "1.0.0")]
+async fn expense_approval(
+    ctx: WorkflowContext,
+    report: ExpenseReport,
+) -> Result<ApprovalResult> {
+    // Submit for manager review
+    ctx.execute_task(submit_for_review, report.clone()).await?;
+
+    // Wait up to 3 days for manager approval
+    let approval = ctx.wait_for_event_with_timeout::<ApprovalEvent>(
+        "manager_approval",
+        Duration::from_secs(3 * 24 * 3600),
+    ).await;
+
+    match approval {
+        Ok(event) if event.approved => {
+            // Approved — reimburse
+            let txn_id = ctx.execute_task(reimburse_employee, ReimbursementInput {
+                employee_id: report.employee_id,
+                amount: report.amount,
+            }).await?;
+            Ok(ApprovalResult::approved(txn_id))
+        }
+        Ok(event) => {
+            // Rejected — notify employee
+            ctx.execute_task(notify_rejection, RejectionNotice {
+                employee_id: report.employee_id,
+                reason: event.comments.unwrap_or_default(),
+            }).await?;
+            Ok(ApprovalResult::rejected(event.comments))
+        }
+        Err(_) => {
+            // Timeout — escalate to director
+            ctx.execute_task(escalate_to_director, report.id.clone()).await?;
+
+            let escalated = ctx.wait_for_event_with_timeout::<ApprovalEvent>(
+                "director_approval",
+                Duration::from_secs(7 * 24 * 3600),
+            ).await?;
+
+            if escalated.approved {
+                let txn_id = ctx.execute_task(reimburse_employee, ReimbursementInput {
+                    employee_id: report.employee_id,
+                    amount: report.amount,
+                }).await?;
+                Ok(ApprovalResult::approved(txn_id))
+            } else {
+                Ok(ApprovalResult::rejected(escalated.comments))
+            }
+        }
+    }
+}
+```
+
+**Send the approval event via the CLI or gRPC:**
+
+```bash
+orcher workflow event <execution-id> \
+  --name manager_approval \
+  --payload '{"approved": true, "approver": "alice@company.com"}'
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import {
+  Workflow,
+  Tasks,
+  Task,
+  WorkflowContext,
+  createTaskRefs,
+} from '@orcher/sdk';
+
+@Tasks()
+class ApprovalTasks {
+  @Task()
+  async submitForReview(report: ExpenseReport): Promise<void> {
+    await emailClient.notifyManager(report.managerId, report.id);
+  }
+
+  @Task()
+  async reimburseEmployee(input: ReimbursementInput): Promise<string> {
+    return await payrollClient.reimburse(input);
+  }
+
+  @Task()
+  async notifyRejection(input: RejectionNotice): Promise<void> {
+    await emailClient.sendRejection(input);
+  }
+
+  @Task()
+  async escalateToDirector(reportId: string): Promise<void> {
+    await emailClient.escalate(reportId);
+  }
+}
+
+const tasks = createTaskRefs(ApprovalTasks);
+
+@Workflow({ name: 'expense_approval', version: '1.0.0' })
+class ExpenseApproval {
+  async run(
+    ctx: WorkflowContext,
+    report: ExpenseReport,
+  ): Promise<ApprovalResult> {
+    // Submit for manager review
+    await ctx.executeTask(tasks.submitForReview, report);
+
+    // Wait up to 3 days for manager approval
+    try {
+      const event = await ctx.waitForEventWithTimeout<ApprovalEvent>(
+        'manager_approval',
+        3 * 24 * 3600 * 1000, // 3 days in ms
+      );
+
+      if (event.approved) {
+        const txnId = await ctx.executeTask(tasks.reimburseEmployee, {
+          employeeId: report.employeeId,
+          amount: report.amount,
+        });
+        return ApprovalResult.approved(txnId);
+      } else {
+        await ctx.executeTask(tasks.notifyRejection, {
+          employeeId: report.employeeId,
+          reason: event.comments ?? '',
+        });
+        return ApprovalResult.rejected(event.comments);
+      }
+    } catch {
+      // Timeout — escalate to director
+      await ctx.executeTask(tasks.escalateToDirector, report.id);
+
+      const escalated = await ctx.waitForEventWithTimeout<ApprovalEvent>(
+        'director_approval',
+        7 * 24 * 3600 * 1000, // 7 days in ms
+      );
+
+      if (escalated.approved) {
+        const txnId = await ctx.executeTask(tasks.reimburseEmployee, {
+          employeeId: report.employeeId,
+          amount: report.amount,
+        });
+        return ApprovalResult.approved(txnId);
+      } else {
+        return ApprovalResult.rejected(escalated.comments);
+      }
+    }
+  }
+}
+```
+
+**Send the approval event via the CLI or gRPC:**
+
+```bash
+orcher workflow event <execution-id> \
+  --name manager_approval \
+  --payload '{"approved": true, "approver": "alice@company.com"}'
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext
+
+@task
+async def submit_for_review(report: ExpenseReport) -> None:
+    await email_client.notify_manager(report.manager_id, report.id)
+
+@task
+async def reimburse_employee(input: ReimbursementInput) -> str:
+    return await payroll_client.reimburse(input)
+
+@task
+async def notify_rejection(input: RejectionNotice) -> None:
+    await email_client.send_rejection(input)
+
+@task
+async def escalate_to_director(report_id: str) -> None:
+    await email_client.escalate(report_id)
+
+@workflow(name="expense_approval", version="1.0.0")
+async def expense_approval(
+    ctx: WorkflowContext, report: ExpenseReport
+) -> ApprovalResult:
+    # Submit for manager review
+    await ctx.execute_task(submit_for_review, report)
+
+    # Wait up to 3 days for manager approval
+    try:
+        event = await ctx.wait_for_event_with_timeout(
+            "manager_approval", timeout_ms=3 * 24 * 3600 * 1000,
+        )
+
+        if event["approved"]:
+            txn_id = await ctx.execute_task(reimburse_employee, ReimbursementInput(
+                employee_id=report.employee_id, amount=report.amount,
+            ))
+            return ApprovalResult.approved(txn_id)
+        else:
+            await ctx.execute_task(notify_rejection, RejectionNotice(
+                employee_id=report.employee_id,
+                reason=event.get("comments", ""),
+            ))
+            return ApprovalResult.rejected(event.get("comments"))
+
+    except TimeoutError:
+        # Timeout — escalate to director
+        await ctx.execute_task(escalate_to_director, report.id)
+
+        escalated = await ctx.wait_for_event_with_timeout(
+            "director_approval", timeout_ms=7 * 24 * 3600 * 1000,
+        )
+
+        if escalated["approved"]:
+            txn_id = await ctx.execute_task(reimburse_employee, ReimbursementInput(
+                employee_id=report.employee_id, amount=report.amount,
+            ))
+            return ApprovalResult.approved(txn_id)
+        else:
+            return ApprovalResult.rejected(escalated.get("comments"))
+```
+
+**Send the approval event via the CLI or gRPC:**
+
+```bash
+orcher workflow event <execution-id> \
+  --name manager_approval \
+  --payload '{"approved": true, "approver": "alice@company.com"}'
+```
+
+</TabPanel>
+
+</Tabs>
+
+While the workflow is waiting, it consumes zero compute resources — no polling, no threads, no connections. The full workflow state lives in PostgreSQL. When the event arrives (via `send_event` gRPC call, CLI, or the Admin UI), Orcher wakes the workflow and resumes from exactly where it paused.
+
+## What should a timeout mean?
+
+The same primitive supports opposite policies — the right one depends on what silence costs in your domain:
+
+<div className="not-prose my-8 max-w-lg mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Timeout as Failure vs. Timeout as Routing</div>
+  </div>
+  <div className="grid grid-cols-2 gap-px bg-border-default">
+    <div className="bg-background px-4 py-3">
+      <div className="text-[10px] font-mono uppercase tracking-widest text-foreground-muted mb-2">Fail safe</div>
+      <div className="text-xs font-medium text-foreground mb-1">Silence means no</div>
+      <p className="m-0 text-[10px] text-foreground-muted leading-relaxed">When acting without an answer is dangerous — payments, compliance holds. A fraud review that expires auto-rejects; nothing moves.</p>
+    </div>
+    <div className="bg-background px-4 py-3">
+      <div className="text-[10px] font-mono uppercase tracking-widest text-foreground-muted mb-2">Escalate</div>
+      <div className="text-xs font-medium text-foreground mb-1">Silence means ask louder</div>
+      <p className="m-0 text-[10px] text-foreground-muted leading-relaxed">When the request is legitimate and only attention is missing — approvals, reviews. This page's expense report climbs to the director.</p>
+    </div>
+  </div>
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Either way, decide explicitly — a chain must end in a terminal default.</span>
+  </div>
+</div>
+
+## Design notes
+
+- **End the ladder deliberately.** In this example the director's gate has no timeout handler — a second timeout fails the workflow. That's a valid terminal default (it surfaces as an error for ops), but choose it consciously; the alternative is a final auto-reject with a notification, as in [fraud detection](/guides/use-cases/financial-workflows/fraud-detection#the-review-gate).
+- **Events are addressed to one execution.** The CLI call targets `<execution-id>`, so two pending expense reports can both wait on `manager_approval` without crossing wires. Your approval UI needs to store that execution ID when the review case is created — pass it in `submit_for_review`.
+- **The payload is part of the audit trail.** `approver`, `comments`, and the decision all arrive in the event and are journaled with it — who approved what, and when, comes free. Put the fields you'll want in six months into the payload now.
+- **Deploys don't disturb the wait.** The gate and its timeout live in the server, not the worker process — the same mechanics as [durable timers](/guides/use-cases/data-processing/scheduled-sync#surviving-a-deploy-mid-sleep). A three-day wait survives any number of releases.
+
+---
+
+## Next Steps
+
+- [Child Workflows for Service Composition](/guides/use-cases/distributed-systems/child-workflows) — Compose services into reusable workflow units.
+- [Saga Pattern with Automatic Rollback](/guides/use-cases/distributed-systems/saga-pattern) — Handle multi-service transaction failures with compensating actions.
+- [Multi-Service Deployment](/guides/use-cases/distributed-systems/multi-service-deployment) — Fan-out across regions with parallel execution.
+- [Best Practices & Performance](/guides/use-cases/distributed-systems/best-practices) — Guidelines and benchmarks for distributed workflows.

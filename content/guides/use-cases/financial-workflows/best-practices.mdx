@@ -1,0 +1,73 @@
+---
+id: 'financial-best-practices'
+title: 'Best Practices & Compliance'
+description: 'Idempotency keys, retry policies, compliance audit trails, and performance guidance for financial workflows.'
+sidebar_label: 'Best Practices'
+---
+
+Everything on this page assumes the patterns from this section — [payment processing](/guides/use-cases/financial-workflows/payment-processing), [subscription billing](/guides/use-cases/financial-workflows/subscription-billing), [fraud detection](/guides/use-cases/financial-workflows/fraud-detection), and [refund processing](/guides/use-cases/financial-workflows/refund-processing). Each practice below links back to the pattern that demonstrates it.
+
+## Design Principles
+
+### Always Use Idempotency Keys
+
+Payment gateways like Stripe support idempotency keys to prevent double charges. Pass a deterministic key (e.g., `order_{order_id}`) with every charge request. If Orcher replays a task after a crash, the gateway returns the original result instead of creating a duplicate charge. This is your most important safety net — [two layers of idempotency](/guides/use-cases/financial-workflows/payment-processing#two-layers-of-idempotency) shows exactly why the journal alone can't cover a crash inside the charge task.
+
+### Distinguish Retryable vs Permanent Failures
+
+Not all payment failures should be retried. A network timeout is retryable; an "invalid card number" is permanent. Configure your task retry policies to only retry on transient errors, and fail immediately on permanent ones. This prevents wasting gateway API calls and annoying customers with repeated decline notifications. The same boundary drawn over days is the [dunning schedule](/guides/use-cases/financial-workflows/subscription-billing#two-layers-of-retries) — task retries below the match, business policy above it.
+
+### Make Confirmation Steps Best-Effort
+
+Sending a receipt email or updating an analytics dashboard should never cause a payment to fail. Wrap non-critical post-payment steps in try/catch and let the workflow succeed even if they fail. You can always retry these steps separately or handle them in a follow-up workflow. See the [per-step failure policies](/guides/use-cases/financial-workflows/payment-processing#how-it-works) in the payment saga.
+
+### Model Refunds as Separate Workflows
+
+Don't add refund logic to your payment workflow. Instead, create a dedicated refund workflow that can be triggered independently, has its own retry logic and audit trail, and can handle partial refunds. This separation makes both workflows simpler and easier to debug. [Refund processing](/guides/use-cases/financial-workflows/refund-processing) walks through the split — and when a compensation inside the payment saga is the right tool instead.
+
+### Record Fraud Decisions as Tasks
+
+Every fraud decision — auto-approve, auto-reject, or human review — should be recorded as a task with the decision reason, timestamp, and reviewer identity. Orcher's journal records each task's input and result, so every decision and its reason is kept with the run that made it, without separate logging code. [Fraud detection](/guides/use-cases/financial-workflows/fraud-detection) records all five outcomes through a single task.
+
+---
+
+## The Journal as a Record of Each Run
+
+Orcher journals every payment workflow as it runs: each task's input, output, timestamps and status changes are recorded in PostgreSQL, with no logging code of your own. That record can feed an audit trail; whether it meets a framework's requirements, such as PCI DSS or SOX, depends on how you retain and protect the database, and is for your auditors to decide.
+
+```
+Workflow: process_payment (execution: pay_3f8a2b1c)
+  [2026-03-17 10:00:00.123] TaskCompleted  validate_payment       → OK
+  [2026-03-17 10:00:00.456] TaskCompleted  charge_payment_gateway  → charge_id: ch_abc123
+  [2026-03-17 10:00:01.012] TaskCompleted  reserve_inventory       → OK
+  [2026-03-17 10:00:01.234] TaskCompleted  send_confirmation       → OK
+  [2026-03-17 10:00:01.235] WorkflowCompleted                      → status: completed
+```
+
+Every step is automatically logged with timestamps, inputs, outputs, and execution context. You can query this history via the Admin UI, CLI (`orcher workflow history <id>`), or the gRPC API.
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/patterns/saga" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Saga Pattern</h3>
+      <p className="text-sm text-foreground-light">
+        Deep dive into compensation patterns for distributed transactions.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/error-handling" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Error Handling</h3>
+      <p className="text-sm text-foreground-light">
+        Retry policies, circuit breakers, and graceful degradation strategies.
+      </p>
+    </div>
+  </Link>
+</div>
+
+- Back to [Payment Workflows overview](/guides/use-cases/financial-workflows)

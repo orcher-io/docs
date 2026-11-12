@@ -1,0 +1,11 @@
+# Shown in content/guides/sdk/rust/client.mdx.
+[package]
+name = "sample-sdk-client"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+orcher-sdk.workspace = true
+serde.workspace = true
+serde_json.workspace = true

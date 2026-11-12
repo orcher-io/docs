@@ -1,0 +1,946 @@
+---
+id: 'state-patterns'
+title: 'State Patterns'
+description: 'Common state patterns for progress tracking, status machines, querying workflow state, and choosing between state and variables.'
+sidebar_label: 'Patterns'
+---
+
+## Common State Patterns
+
+These patterns demonstrate how to use workflow state for real-world scenarios. Each example shows how state enables progress tracking, status transitions, and result accumulation across long-running workflows.
+
+### Progress Tracking
+
+Track how far a batch workflow has progressed. External systems can query the progress state to display completion percentage in a dashboard or UI.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[task]
+pub async fn process_item(_ctx: TaskContext, item: Item) -> Result<ProcessedItem> {
+    // ...
+}
+
+#[workflow]
+pub async fn batch_processor(
+    ctx: WorkflowContext,
+    items: Vec<Item>,
+) -> Result<BatchResult> {
+    // Initialize progress state
+    ctx.set_state("total_items", &items.len())?;
+    ctx.set_state("processed_items", &0usize)?;
+    ctx.set_state("failed_items", &0usize)?;
+    ctx.set_state("status", &"running")?;
+
+    let mut results = Vec::new();
+
+    for (index, item) in items.iter().enumerate() {
+        // Update progress
+        ctx.set_state("current_item", &index)?;
+        ctx.set_state("processed_items", &(index + 1))?;
+
+        // Process item
+        match ctx.execute_task(process_item, item.clone()).await {
+            Ok(result) => {
+                results.push(result);
+            }
+            Err(_e) => {
+                let failed: usize = ctx.get_state("failed_items")?.unwrap_or(0);
+                ctx.set_state("failed_items", &(failed + 1))?;
+            }
+        }
+
+        // Calculate percentage
+        let percentage = ((index + 1) as f64 / items.len() as f64) * 100.0;
+        ctx.set_state("progress_percentage", &percentage)?;
+    }
+
+    ctx.set_state("status", &"completed")?;
+
+    Ok(BatchResult {
+        total: items.len(),
+        processed: results.len(),
+        failed: items.len() - results.len(),
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, WorkflowContext, TaskContext, createTaskRefs } from '@orcher/sdk';
+
+@Tasks({ taskQueue: 'processing' })
+class ProcessingTasks {
+  @Task()
+  async processItem(ctx: TaskContext, item: Item): Promise<ProcessedItem> { /* ... */ }
+}
+
+const tasks = createTaskRefs(ProcessingTasks);
+
+@Workflow()
+class BatchProcessor {
+  async run(ctx: WorkflowContext, items: Item[]): Promise<BatchResult> {
+    // Initialize progress state
+    ctx.setState('totalItems', items.length);
+    ctx.setState('processedItems', 0);
+    ctx.setState('failedItems', 0);
+    ctx.setState('status', 'running');
+
+    const results: ProcessedItem[] = [];
+
+    for (let index = 0; index < items.length; index++) {
+      // Update progress
+      ctx.setState('currentItem', index);
+      ctx.setState('processedItems', index + 1);
+
+      // Process item
+      try {
+        const result = await ctx.executeTask(tasks.processItem, items[index]);
+        results.push(result);
+      } catch (error) {
+        const failed = ctx.getState<number>('failedItems') || 0;
+        ctx.setState('failedItems', failed + 1);
+      }
+
+      // Calculate percentage
+      const percentage = ((index + 1) / items.length) * 100;
+      ctx.setState('progressPercentage', percentage);
+    }
+
+    ctx.setState('status', 'completed');
+
+    return {
+      total: items.length,
+      processed: results.length,
+      failed: items.length - results.length,
+    };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from dataclasses import dataclass
+from orcher import workflow, task, WorkflowContext, TaskContext
+
+
+@dataclass
+class BatchResult:
+    total: int
+    processed: int
+    failed: int
+
+
+@task(name="process_item")
+async def process_item(ctx: TaskContext, item: dict) -> dict:
+    ...
+
+
+@workflow(name="batch_processor")
+async def batch_processor(ctx: WorkflowContext, items: list) -> BatchResult:
+    # Initialize progress state
+    ctx.set_state("total_items", len(items))
+    ctx.set_state("processed_items", 0)
+    ctx.set_state("failed_items", 0)
+    ctx.set_state("status", "running")
+
+    results = []
+
+    for index, item in enumerate(items):
+        # Update progress
+        ctx.set_state("current_item", index)
+        ctx.set_state("processed_items", index + 1)
+
+        # Process item
+        try:
+            result = await ctx.execute_task(process_item, item=item)
+            results.append(result)
+        except Exception:
+            failed = ctx.get_state("failed_items") or 0
+            ctx.set_state("failed_items", failed + 1)
+
+        # Calculate percentage
+        percentage = ((index + 1) / len(items)) * 100
+        ctx.set_state("progress_percentage", percentage)
+
+    ctx.set_state("status", "completed")
+
+    return BatchResult(
+        total=len(items),
+        processed=len(results),
+        failed=len(items) - len(results),
+    )
+```
+
+</TabPanel>
+
+</Tabs>
+
+### Status Machine
+
+Model workflow execution as a state machine with well-defined transitions. Each phase of the workflow updates the status, making it easy to track where the workflow is at any point — and to resume from the correct phase after a crash.
+
+<div className="not-prose my-8 max-w-md mx-auto">
+  <div className="flex flex-col items-center">
+    {[
+      { state: 'validating', task: 'Validate input' },
+      { state: 'processing', task: 'Process payment' },
+      { state: 'shipping', task: 'Arrange shipment' },
+      { state: 'notifying', task: 'Send confirmation' },
+      { state: 'completed', task: null },
+    ].map((s, i, arr) => (
+      <div key={i} className="flex flex-col items-center w-full">
+        <div className="w-full flex items-center gap-3 border bg-background px-4 py-2">
+          <div className="border bg-surface-75 px-2 py-0.5">
+            <span className="text-[9px] font-mono text-foreground-muted">{s.state}</span>
+          </div>
+          {s.task ? (
+            <code className="text-[11px] text-foreground">{s.task}</code>
+          ) : (
+            <span className="text-[11px] text-foreground-muted italic">done</span>
+          )}
+        </div>
+        {i < arr.length - 1 && (
+          <div className="flex items-center gap-1.5">
+            <div className="w-px h-2 bg-border-strong" />
+          </div>
+        )}
+      </div>
+    ))}
+  </div>
+  <div className="mt-3 flex items-center gap-2 justify-center">
+    <div className="border border-red-400/30 bg-red-500/5 px-3 py-1">
+      <span className="text-[9px] font-mono text-red-400">failed</span>
+    </div>
+    <span className="text-[10px] text-foreground-muted">← any state can transition here</span>
+  </div>
+</div>
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[derive(Serialize, Deserialize, Clone)]
+enum OrderStatus {
+    Created,
+    PaymentProcessing,
+    PaymentCompleted,
+    Fulfilling,
+    Shipped,
+    Delivered,
+    Failed,
+}
+
+#[task]
+pub async fn process_payment(_ctx: TaskContext, order_id: String) -> Result<Payment> { /* ... */ }
+
+#[task]
+pub async fn fulfill_order(_ctx: TaskContext, order_id: String) -> Result<Fulfillment> { /* ... */ }
+
+#[task]
+pub async fn ship_order(_ctx: TaskContext, fulfillment_id: String) -> Result<Tracking> { /* ... */ }
+
+#[workflow]
+pub async fn order_fulfillment(
+    ctx: WorkflowContext,
+    order_id: String,
+) -> Result<OrderResult> {
+    // Initialize status
+    ctx.set_state("status", &OrderStatus::Created)?;
+    ctx.set_state("order_id", &order_id)?;
+
+    // Payment phase
+    ctx.set_state("status", &OrderStatus::PaymentProcessing)?;
+    let payment = ctx.execute_task(process_payment, order_id.clone()).await?;
+    ctx.set_state("status", &OrderStatus::PaymentCompleted)?;
+    ctx.set_state("payment_id", &payment.payment_id)?;
+
+    // Fulfillment phase
+    ctx.set_state("status", &OrderStatus::Fulfilling)?;
+    let fulfillment = ctx.execute_task(fulfill_order, order_id.clone()).await?;
+    ctx.set_state("fulfillment_id", &fulfillment.fulfillment_id)?;
+
+    // Shipping phase
+    ctx.set_state("status", &OrderStatus::Shipped)?;
+    let tracking = ctx.execute_task(ship_order, fulfillment.fulfillment_id).await?;
+    ctx.set_state("tracking_number", &tracking.tracking_number)?;
+
+    // Delivery
+    ctx.set_state("status", &OrderStatus::Delivered)?;
+
+    Ok(OrderResult {
+        order_id,
+        status: "delivered".to_string(),
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, WorkflowContext, TaskContext, createTaskRefs } from '@orcher/sdk';
+
+enum OrderStatus {
+  Created = 'created',
+  PaymentProcessing = 'payment_processing',
+  PaymentCompleted = 'payment_completed',
+  Fulfilling = 'fulfilling',
+  Shipped = 'shipped',
+  Delivered = 'delivered',
+  Failed = 'failed',
+}
+
+@Tasks({ taskQueue: 'orders' })
+class FulfillmentTasks {
+  @Task()
+  async processPayment(ctx: TaskContext, orderId: string): Promise<Payment> { /* ... */ }
+
+  @Task()
+  async fulfillOrder(ctx: TaskContext, orderId: string): Promise<Fulfillment> { /* ... */ }
+
+  @Task()
+  async shipOrder(ctx: TaskContext, fulfillmentId: string): Promise<Tracking> { /* ... */ }
+}
+
+const tasks = createTaskRefs(FulfillmentTasks);
+
+@Workflow()
+class OrderFulfillment {
+  async run(ctx: WorkflowContext, orderId: string): Promise<OrderResult> {
+    // Initialize status
+    ctx.setState('status', OrderStatus.Created);
+    ctx.setState('orderId', orderId);
+
+    // Payment phase
+    ctx.setState('status', OrderStatus.PaymentProcessing);
+    const payment = await ctx.executeTask(tasks.processPayment, orderId);
+    ctx.setState('status', OrderStatus.PaymentCompleted);
+    ctx.setState('paymentId', payment.paymentId);
+
+    // Fulfillment phase
+    ctx.setState('status', OrderStatus.Fulfilling);
+    const fulfillment = await ctx.executeTask(tasks.fulfillOrder, orderId);
+    ctx.setState('fulfillmentId', fulfillment.fulfillmentId);
+
+    // Shipping phase
+    ctx.setState('status', OrderStatus.Shipped);
+    const tracking = await ctx.executeTask(tasks.shipOrder, fulfillment.fulfillmentId);
+    ctx.setState('trackingNumber', tracking.trackingNumber);
+
+    // Delivery
+    ctx.setState('status', OrderStatus.Delivered);
+
+    return { orderId, status: 'delivered' };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from dataclasses import dataclass
+from enum import Enum
+from orcher import workflow, task, WorkflowContext, TaskContext
+
+
+class OrderStatus(str, Enum):
+    CREATED = "created"
+    PAYMENT_PROCESSING = "payment_processing"
+    PAYMENT_COMPLETED = "payment_completed"
+    FULFILLING = "fulfilling"
+    SHIPPED = "shipped"
+    DELIVERED = "delivered"
+    FAILED = "failed"
+
+
+@dataclass
+class OrderResult:
+    order_id: str
+    status: str
+
+
+@task(name="process_payment")
+async def process_payment(ctx: TaskContext, order_id: str) -> Payment:
+    ...
+
+@task(name="fulfill_order")
+async def fulfill_order(ctx: TaskContext, order_id: str) -> Fulfillment:
+    ...
+
+@task(name="ship_order")
+async def ship_order(ctx: TaskContext, fulfillment_id: str) -> Tracking:
+    ...
+
+
+@workflow(name="order_fulfillment")
+async def order_fulfillment(ctx: WorkflowContext, order_id: str) -> OrderResult:
+    # Initialize status
+    ctx.set_state("status", OrderStatus.CREATED)
+    ctx.set_state("order_id", order_id)
+
+    # Payment phase
+    ctx.set_state("status", OrderStatus.PAYMENT_PROCESSING)
+    payment = await ctx.execute_task(process_payment, order_id=order_id)
+    ctx.set_state("status", OrderStatus.PAYMENT_COMPLETED)
+    ctx.set_state("payment_id", payment.payment_id)
+
+    # Fulfillment phase
+    ctx.set_state("status", OrderStatus.FULFILLING)
+    fulfillment = await ctx.execute_task(fulfill_order, order_id=order_id)
+    ctx.set_state("fulfillment_id", fulfillment.fulfillment_id)
+
+    # Shipping phase
+    ctx.set_state("status", OrderStatus.SHIPPED)
+    tracking = await ctx.execute_task(ship_order, fulfillment_id=fulfillment.fulfillment_id)
+    ctx.set_state("tracking_number", tracking.tracking_number)
+
+    # Delivery
+    ctx.set_state("status", OrderStatus.DELIVERED)
+
+    return OrderResult(order_id=order_id, status="delivered")
+```
+
+</TabPanel>
+
+</Tabs>
+
+### Accumulating Results
+
+Collect results from multiple steps into aggregate state. This pattern is useful for fan-out workflows where you process data from multiple sources and need to track totals across iterations.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[task]
+pub async fn fetch_from_source(_ctx: TaskContext, source: DataSource) -> Result<SourceData> {
+    // ...
+}
+
+#[workflow]
+pub async fn data_aggregation(
+    ctx: WorkflowContext,
+    sources: Vec<DataSource>,
+) -> Result<AggregateResult> {
+    // Initialize aggregation state
+    ctx.set_state("total_records", &0usize)?;
+    ctx.set_state("total_bytes", &0usize)?;
+    ctx.set_state("sources_completed", &0usize)?;
+
+    let mut all_data = Vec::new();
+
+    for source in sources {
+        // Fetch data from source
+        let data: SourceData = ctx
+            .execute_task(fetch_from_source, source)
+            .await?;
+
+        // Accumulate results
+        all_data.extend(data.records);
+
+        // Update aggregate state
+        let total_records: usize = ctx.get_state("total_records")?.unwrap_or(0);
+        let total_bytes: usize = ctx.get_state("total_bytes")?.unwrap_or(0);
+        let sources_completed: usize = ctx.get_state("sources_completed")?.unwrap_or(0);
+
+        ctx.set_state("total_records", &(total_records + data.records.len()))?;
+        ctx.set_state("total_bytes", &(total_bytes + data.size_bytes))?;
+        ctx.set_state("sources_completed", &(sources_completed + 1))?;
+    }
+
+    Ok(AggregateResult {
+        total_records: all_data.len(),
+        total_bytes: ctx.get_state("total_bytes")?.unwrap_or(0),
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, WorkflowContext, TaskContext, createTaskRefs } from '@orcher/sdk';
+
+@Tasks({ taskQueue: 'data' })
+class DataTasks {
+  @Task()
+  async fetchFromSource(ctx: TaskContext, source: DataSource): Promise<SourceData> { /* ... */ }
+}
+
+const tasks = createTaskRefs(DataTasks);
+
+@Workflow()
+class DataAggregation {
+  async run(ctx: WorkflowContext, sources: DataSource[]): Promise<AggregateResult> {
+    // Initialize aggregation state
+    ctx.setState('totalRecords', 0);
+    ctx.setState('totalBytes', 0);
+    ctx.setState('sourcesCompleted', 0);
+
+    const allData: Record[] = [];
+
+    for (const source of sources) {
+      // Fetch data from source
+      const data = await ctx.executeTask(tasks.fetchFromSource, source);
+
+      // Accumulate results
+      allData.push(...data.records);
+
+      // Update aggregate state
+      const totalRecords = ctx.getState<number>('totalRecords') || 0;
+      const totalBytes = ctx.getState<number>('totalBytes') || 0;
+      const sourcesCompleted = ctx.getState<number>('sourcesCompleted') || 0;
+
+      ctx.setState('totalRecords', totalRecords + data.records.length);
+      ctx.setState('totalBytes', totalBytes + data.sizeBytes);
+      ctx.setState('sourcesCompleted', sourcesCompleted + 1);
+    }
+
+    return {
+      totalRecords: allData.length,
+      totalBytes: ctx.getState<number>('totalBytes') || 0,
+    };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from dataclasses import dataclass
+from orcher import workflow, task, WorkflowContext, TaskContext
+
+
+@dataclass
+class AggregateResult:
+    total_records: int
+    total_bytes: int
+
+
+@task(name="fetch_from_source")
+async def fetch_from_source(ctx: TaskContext, source: dict) -> SourceData:
+    ...
+
+
+@workflow(name="data_aggregation")
+async def data_aggregation(ctx: WorkflowContext, sources: list) -> AggregateResult:
+    # Initialize aggregation state
+    ctx.set_state("total_records", 0)
+    ctx.set_state("total_bytes", 0)
+    ctx.set_state("sources_completed", 0)
+
+    all_data = []
+
+    for source in sources:
+        # Fetch data from source
+        data = await ctx.execute_task(fetch_from_source, source=source)
+
+        # Accumulate results
+        all_data.extend(data.records)
+
+        # Update aggregate state
+        total_records = ctx.get_state("total_records") or 0
+        total_bytes = ctx.get_state("total_bytes") or 0
+        sources_completed = ctx.get_state("sources_completed") or 0
+
+        ctx.set_state("total_records", total_records + len(data.records))
+        ctx.set_state("total_bytes", total_bytes + data.size_bytes)
+        ctx.set_state("sources_completed", sources_completed + 1)
+
+    return AggregateResult(
+        total_records=len(all_data),
+        total_bytes=ctx.get_state("total_bytes") or 0,
+    )
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Querying Workflow State
+
+External systems can query workflow state without blocking execution. Workflows register query handlers that return state values on demand — clients call `query_workflow()` with a query name, and the handler runs inside the workflow context with access to the current state.
+
+### Registering Query Handlers
+
+Define query handlers inside your workflow to expose state to external callers. Each handler has a name and returns a serializable value.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[workflow]
+pub async fn order_workflow(
+    ctx: WorkflowContext,
+    input: OrderInput,
+) -> Result<OrderResult> {
+    ctx.set_state("status", &"processing")?;
+    ctx.set_state("progress", &0.0f64)?;
+
+    // Register query handlers — external clients can call these
+    ctx.register_query_handler("get_status", || {
+        "processing".to_string()
+    });
+
+    ctx.register_query_handler("get_progress", || {
+        serde_json::json!({
+            "completed": 0,
+            "total": 100,
+            "percentage": 0.0
+        })
+    });
+
+    // ... workflow logic ...
+
+    Ok(result)
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, WorkflowContext } from '@orcher/sdk';
+
+@Workflow()
+class OrderWorkflow {
+  async run(ctx: WorkflowContext, input: OrderInput): Promise<OrderResult> {
+    ctx.setState('status', 'processing');
+    ctx.setState('progress', 0);
+
+    // Register query handlers — external clients can call these
+    ctx.registerQueryHandler('getStatus', () => {
+      return ctx.getState('status') || 'pending';
+    });
+
+    ctx.registerQueryHandler('getProgress', () => {
+      return {
+        completed: ctx.getState<number>('processedItems') || 0,
+        total: ctx.getState<number>('totalItems') || 0,
+        percentage: ctx.getState<number>('progressPercentage') || 0,
+      };
+    });
+
+    // ... workflow logic ...
+
+    return result;
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, WorkflowContext
+
+
+@workflow(name="order_workflow")
+async def order_workflow(ctx: WorkflowContext, input: OrderInput) -> OrderResult:
+    ctx.set_state("status", "processing")
+    ctx.set_state("progress", 0.0)
+
+    # Register query handlers — external clients can call these
+    ctx.register_query_handler("get_status", lambda: ctx.get_state("status") or "pending")
+
+    ctx.register_query_handler("get_progress", lambda: {
+        "completed": ctx.get_state("processed_items") or 0,
+        "total": ctx.get_state("total_items") or 0,
+        "percentage": ctx.get_state("progress_percentage") or 0,
+    })
+
+    # ... workflow logic ...
+
+    return result
+```
+
+</TabPanel>
+
+</Tabs>
+
+### Querying from External Systems
+
+Use the Orcher client SDK to query a running workflow's state from outside the workflow — for example, from a REST API handler, a monitoring dashboard, or another service.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let client = OrcherClient::connect("http://localhost:50051").await?;
+
+    let workflow_id = "order-abc123";
+
+    // Query registered handlers by name
+    let status: String = client
+        .query_workflow(workflow_id, None, "get_status", ())
+        .await?;
+
+    let progress: serde_json::Value = client
+        .query_workflow(workflow_id, None, "get_progress", ())
+        .await?;
+
+    println!("Workflow status: {}", status);
+    println!("Progress: {}", progress);
+
+    Ok(())
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { OrcherClient } from '@orcher/sdk';
+
+async function checkOrderStatus(workflowId: string) {
+  const client = new OrcherClient({ address: 'localhost:50051' });
+  const handle = client.getHandle(workflowId);
+
+  // Query registered handlers by name
+  const status = await handle.query<string>('getStatus');
+  const progress = await handle.query<ProgressInfo>('getProgress');
+
+  console.log('Workflow status:', status);
+  console.log('Progress:', `${progress.percentage}%`);
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import OrcherClient
+
+
+async def check_order_status(workflow_id: str):
+    client = OrcherClient("localhost:50051")
+    handle = client.get_handle(workflow_id)
+
+    # Query registered handlers by name
+    status = await handle.query("get_status")
+    progress = await handle.query("get_progress")
+
+    print(f"Workflow status: {status}")
+    print(f"Progress: {progress['percentage']}%")
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## State vs Variables
+
+Understanding when to use workflow state vs. local variables helps you write efficient workflows. Use state for values that need to survive crashes or be queried externally. Use local variables for temporary computations that can be cheaply recomputed on replay.
+
+### Use Workflow State When:
+
+- **Need persistence** — Value must survive crashes and be consistent on replay
+- **External queries** — Value needs to be queried by external systems via query handlers
+- **Progress tracking** — Monitoring workflow execution from a dashboard or API
+- **Long-running workflows** — Workflow runs for hours/days and needs observable state
+
+### Use Local Variables When:
+
+- **Temporary computation** — Only needed within a single code block
+- **Derived values** — Can be recomputed from task results on replay
+- **Performance critical** — Avoid serialization overhead for hot-path values
+- **Private data** — Should not be externally queryable
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[workflow]
+pub async fn example_workflow(
+    ctx: WorkflowContext,
+    input: Input,
+) -> Result<Output> {
+    // State: Needs to survive crash and be queryable
+    ctx.set_state("order_id", &input.order_id)?;
+
+    // Local variable: Temporary computation, recomputed on replay
+    let tax = input.amount * 0.08;
+    let total = input.amount + tax;
+
+    // State: Progress tracking (queryable by external systems)
+    ctx.set_state("status", &"processing")?;
+
+    let result = ctx.execute_task(process, total).await?;
+
+    // Local variable: Derived from task result
+    let formatted = format!("Result: {}", result);
+
+    // State: Final result (queryable)
+    ctx.set_state("result", &result)?;
+
+    Ok(Output { result })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Workflow()
+class ExampleWorkflow {
+  async run(ctx: WorkflowContext, input: Input): Promise<Output> {
+    // State: Needs to survive crash and be queryable
+    ctx.setState('orderId', input.orderId);
+
+    // Local variable: Temporary computation, recomputed on replay
+    const tax = input.amount * 0.08;
+    const total = input.amount + tax;
+
+    // State: Progress tracking (queryable by external systems)
+    ctx.setState('status', 'processing');
+
+    const result = await ctx.executeTask(tasks.process, total);
+
+    // Local variable: Derived from task result
+    const formatted = `Result: ${result}`;
+
+    // State: Final result (queryable)
+    ctx.setState('result', result);
+
+    return { result };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+@workflow(name="example_workflow")
+async def example_workflow(ctx: WorkflowContext, input: dict) -> Output:
+    # State: Needs to survive crash and be queryable
+    ctx.set_state("order_id", input["order_id"])
+
+    # Local variable: Temporary computation, recomputed on replay
+    tax = input["amount"] * 0.08
+    total = input["amount"] + tax
+
+    # State: Progress tracking (queryable by external systems)
+    ctx.set_state("status", "processing")
+
+    result = await ctx.execute_task(process, total=total)
+
+    # Local variable: Derived from task result
+    formatted = f"Result: {result}"
+
+    # State: Final result (queryable)
+    ctx.set_state("result", result)
+
+    return Output(result=result)
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/state-management/basics" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Setting & Getting State</h3>
+      <p className="text-sm text-foreground-light">
+        Learn the basics of setting and getting state values
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/state-management/best-practices" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Best Practices & Performance</h3>
+      <p className="text-sm text-foreground-light">
+        Guidelines for state keys, performance optimization, and troubleshooting
+      </p>
+    </div>
+  </Link>
+</div>

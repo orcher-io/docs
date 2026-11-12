@@ -1,0 +1,835 @@
+---
+title: 'Local Development Setup'
+description: 'Run Orcher locally on your machine for development. Set up the orchestrator, database, and workers with Docker or native installation.'
+sidebar_label: 'Getting Started'
+---
+
+Run the complete Orcher stack locally on your machine for development and testing. With the Orcher CLI and Docker, you can have a full orchestration environment running in minutes.
+
+## Choose Your SDK
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+**Prerequisites:**
+• Rust 1.70 or later
+• Docker Desktop (or compatible container runtime)
+• PostgreSQL 14+ (optional, Docker setup includes it)
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+TypeScript SDK for local development is under active development.
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+Python SDK for local development is under active development.
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+Go SDK for local development is under active development.
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## 1. Install the Orcher CLI
+
+The Orcher CLI provides commands to manage your local development environment, deploy workflows, and interact with the orchestrator.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="cargo"
+  queryGroup="install-method"
+>
+
+<TabPanel id="cargo" label="Cargo">
+
+Install via Cargo:
+
+```bash
+cargo install orcher-cli
+```
+
+Verify installation:
+
+```bash
+orcher --version
+```
+
+</TabPanel>
+
+<TabPanel id="homebrew" label="Homebrew">
+
+Install via Homebrew:
+
+```bash
+brew install orcher-io/tap/orcher
+```
+
+Verify installation:
+
+```bash
+orcher --version
+```
+
+</TabPanel>
+
+<TabPanel id="npm" label="npm">
+
+Install globally via npm:
+
+```bash
+npm install -g @orcher/cli
+```
+
+Or use with npx (no installation needed):
+
+```bash
+npx @orcher/cli --help
+```
+
+<Admonition type="note">
+
+The Orcher CLI requires **Node.js 18 or later** when run via npm.
+
+</Admonition>
+
+</TabPanel>
+
+<TabPanel id="binary" label="Binary">
+
+Download pre-built binaries from [GitHub Releases](https://github.com/orcher-io/cli/releases):
+
+**macOS (Intel)**
+```bash
+curl -LO https://github.com/orcher-io/cli/releases/latest/download/orcher-x86_64-apple-darwin.tar.xz
+tar -xJf orcher-x86_64-apple-darwin.tar.xz
+sudo mv orcher-x86_64-apple-darwin/orcher /usr/local/bin/
+```
+
+**macOS (Apple Silicon)**
+```bash
+curl -LO https://github.com/orcher-io/cli/releases/latest/download/orcher-aarch64-apple-darwin.tar.xz
+tar -xJf orcher-aarch64-apple-darwin.tar.xz
+sudo mv orcher-aarch64-apple-darwin/orcher /usr/local/bin/
+```
+
+**Linux (x86_64)**
+```bash
+curl -LO https://github.com/orcher-io/cli/releases/latest/download/orcher-x86_64-unknown-linux-gnu.tar.xz
+tar -xJf orcher-x86_64-unknown-linux-gnu.tar.xz
+sudo mv orcher-x86_64-unknown-linux-gnu/orcher /usr/local/bin/
+```
+
+**Windows**
+```powershell
+# Download from GitHub releases
+# https://github.com/orcher-io/cli/releases/latest
+# Extract and add to PATH
+```
+
+Verify installation:
+
+```bash
+orcher --version
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## 2. Install Docker
+
+Orcher uses Docker containers for local development. This gives you an isolated, reproducible environment with all dependencies included.
+
+Follow the official guide to install [Docker Desktop](https://docs.docker.com/desktop):
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="macos"
+  queryGroup="platform"
+>
+
+<TabPanel id="macos" label="macOS">
+
+1. Download [Docker Desktop for Mac](https://docs.docker.com/desktop/install/mac-install/)
+2. Install and start Docker Desktop
+3. Verify Docker is running:
+
+```bash
+docker --version
+```
+
+**Recommended Settings:**
+• Enable "Use containerd for pulling and storing images"
+• Allocate at least 4GB of memory
+• Enable "Use Virtualization Framework"
+
+</TabPanel>
+
+<TabPanel id="windows" label="Windows">
+
+1. Download [Docker Desktop for Windows](https://docs.docker.com/desktop/install/windows-install/)
+2. Install with WSL 2 backend (recommended)
+3. Verify Docker is running:
+
+```powershell
+docker --version
+```
+
+**Recommended Settings:**
+• Enable WSL 2 integration
+• Allocate at least 4GB of memory
+• Enable "Expose daemon on tcp://localhost:2375 without TLS"
+
+</TabPanel>
+
+<TabPanel id="linux" label="Linux">
+
+1. Install [Docker Engine](https://docs.docker.com/engine/install/) or [Docker Desktop for Linux](https://docs.docker.com/desktop/install/linux-install/)
+2. Add your user to the docker group:
+
+```bash
+sudo usermod -aG docker $USER
+newgrp docker
+```
+
+3. Verify Docker is running:
+
+```bash
+docker --version
+```
+
+</TabPanel>
+
+</Tabs>
+
+<Admonition type="note">
+
+**Alternative Container Runtimes:**
+
+You can use Docker-compatible alternatives:
+• [Rancher Desktop](https://rancherdesktop.io/) (macOS, Windows, Linux)
+• [Podman](https://podman.io/) (macOS, Windows, Linux)
+• [OrbStack](https://orbstack.dev/) (macOS)
+• [colima](https://github.com/abiosoft/colima) (macOS)
+
+</Admonition>
+
+---
+
+## 3. Start Orcher Server
+
+Start the Orcher orchestrator and all required services using Docker:
+
+```bash
+orcher server start
+```
+
+Or use Docker directly:
+
+```bash
+docker run --name orcher_dev --rm \
+  -p 8080:8080 -p 9090:9090 -p 8081:8081 \
+  --add-host=host.docker.internal:host-gateway \
+  orcherapp/orcher:latest
+```
+
+**What Gets Started:**
+
+• **Orchestrator Server** (port 8080) - Main workflow orchestration engine
+• **gRPC Server** (port 9090) - For worker communication
+• **Admin UI** (port 8081) - Web-based management interface
+• **PostgreSQL** - Workflow journal and state storage
+
+<Admonition type="tip">
+
+The first run takes longer as Docker downloads the required images (~500MB).
+
+</Admonition>
+
+Expected output:
+
+```bash
+Orcher Server started successfully
+
+    Orchestrator API: http://localhost:8080
+    gRPC Server:      http://localhost:9090
+    Admin UI:         http://localhost:8081
+    Database:         postgresql://postgres:postgres@localhost:5432/orcher_dev
+
+Ready to accept workflows
+```
+
+---
+
+## 4. Access Local Services
+
+Once Orcher is running, you can access these services:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="admin-ui"
+  queryGroup="service"
+>
+
+<TabPanel id="admin-ui" label="Admin UI">
+
+```bash
+# Default URL:
+http://localhost:8081
+```
+
+The Admin UI provides a graphical interface for:
+
+• **Monitoring workflows** - View running, completed, and failed workflows
+• **Workflow playground** - Test workflows with custom inputs
+• **Execution history** - Inspect journal entries and task executions
+• **Deployment management** - Register and manage workers
+• **Metrics dashboard** - System health and performance metrics
+
+</TabPanel>
+
+<TabPanel id="orchestrator" label="Orchestrator API">
+
+```bash
+# Default URL:
+http://localhost:8080
+```
+
+The REST API for workflow operations:
+
+```bash
+# Start a workflow
+curl -X POST http://localhost:8080/api/workflows/start \
+  -H "Content-Type: application/json" \
+  -d '{
+    "workflow": "my_workflow",
+    "input": {"key": "value"}
+  }'
+
+# Get workflow status
+curl http://localhost:8080/api/workflows/{workflow_id}
+
+# List all workflows
+curl http://localhost:8080/api/workflows
+```
+
+**Available Endpoints:**
+
+• `POST /api/workflows/start` - Start a new workflow execution
+• `GET /api/workflows/{id}` - Get workflow status and output
+• `GET /api/workflows` - List all workflow executions
+• `POST /api/workflows/{id}/cancel` - Cancel a running workflow
+• `POST /api/deployments` - Register a worker
+• `GET /api/deployments` - List registered deployments
+
+</TabPanel>
+
+<TabPanel id="grpc" label="gRPC Server">
+
+```bash
+# Default URL:
+http://localhost:9090
+```
+
+The gRPC server is used by workers to communicate with the orchestrator. Your workers connect here to:
+
+• Register workflows and tasks
+• Fetch task executions
+• Report task results
+• Stream workflow events
+
+**Connection in Rust:**
+
+```rust
+use orcher::WorkerBuilder;
+
+let worker = WorkerBuilder::new()
+    .server_url("http://localhost:9090")
+    .task_queue("default")
+    .build()
+    .await?;
+```
+
+<Admonition type="note">
+
+If your worker runs in Docker, use `http://host.docker.internal:9090` instead of `localhost`.
+
+</Admonition>
+
+</TabPanel>
+
+<TabPanel id="database" label="PostgreSQL">
+
+```bash
+# Default URL:
+postgresql://postgres:postgres@localhost:5432/orcher_dev
+```
+
+The PostgreSQL database stores:
+
+• **Workflow state** - Current execution status
+• **Journal entries** - Completed task results for replay
+• **Deployment metadata** - Registered workflows and versions
+• **Execution history** - Audit trail of all operations
+
+**Connect with psql:**
+
+```bash
+psql postgresql://postgres:postgres@localhost:5432/orcher_dev
+```
+
+**Connect from code:**
+
+```rust
+use sqlx::PgPool;
+
+let pool = PgPool::connect("postgresql://postgres:postgres@localhost:5432/orcher_dev")
+    .await?;
+```
+
+<Admonition type="caution">
+
+The local database is for development only. Data is persisted in a Docker volume but will be lost if you remove the container with `docker rm -v`.
+
+</Admonition>
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## 5. Initialize a Workflow Project
+
+Create a new workflow project in your chosen SDK:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+Create a new project:
+
+```bash
+orcher new my-workflow
+cd my-workflow
+```
+
+Or run one of the [Rust SDK's examples](https://github.com/orcher-io/sdk-rust/tree/main/examples):
+
+```bash
+git clone https://github.com/orcher-io/sdk-rust
+cd sdk-rust
+cargo run -p orcher-example-durable-execution -- --e2e
+```
+
+**Project Structure:**
+
+```
+my-workflow/
+├── src/
+│   ├── main.rs              # Worker entry point
+│   ├── workflows/           # Workflow definitions
+│   │   └── payment.rs
+│   └── tasks/               # Task implementations
+│       ├── charge_card.rs
+│       └── send_email.rs
+├── orcher.toml              # Configuration
+└── Cargo.toml
+```
+
+**Configure the orchestrator URL:**
+
+```toml
+# orcher.toml
+[orchestrator]
+url = "http://localhost:9090"
+
+[worker]
+port = 9080
+concurrency = 10
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+TypeScript project scaffolding will be available when the SDK is released.
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+Python project scaffolding will be available when the SDK is released.
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+Go project scaffolding will be available when the SDK is released.
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## 6. Run Your Worker
+
+Start your worker locally:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```bash
+cargo run
+```
+
+Expected output:
+
+```bash
+Orcher Worker started
+   Orchestrator: http://localhost:9090
+   Worker Port: 9080
+   Workflows: payment_workflow, order_fulfillment
+   Tasks: charge_card, send_email, reserve_inventory
+   
+Connected to Orcher Orchestrator
+```
+
+**Hot Reload During Development:**
+
+Use `cargo-watch` for automatic recompilation:
+
+```bash
+cargo install cargo-watch
+cargo watch -x run
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## 7. Register Your Worker
+
+Tell Orcher about your worker so it can discover workflows and tasks:
+
+**Via Admin UI:**
+
+1. Open http://localhost:8081
+2. Navigate to "Deployments"
+3. Click "Register New Worker"
+4. Enter endpoint: `http://localhost:9080`
+5. Click "Register"
+
+**Via CLI:**
+
+```bash
+orcher deployments register http://localhost:9080
+```
+
+**Via curl:**
+
+```bash
+curl -X POST http://localhost:8080/api/deployments \
+  -H "Content-Type: application/json" \
+  -d '{"endpoint": "http://localhost:9080"}'
+```
+
+Expected output:
+
+```bash
+WORKFLOWS THAT WILL BE ADDED:
+• payment_workflow (v1.0.0)
+• order_fulfillment (v2.1.0)
+
+Are you sure you want to apply those changes? · yes
+
+DEPLOYMENT REGISTERED:
+WORKFLOW              REV
+payment_workflow      1
+order_fulfillment     2
+```
+
+<Admonition type="note">
+
+If your worker runs in Docker, register `http://host.docker.internal:9080` instead of `http://localhost:9080`.
+
+</Admonition>
+
+---
+
+## 8. Test Your Workflows
+
+Now you can execute workflows through the Admin UI, CLI, or API.
+
+**Via Admin UI Playground:**
+
+1. Open http://localhost:8081
+2. Select your workflow
+3. Click "Playground"
+4. Enter test input JSON
+5. Click "Run"
+
+**Via CLI:**
+
+```bash
+orcher workflow run payment_workflow \
+  --input '{"amount": 99.99, "customer": "alice@example.com"}'
+```
+
+**Via curl:**
+
+```bash
+curl -X POST http://localhost:8080/api/workflows/start \
+  -H "Content-Type: application/json" \
+  -d '{
+    "workflow": "payment_workflow",
+    "input": {
+      "amount": 99.99,
+      "customer": "alice@example.com"
+    }
+  }'
+```
+
+---
+
+## Development Workflow
+
+### Watch Logs
+
+**Orchestrator logs:**
+
+```bash
+docker logs -f orcher_dev
+```
+
+**Worker logs:**
+
+Your worker logs appear in the terminal where you ran `cargo run`.
+
+### View Execution History
+
+```bash
+orcher workflow list
+orcher workflow get <workflow_id>
+orcher workflow history <workflow_id>
+```
+
+### Reset Database
+
+To start fresh:
+
+```bash
+orcher server stop
+docker volume rm orcher_postgres_data
+orcher server start
+```
+
+### Stop Services
+
+**Stop the orchestrator:**
+
+```bash
+orcher server stop
+```
+
+Or:
+
+```bash
+docker stop orcher_dev
+```
+
+**Stop your worker:**
+
+Press `Ctrl+C` in the terminal where it's running.
+
+---
+
+## Environment Variables
+
+Configure your local setup with environment variables:
+
+```bash
+# Orchestrator connection
+export ORCHER_ORCHESTRATOR_URL="http://localhost:9090"
+
+# Database
+export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/orcher_dev"
+
+# Worker configuration
+export ORCHER_WORKER_PORT=9080
+export ORCHER_WORKER_CONCURRENCY=10
+
+# Logging
+export RUST_LOG=info
+export ORCHER_LOG_FORMAT=json
+```
+
+---
+
+## Troubleshooting
+
+### Port Already in Use
+
+If ports 8080, 8081, or 9090 are already in use:
+
+```bash
+# Check what's using the port
+lsof -i :8080
+
+# Use custom ports
+docker run --name orcher_dev --rm \
+  -p 8888:8080 -p 9999:9090 -p 8889:8081 \
+  orcherapp/orcher:latest
+```
+
+Update your worker configuration to match:
+
+```toml
+[orchestrator]
+url = "http://localhost:9999"
+```
+
+### Docker Connection Issues
+
+If your worker can't connect to the orchestrator:
+
+**On macOS/Linux:**
+```bash
+# Use host.docker.internal instead of localhost
+export ORCHER_ORCHESTRATOR_URL="http://host.docker.internal:9090"
+```
+
+**On Linux without Docker Desktop:**
+```bash
+# Add --network=host to docker run
+docker run --name orcher_dev --rm --network=host \
+  orcherapp/orcher:latest
+```
+
+### Database Migration Issues
+
+If you see database errors:
+
+```bash
+# Run migrations manually
+orcher migrate
+
+# Or reset the database
+orcher server stop
+docker volume rm orcher_postgres_data
+orcher server start
+```
+
+---
+
+## Next Steps
+
+<div className="grid lg:grid-cols-12 gap-6 not-prose">
+  {[
+    {
+      title: 'Write Your First Workflow',
+      href: '/guides/getting-started/quickstart',
+      description: 'Build a payment workflow with durable execution in 5 minutes.',
+    },
+    {
+      title: 'Testing Workflows',
+      href: '/guides/local-development/testing-workflows',
+      description: 'Unit test workflows, integration tests, and crash recovery simulation.',
+    },
+    {
+      title: 'CLI Reference',
+      href: '/guides/sdk/cli',
+      description: 'Complete reference for all Orcher CLI commands.',
+    },
+  ].map((item) => {
+    return (
+      <Link href={`${item.href}`} key={item.title} passHref className={'col-span-4'}>
+        <GlassPanel
+          title={item.title}
+          span="col-span-6"
+          background={false}
+        >
+          {item.description}
+        </GlassPanel>
+      </Link>
+    )
+  })}
+</div>
+
+---
+
+## Learn More
+
+• [Configuration Reference](/guides/local-development/configuration) - Advanced configuration options
+• [Production Deployment](/guides/deployment/docker) - Deploy Orcher to production environments

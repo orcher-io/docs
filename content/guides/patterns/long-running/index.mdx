@@ -1,0 +1,355 @@
+---
+id: 'long-running'
+title: 'Long-Running Processes'
+description: 'Build workflows that span hours, days, or weeks with durable timers, human approvals, and state persistence in Orcher'
+sidebar_label: 'Overview'
+---
+
+Long-running processes are workflows that execute over extended time periods — from hours to days to weeks — while maintaining full reliability and consistency. Orcher's durable timers let you sleep for days without consuming resources, pause for human approvals with automatic timeout and escalation, schedule future actions at precise intervals, and maintain workflow state across restarts and failures. These patterns are ideal whenever you need to wait for external events (human approvals, webhook callbacks, partner responses), schedule future actions (send a reminder in 24 hours, expire a trial in 7 days), implement timeouts (wait for payment confirmation with a 30-minute deadline), coordinate multi-day processes (order fulfillment, employee onboarding, loan approval), or handle recurring tasks (daily reports, weekly cleanups, monthly billing). Because sleeping workflows consume almost no resources, you can run thousands of concurrent long-running workflows with minimal overhead.
+
+<div className="not-prose my-8 max-w-lg mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b flex items-center justify-between">
+    <span className="text-xs font-medium text-foreground">Trial Onboarding Workflow</span>
+    <span className="text-[10px] font-mono text-foreground-muted">spans 14 days</span>
+  </div>
+  {[
+    { time: 'T+0', task: 'Create account', type: 'task', detail: 'Provision resources' },
+    { time: 'T+0', task: 'Send welcome email', type: 'task', detail: 'Onboarding guide' },
+    { time: '', task: '', type: 'sleep', detail: 'sleep(24 hours)' },
+    { time: 'T+1d', task: 'Check engagement', type: 'task', detail: 'Query usage metrics' },
+    { time: '', task: '', type: 'sleep', detail: 'sleep(6 days)' },
+    { time: 'T+7d', task: 'Send midpoint email', type: 'task', detail: 'Tips & best practices' },
+    { time: '', task: '', type: 'wait', detail: 'wait_for_event("upgrade") · timeout 7d' },
+    { time: 'T+14d', task: 'Trial expired', type: 'decision', detail: 'Upgraded? → extend : → downgrade' },
+  ].map((step, i, arr) => (
+    <div key={i} className={`flex items-stretch ${i < arr.length - 1 ? 'border-b' : ''} ${step.type === 'sleep' || step.type === 'wait' ? 'bg-surface-75' : ''}`}>
+      <div className="w-16 shrink-0 px-3 py-2 flex items-center justify-end border-r">
+        <span className="text-[10px] font-mono text-foreground-muted">{step.time}</span>
+      </div>
+      <div className="flex-1 px-4 py-2 flex items-center gap-3">
+        {step.type === 'sleep' && (
+          <>
+            <span className="text-[10px] text-foreground-muted">💤</span>
+            <span className="text-[10px] font-mono text-foreground-muted italic">{step.detail}</span>
+            <span className="text-[10px] text-foreground-muted ml-auto">zero resources</span>
+          </>
+        )}
+        {step.type === 'wait' && (
+          <>
+            <span className="text-[10px] text-foreground-muted">⏳</span>
+            <span className="text-[10px] font-mono text-foreground-muted italic">{step.detail}</span>
+          </>
+        )}
+        {step.type === 'task' && (
+          <>
+            <code className="text-[11px] text-foreground">{step.task}</code>
+            <span className="text-[10px] text-foreground-muted ml-auto">{step.detail}</span>
+          </>
+        )}
+        {step.type === 'decision' && (
+          <>
+            <code className="text-[11px] text-foreground">{step.task}</code>
+            <span className="text-[10px] text-foreground-muted ml-auto">{step.detail}</span>
+          </>
+        )}
+      </div>
+    </div>
+  ))}
+</div>
+
+---
+
+## Durable Timers
+
+Durable timers let your workflow sleep for extended periods — hours, days, or even weeks — without consuming any resources. The timer is persisted to the journal, so it survives server restarts, deployments, and failures. When the timer fires, the workflow resumes exactly where it left off.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use std::time::Duration;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReminderInput {
+    user_id: String,
+    message: String,
+    delay_hours: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReminderResult {
+    user_id: String,
+    sent: bool,
+    sent_at: String,
+}
+
+#[task]
+async fn send_email_reminder(input: ReminderInput) -> Result<()> {
+    // Send the email reminder
+    Ok(())
+}
+
+#[task]
+async fn send_reminder(message: String) -> Result<()> {
+    // Send a reminder message
+    Ok(())
+}
+
+// Send a reminder after a delay
+#[workflow(name = "delayed_reminder", version = "1.0.0")]
+pub async fn delayed_reminder(
+    ctx: WorkflowContext,
+    input: ReminderInput,
+) -> Result<ReminderResult> {
+    println!("Reminder scheduled for {} in {} hours",
+        input.user_id, input.delay_hours);
+
+    // Sleep for the specified duration (durable - survives restarts)
+    ctx.sleep(Duration::from_secs(input.delay_hours * 3600)).await?;
+
+    println!("Timer fired - sending reminder to {}", input.user_id);
+
+    // Send the reminder
+    ctx.execute_task(send_email_reminder, input.clone()).await?;
+
+    Ok(ReminderResult {
+        user_id: input.user_id,
+        sent: true,
+        sent_at: chrono::Utc::now().to_rfc3339(),
+    })
+}
+
+// Multiple reminders at different intervals
+#[workflow(name = "multi_reminder", version = "1.0.0")]
+pub async fn multi_reminder(
+    ctx: WorkflowContext,
+    user_id: String,
+) -> Result<()> {
+    // Send reminder after 1 day
+    ctx.sleep(Duration::from_secs(86400)).await?;
+    ctx.execute_task(send_reminder, "Day 1 reminder".to_string()).await?;
+
+    // Send reminder after 3 days (additional 2 days)
+    ctx.sleep(Duration::from_secs(172800)).await?;
+    ctx.execute_task(send_reminder, "Day 3 reminder".to_string()).await?;
+
+    // Send reminder after 7 days (additional 4 days)
+    ctx.sleep(Duration::from_secs(345600)).await?;
+    ctx.execute_task(send_reminder, "Day 7 reminder".to_string()).await?;
+
+    println!("All reminders sent for user {}", user_id);
+    Ok(())
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, WorkflowContext, createTaskRefs, Duration } from '@orcher/sdk';
+
+interface ReminderInput {
+  userId: string;
+  message: string;
+  delayHours: number;
+}
+
+interface ReminderResult {
+  userId: string;
+  sent: boolean;
+  sentAt: string;
+}
+
+@Tasks()
+class ReminderTasks {
+  @Task()
+  async sendEmailReminder(input: ReminderInput): Promise<void> {
+    // Send the email reminder
+  }
+
+  @Task()
+  async sendReminder(message: string): Promise<void> {
+    // Send a reminder message
+  }
+}
+
+const tasks = createTaskRefs(ReminderTasks);
+
+// Send a reminder after a delay
+@Workflow({ name: 'delayed_reminder', version: '1.0.0' })
+class DelayedReminderWorkflow {
+  async run(ctx: WorkflowContext, input: ReminderInput): Promise<ReminderResult> {
+    console.log(
+      `Reminder scheduled for ${input.userId} in ${input.delayHours} hours`
+    );
+
+    // Sleep for the specified duration (durable - survives restarts)
+    await ctx.sleep(input.delayHours * 3600 * 1000);
+
+    console.log(`Timer fired - sending reminder to ${input.userId}`);
+
+    // Send the reminder
+    await ctx.executeTask(tasks.sendEmailReminder, input);
+
+    return {
+      userId: input.userId,
+      sent: true,
+      sentAt: new Date().toISOString(),
+    };
+  }
+}
+
+// Multiple reminders at different intervals
+@Workflow({ name: 'multi_reminder', version: '1.0.0' })
+class MultiReminderWorkflow {
+  async run(ctx: WorkflowContext, userId: string): Promise<void> {
+    // Send reminder after 1 day
+    await ctx.sleep(Duration.fromDays(1));
+    await ctx.executeTask(tasks.sendReminder, 'Day 1 reminder');
+
+    // Send reminder after 3 days (additional 2 days)
+    await ctx.sleep(Duration.fromDays(2));
+    await ctx.executeTask(tasks.sendReminder, 'Day 3 reminder');
+
+    // Send reminder after 7 days (additional 4 days)
+    await ctx.sleep(Duration.fromDays(4));
+    await ctx.executeTask(tasks.sendReminder, 'Day 7 reminder');
+
+    console.log(`All reminders sent for user ${userId}`);
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+
+@dataclass
+class ReminderInput:
+    user_id: str
+    message: str
+    delay_hours: int
+
+@dataclass
+class ReminderResult:
+    user_id: str
+    sent: bool
+    sent_at: str
+
+@task
+async def send_email_reminder(input: ReminderInput) -> None:
+    """Send the email reminder."""
+    pass
+
+@task
+async def send_reminder(message: str) -> None:
+    """Send a reminder message."""
+    pass
+
+# Send a reminder after a delay
+@workflow(name="delayed_reminder", version="1.0.0")
+async def delayed_reminder(ctx: WorkflowContext, input: ReminderInput) -> ReminderResult:
+    print(f"Reminder scheduled for {input.user_id} in {input.delay_hours} hours")
+
+    # Sleep for the specified duration (durable - survives restarts)
+    await ctx.sleep(input.delay_hours * 3600)
+
+    print(f"Timer fired - sending reminder to {input.user_id}")
+
+    # Send the reminder
+    await ctx.execute_task(send_email_reminder, input)
+
+    return ReminderResult(
+        user_id=input.user_id,
+        sent=True,
+        sent_at=datetime.utcnow().isoformat(),
+    )
+
+# Multiple reminders at different intervals
+@workflow(name="multi_reminder", version="1.0.0")
+async def multi_reminder(ctx: WorkflowContext, user_id: str) -> None:
+    # Send reminder after 1 day
+    await ctx.sleep(timedelta(days=1))
+    await ctx.execute_task(send_reminder, "Day 1 reminder")
+
+    # Send reminder after 3 days (additional 2 days)
+    await ctx.sleep(timedelta(days=2))
+    await ctx.execute_task(send_reminder, "Day 3 reminder")
+
+    # Send reminder after 7 days (additional 4 days)
+    await ctx.sleep(timedelta(days=4))
+    await ctx.execute_task(send_reminder, "Day 7 reminder")
+
+    print(f"All reminders sent for user {user_id}")
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/patterns/long-running/approvals" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Human-in-the-Loop Approvals</h3>
+      <p className="text-sm text-scale-1100">
+        Pause workflows for human decisions with timeout and escalation.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/long-running/trial-management" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Trial Period Management</h3>
+      <p className="text-sm text-scale-1100">
+        Manage SaaS trial periods with milestone reminders.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/long-running/order-fulfillment" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Order Fulfillment Process</h3>
+      <p className="text-sm text-scale-1100">
+        Multi-day order processing with stage tracking.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/long-running/recurring-tasks" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Recurring Tasks</h3>
+      <p className="text-sm text-scale-1100">
+        Schedule repeating operations with conditional logic.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/long-running/best-practices" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Best Practices & Performance</h3>
+      <p className="text-sm text-scale-1100">
+        Guidelines for production long-running workflows.
+      </p>
+    </div>
+  </Link>
+</div>

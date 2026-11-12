@@ -1,0 +1,147 @@
+---
+id: cli-examples
+title: Examples & Troubleshooting
+sidebar_label: Examples
+---
+
+## Examples
+
+### Set Up Multiple Environments
+
+```bash
+# Create contexts for each environment
+orcher config set-context local --server http://localhost:8080
+orcher config set-context staging --server https://staging.orcher.example.com --namespace staging
+orcher config set-context production --server https://orcher.example.com --namespace prod
+
+# Authenticate to production
+orcher config use-context production
+orcher auth login --device --provider github
+
+# Switch between contexts
+orcher config use-context staging
+orcher workflow list
+
+orcher config use-context production
+orcher workflow list
+```
+
+### Start and Monitor a Workflow
+
+```bash
+# Run a workflow with parameters
+orcher run process-order --param order_id=123 --param amount=99.99
+
+# Check status
+orcher workflow list --status running
+
+# View execution journal
+orcher workflow history wf-abc123
+
+# Send an event
+orcher workflow event wf-abc123 --name approval --payload '{"approved": true}'
+
+# View logs
+orcher logs wf-abc123 --follow
+```
+
+### Monitor Queue Health
+
+```bash
+# Check queue depths
+orcher queue depth --watch
+
+# View queue statistics
+orcher queue stats payment-tasks
+
+# See active pollers
+orcher queue pollers payment-tasks --verbose
+```
+
+### Server Management
+
+```bash
+# Start server in foreground
+orcher server start --foreground --log-level debug
+
+# Check server health
+orcher server status --verbose
+
+# Restart gracefully
+orcher server restart
+
+# Force stop
+orcher server stop --force
+```
+
+---
+
+## Troubleshooting
+
+### Connection Refused
+
+The CLI tries gRPC first, then falls back to HTTP. If both fail:
+
+```bash
+# Check server status
+orcher server status
+
+# Test connection to a specific context
+orcher config test-connection --context production
+```
+
+### Authentication Issues
+
+```bash
+# Check auth status
+orcher auth status
+
+# Re-authenticate
+orcher auth logout
+orcher auth login --device --provider github
+
+# Use token directly
+export ORCHER_TOKEN="your-token"
+orcher workflow list
+```
+
+### Debug Mode
+
+```bash
+# Enable verbose output for any command
+orcher -v workflow list
+
+# Combine with quiet to see only errors
+orcher -q server start
+```
+
+---
+
+## Getting Help
+
+```bash
+# Show help for any command
+orcher --help
+orcher workflow --help
+orcher server start --help
+```
+
+---
+
+## Command Reference Summary
+
+| Command | Alias | Description |
+|---------|-------|-------------|
+| `orcher new` | `n` | Create projects, workflows, tasks |
+| `orcher workflow` | `wf` | Manage workflow executions |
+| `orcher namespace` | `ns` | Manage namespaces |
+| `orcher server` | — | Manage server processes |
+| `orcher queue` | `q` | View and manage task queues |
+| `orcher run` | — | Run workflows locally or remotely |
+| `orcher describe` | `desc` | Show detailed resource info |
+| `orcher logs` | — | View execution logs |
+| `orcher test` | — | Test workflows locally |
+| `orcher status` | — | Show resource status |
+| `orcher config` | — | Manage CLI configuration |
+| `orcher auth` | — | Manage authentication |
+| `orcher dev` | — | Development mode |

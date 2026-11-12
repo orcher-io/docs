@@ -1,0 +1,157 @@
+---
+id: 'metrics-reference'
+title: 'Metric Reference'
+description: 'Complete reference of all Prometheus metrics exposed by the Orcher orchestrator'
+sidebar_label: 'Metric Reference'
+---
+
+All metric names are defined in the `orcher-monitoring` crate and use the `orcher_` prefix.
+
+## Workflow Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `orcher_workflows_executing` | Gauge | Currently executing workflows |
+| `orcher_workflows_completed_total` | Counter | Total workflows completed successfully |
+| `orcher_workflows_failed_total` | Counter | Total workflows failed |
+| `orcher_workflow_duration_seconds` | Histogram | End-to-end workflow execution duration |
+| `orcher_workflow_step_duration_seconds` | Histogram | Duration of individual workflow steps |
+
+## Task Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `orcher_tasks_submitted_total` | Counter | Total tasks submitted for execution |
+| `orcher_tasks_running` | Gauge | Currently executing tasks |
+| `orcher_tasks_completed_total` | Counter | Total tasks completed successfully |
+| `orcher_tasks_failed_total` | Counter | Total tasks failed |
+| `orcher_task_duration_seconds` | Histogram | Task execution duration |
+| `orcher_task_queue_size` | Gauge | Number of tasks waiting in queue |
+
+## Actor Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `orcher_actor_operations_total` | Counter | Total actor operations executed |
+| `orcher_actor_operations_failed_total` | Counter | Total actor operations failed |
+| `orcher_actor_operations_executing` | Gauge | Currently executing actor operations |
+| `orcher_actor_operation_duration_seconds` | Histogram | Actor operation duration |
+
+## Queue Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `orcher_queue_depth` | Gauge | Current number of pending items per queue |
+| `orcher_queue_messages_published_total` | Counter | Total messages published to queues |
+| `orcher_queue_messages_consumed_total` | Counter | Total messages consumed from queues |
+| `orcher_queue_publish_errors_total` | Counter | Total publish errors |
+| `orcher_queue_consume_errors_total` | Counter | Total consume errors |
+| `orcher_queue_publish_latency_seconds` | Histogram | Time to publish a message to a queue |
+
+## Polling Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `orcher_poll_duration_seconds` | Histogram | Duration of poll operations |
+| `orcher_poll_total` | Counter | Total poll attempts |
+| `orcher_poll_success_total` | Counter | Polls that returned work |
+| `orcher_poll_timeout_total` | Counter | Polls that timed out (no work available) |
+| `orcher_poll_error_total` | Counter | Polls that errored |
+| `orcher_claim_duration_seconds` | Histogram | Time to claim an execution after poll |
+| `orcher_push_to_claim_latency_seconds` | Histogram | End-to-end latency from LPUSH to BRPOP return |
+| `orcher_redis_push_duration_seconds` | Histogram | Time for Redis LPUSH |
+| `orcher_redis_pop_duration_seconds` | Histogram | Time for Redis BRPOP |
+| `orcher_postgres_fallback_total` | Counter | Times PostgreSQL fallback was used (Redis unavailable) |
+| `orcher_redis_retry_total` | Counter | Redis operation retries |
+| `orcher_batch_claim_size` | Histogram | Number of items claimed per batch |
+| `orcher_batch_claim_success_ratio` | Gauge | Ratio of successful claims in a batch |
+
+## Database Pool Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `orcher_db_connections_active` | Gauge | Active database connections |
+| `orcher_db_connections_idle` | Gauge | Idle database connections |
+| `orcher_db_connections_max` | Gauge | Maximum pool size |
+| `orcher_db_connections_total` | Counter | Total connections created |
+| `orcher_db_pool_utilization_ratio` | Gauge | active / max (0.0–1.0) |
+| `orcher_db_pool_acquisitions_total` | Counter | Total pool acquisitions |
+| `orcher_db_pool_acquisition_timeouts_total` | Counter | Pool acquisition timeouts |
+| `orcher_db_pool_acquisition_duration_seconds` | Histogram | Time to acquire a connection from pool |
+| `orcher_db_query_duration_seconds` | Histogram | Query execution duration |
+| `orcher_db_queries_total` | Counter | Total queries executed |
+| `orcher_db_query_errors_total` | Counter | Total query errors |
+| `orcher_db_health_status` | Gauge | 1 = healthy, 0 = unhealthy |
+
+## Journal Cache Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `orcher_journal_cache_hits_total` | Counter | Cache hits |
+| `orcher_journal_cache_misses_total` | Counter | Cache misses (full DB load) |
+| `orcher_journal_cache_hit_ratio` | Gauge | Hit ratio (0.0–1.0) |
+| `orcher_journal_cache_incremental_loads_total` | Counter | Cache hit but needed DB load for new entries |
+| `orcher_journal_cache_incremental_entries_loaded` | Counter | Entries loaded incrementally |
+| `orcher_journal_cache_db_reads_avoided` | Counter | Database reads avoided due to cache |
+| `orcher_journal_cache_size` | Gauge | Number of cached journals |
+
+## Retry Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `orcher_retry_total_retries` | Counter | Total retry attempts |
+| `orcher_retry_by_attempt` | Counter | Retries broken down by attempt number |
+| `orcher_retry_successes_total` | Counter | Retries that succeeded |
+| `orcher_retry_exhausted_total` | Counter | Retries exhausted (moved to DLQ) |
+| `orcher_retry_success_rate` | Gauge | Retry success rate (0.0–1.0) |
+| `orcher_retry_average_per_task` | Gauge | Average retries per task |
+| `orcher_retry_backoff_duration_seconds` | Histogram | Backoff wait duration |
+
+## Dead Letter Queue Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `orcher_dlq_current_depth` | Gauge | Current DLQ depth |
+| `orcher_dlq_tasks_moved_total` | Counter | Tasks moved to DLQ |
+| `orcher_dlq_tasks_replayed_total` | Counter | Tasks replayed from DLQ |
+| `orcher_dlq_replay_failures_total` | Counter | DLQ replay failures |
+| `orcher_dlq_tasks_purged_total` | Counter | Tasks purged from DLQ |
+| `orcher_dlq_replay_success_rate` | Gauge | Replay success rate (0.0–1.0) |
+| `orcher_dlq_net_growth` | Gauge | Net DLQ growth (moved - replayed - purged) |
+
+## Orchestrator Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `orcher_orchestrator_active_workflows` | Gauge | Active workflows across all queues |
+| `orcher_orchestrator_active_tasks` | Gauge | Active tasks across all queues |
+| `orcher_orchestrator_tasks_submitted_total` | Counter | Tasks submitted by orchestrator |
+| `orcher_orchestrator_tasks_cancelled_total` | Counter | Tasks cancelled |
+| `orcher_orchestrator_workflows_paused_total` | Counter | Workflows paused |
+| `orcher_orchestrator_workflows_resumed_total` | Counter | Workflows resumed |
+| `orcher_orchestrator_workflows_cancelled_total` | Counter | Workflows cancelled |
+
+## Scheduler Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `orcher_scheduler_queue_size` | Gauge | Scheduled triggers waiting |
+| `orcher_scheduler_triggers_fired_total` | Counter | Total scheduled triggers fired |
+| `orcher_scheduler_next_fire_time` | Gauge | Next trigger time (epoch seconds) |
+
+## System Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `orcher_system_cpu_usage` | Gauge | CPU usage |
+| `orcher_system_memory_usage` | Gauge | Memory usage |
+| `orcher_system_disk_usage` | Gauge | Disk usage |
+| `orcher_system_network_io_bytes` | Counter | Network I/O bytes |
+
+---
+
+## Next Steps
+
+- [Prometheus Setup](/guides/observability/metrics/prometheus) — Scrape configuration and useful PromQL queries
+- [Alerting](/guides/observability/metrics/alerting) — Recommended alert rules
+- [Metrics Overview](/guides/observability/metrics) — Endpoint configuration

@@ -1,0 +1,95 @@
+---
+id: typescript-patterns
+title: Patterns
+description: Common workflow patterns with the TypeScript SDK — sagas, parallel tasks, fan-out with child workflows, approvals with deadlines, batching and starting work once
+sidebar_label: 'Patterns'
+---
+
+Patterns for common workflow shapes, written with the TypeScript SDK. The tasks they call are
+defined with `@Tasks()` classes and `createTaskRefs()`, as in [Tasks](/guides/sdk/typescript/tasks).
+
+---
+
+## Saga (Compensation)
+
+When a workflow books several things across services, a failure halfway must undo what was
+already done. The SDK's `Saga` keeps the list of compensations and runs them newest first:
+
+<$CodeSample path="typescript/src/patterns/saga.ts" region="saga" />
+
+The `isWorkflowSuspension(err)` check is not optional. Waiting for a task makes
+`ctx.executeTask()` throw a suspension, and a `catch` without the check would compensate
+on every wait: a healthy run would cancel its own bookings. Register each compensation only once
+its step has succeeded, so a failed step is never "undone".
+
+`saga.addStep(action, compensation)` runs a step and registers its compensation in one call. It
+compensates and re-throws when the step fails, and lets a suspension through:
+
+<$CodeSample path="typescript/src/patterns/saga.ts" region="add-step" />
+
+`compensate()` runs each compensation once. A compensation that fails is logged and skipped, and
+the rest still run. Compensations are ordinary tasks, so they are journaled and retried like any
+other; make them idempotent.
+
+---
+
+## Parallel Tasks
+
+Start independent tasks together and wait for all of them with `Promise.all`:
+
+<$CodeSample path="typescript/src/patterns/parallel.ts" region="parallel" />
+
+---
+
+## Fan-Out / Fan-In with Child Workflows
+
+For larger units of work, give each its own child workflow and journal. Start them all with
+`ctx.startChildWorkflow()`, then wait for their results:
+
+<$CodeSample path="typescript/src/patterns/parallel.ts" region="fan-out" />
+
+When you set child ids yourself, derive them from the parent's id as above, so two runs of the
+parent never ask for the same id.
+
+---
+
+## Approval with a Deadline
+
+Wait for a person's decision, escalate if it doesn't come in time, and let clients ask where the
+request stands:
+
+<$CodeSample path="typescript/src/patterns/approval.ts" region="approval" />
+
+The client side sends the decision with `handle.sendEvent('approval', { approved: true })`, and
+reads the status with `handle.query('status')`.
+
+---
+
+## Starting Work Once
+
+Use the business identity of the work as the workflow id, so a repeated request (a retried
+webhook, a double click) finds the run that is already going instead of starting a second one.
+See [starting a workflow once](/guides/sdk/typescript/client#starting-a-workflow-once) for the
+reuse policies and the sample.
+
+---
+
+## Batching
+
+Each task call is a journal entry and a round trip through the engine. When items are small and
+processed the same way, process them in batches:
+
+<$CodeSample path="typescript/src/patterns/parallel.ts" region="batch" />
+
+Keep every task input and result under the payload limit, 8 MiB on a default engine. For more
+data than that, store it elsewhere and pass references. For a workflow that loops for a long
+time, start a fresh journal now and then with
+[`ctx.restartFresh()`](/guides/sdk/typescript/workflows#restarting-with-a-fresh-journal).
+
+---
+
+## Next Steps
+
+- [Workflows](/guides/sdk/typescript/workflows): the `WorkflowContext` API
+- [Tasks](/guides/sdk/typescript/tasks): retries and idempotency
+- [Testing](/guides/sdk/typescript/testing): testing workflows with mocked tasks

@@ -1,0 +1,6 @@
+# What the Python samples are checked against (scripts/check-samples.sh).
+orcher-sdk==0.4.4
+mypy>=1.11
+# The testing guide's samples are pytest tests.
+pytest>=8
+pytest-asyncio>=0.23

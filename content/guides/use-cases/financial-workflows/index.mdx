@@ -1,0 +1,134 @@
+---
+id: 'financial-workflows'
+title: 'Payment Workflows & Financial Processing'
+description: 'Build reliable payment processing with Orcher. Handle transactions, refunds, fraud detection, and financial reconciliation with durable execution: each completed step is recorded once and never repeated on recovery.'
+sidebar_label: 'Payment Workflows'
+---
+
+Payment processing is where durable execution matters most — a crashed server mid-charge can mean a customer charged twice, an order stuck in limbo, or revenue lost to unreconciled transactions. Orcher journals every task's result, so a completed charge, refund or inventory operation is never repeated when a run recovers; the tasks pass idempotency keys so a retry after a crash can't repeat them either.
+
+### Charged once
+
+The nightmare scenario is a crash in the gap between charging the card and recording that you did. With journaled tasks the gap doesn't exist for the workflow: once `charge_payment` completes, its result is in the journal, and no replay will ever run it again.
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Crash After the Charge</div>
+  </div>
+  {[
+    { label: 'charge_payment', detail: '$49.00 captured — journaled', icon: '✓', state: 'done' },
+    { label: 'server crashes', detail: 'Before the confirmation email', icon: '✗', state: 'crash' },
+    { label: 'replay', detail: 'charge_payment returns the journaled charge — card not touched', icon: '↻', state: 'resume' },
+    { label: 'send_confirmation', detail: 'Resumes at the next unfinished step', icon: '✓', state: 'done' },
+  ].map((row, i, arr) => (
+    <div key={i}>
+      <div className={`px-4 py-2 flex items-center gap-3 ${row.state === 'crash' ? 'bg-red-500/5' : ''} ${row.state === 'resume' ? 'bg-surface-75' : ''}`}>
+        <span className={`w-5 h-5 flex items-center justify-center text-[10px] shrink-0 ${row.state === 'crash' ? 'text-red-400' : 'text-foreground-muted'}`}>{row.icon}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{row.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{row.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">The customer is charged once — no matter when or how often the process dies.</span>
+  </div>
+</div>
+
+### Rollback is a flow, not a scramble
+
+Multi-step money movement fails halfway: the charge succeeded, but inventory is gone or the shipping service is down. The saga pattern gives every step a compensating action, and the workflow runs them in reverse — automatically, with the same durability as the forward path.
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Saga Compensation</div>
+  </div>
+  {[
+    { label: 'charge_payment', detail: 'Completed — journaled', icon: '✓', state: 'done' },
+    { label: 'reserve_inventory', detail: 'Completed — journaled', icon: '✓', state: 'done' },
+    { label: 'create_shipment', detail: 'Fails — retries exhausted', icon: '✗', state: 'crash' },
+    { label: 'release_inventory', detail: 'Compensation — reverses step 2', icon: '↺', state: 'resume' },
+    { label: 'refund_payment', detail: 'Compensation — reverses step 1', icon: '↺', state: 'resume' },
+  ].map((row, i, arr) => (
+    <div key={i}>
+      <div className={`px-4 py-2 flex items-center gap-3 ${row.state === 'crash' ? 'bg-red-500/5' : ''} ${row.state === 'resume' ? 'bg-surface-75' : ''}`}>
+        <span className={`w-5 h-5 flex items-center justify-center text-[10px] shrink-0 ${row.state === 'crash' ? 'text-red-400' : 'text-foreground-muted'}`}>{row.icon}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{row.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{row.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Compensations are journaled tasks too — a crash mid-rollback resumes the rollback.</span>
+  </div>
+</div>
+
+### Waiting on the outside world
+
+Payments rarely finish in one pass. A transaction may pause for a fraud analyst's verdict, a webhook from the payment provider, or a 3-day retry schedule — and a workflow waiting on an event or timer is fully suspended, holding no resources until the answer arrives. See [Fraud Detection](/guides/use-cases/financial-workflows/fraud-detection) for event gates with timeouts and [Subscription Billing](/guides/use-cases/financial-workflows/subscription-billing) for retry schedules that span days.
+
+And because every step is journaled with its inputs, outputs, and timing, the journal is a record of what each payment did, produced by running it rather than by a separate logging system.
+
+---
+
+### Patterns
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/use-cases/financial-workflows/payment-processing" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors h-full">
+      <h3 className="text-lg font-semibold mb-2">Payment Processing</h3>
+      <p className="text-sm text-foreground-light">
+        Charge, reserve inventory, and send confirmations, with saga compensations you define to undo completed steps on failure.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/use-cases/financial-workflows/subscription-billing" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors h-full">
+      <h3 className="text-lg font-semibold mb-2">Subscription Billing</h3>
+      <p className="text-sm text-foreground-light">
+        Recurring billing with retry schedules spanning days, dunning emails, and automatic account suspension.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/use-cases/financial-workflows/fraud-detection" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors h-full">
+      <h3 className="text-lg font-semibold mb-2">Fraud Detection</h3>
+      <p className="text-sm text-foreground-light">
+        Auto-approve, auto-reject, or route to human review with configurable timeouts.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/use-cases/financial-workflows/refund-processing" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors h-full">
+      <h3 className="text-lg font-semibold mb-2">Refund Processing</h3>
+      <p className="text-sm text-foreground-light">
+        Reverse charges, return inventory, update ledgers, and notify customers as an independent workflow.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/use-cases/financial-workflows/best-practices" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors h-full">
+      <h3 className="text-lg font-semibold mb-2">Best Practices & Compliance</h3>
+      <p className="text-sm text-foreground-light">
+        Idempotency keys, retry policies, compliance audit trails, and performance guidance.
+      </p>
+    </div>
+  </Link>
+</div>

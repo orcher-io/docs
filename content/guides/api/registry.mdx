@@ -1,0 +1,123 @@
+---
+id: 'api-registry'
+title: 'Registry Endpoints'
+description: 'Register, deploy, and manage workflow definitions via the Orcher REST API'
+sidebar_label: 'Registry'
+---
+
+## Workflow Registration
+
+### Register Workflow
+
+```bash
+POST /api/v1/registry/workflows
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "name": "order_processing",
+  "version": "1.0.0",
+  "description": "Process customer orders",
+  "language": "rust",
+  "metadata": {
+    "author": "engineering@acme.com",
+    "tags": ["orders", "payments"]
+  }
+}
+```
+
+**Response:**
+
+```json
+{
+  "workflow_id": "wf_123",
+  "name": "order_processing",
+  "version": "1.0.0",
+  "status": "registered",
+  "registered_at": "2024-01-07T12:00:00Z"
+}
+```
+
+### Upload WASM Workflow
+
+```bash
+POST /api/v1/registry/workflows/wasm
+Authorization: Bearer <token>
+Content-Type: multipart/form-data
+
+# Upload a compiled WASM workflow binary
+```
+
+### List Registered Workflows
+
+```bash
+GET /api/v1/registry/workflows?limit=50
+Authorization: Bearer <token>
+```
+
+### Get Workflow Details
+
+```bash
+GET /api/v1/registry/workflows/:workflow_id
+Authorization: Bearer <token>
+```
+
+### Update Workflow
+
+```bash
+PUT /api/v1/registry/workflows/:workflow_id
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "description": "Updated description",
+  "metadata": {
+    "author": "engineering@acme.com",
+    "tags": ["orders", "payments", "v2"]
+  }
+}
+```
+
+### Delete Workflow
+
+```bash
+DELETE /api/v1/registry/workflows/:workflow_id
+Authorization: Bearer <token>
+```
+
+---
+
+## Deployment
+
+### Deploy Workflow
+
+Deploy a registered workflow to specific task queues, making it available for execution.
+
+```bash
+POST /api/v1/registry/workflows/:workflow_id/deploy
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "task_queues": ["orders", "payments"]
+}
+```
+
+---
+
+## Health
+
+### Registry Health Check
+
+```bash
+GET /api/v1/registry/health
+Authorization: Bearer <token>
+```
+
+---
+
+## Next Steps
+
+- [Workflow Endpoints](/guides/api/workflows) — Execute and monitor workflows
+- [Organizations](/guides/api/organizations) — Organization management
+- [Users](/guides/api/users) — User account management

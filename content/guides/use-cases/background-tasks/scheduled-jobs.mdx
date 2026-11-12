@@ -1,0 +1,257 @@
+---
+id: 'bg-scheduled-jobs'
+title: 'Scheduled Jobs with Recurring Workflows'
+sidebar_label: 'Scheduled Jobs'
+---
+
+Periodic tasks like daily reports, nightly syncs, and cache warming use a recurring workflow pattern: the workflow does its work, then sleeps until the next scheduled time using a durable timer. Unlike external cron schedulers, the sleep survives process restarts and cluster failovers — if the worker is down at the scheduled time, the job runs as soon as it comes back up.
+
+## How it works
+
+Orcher gives you two ways to run work on a schedule, and the right one depends on whether the runs need to remember each other. The mechanics of the timer loop — the suspended sleep, surviving deploys mid-sleep — are covered in [scheduled sync](/guides/use-cases/data-processing/scheduled-sync); this page focuses on the choice.
+
+<div className="not-prose my-8 max-w-lg mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Timer Loop vs. Schedule API</div>
+  </div>
+  <div className="grid grid-cols-2 gap-px bg-border-default">
+    <div className="bg-background px-4 py-3">
+      <div className="text-[10px] font-mono uppercase tracking-widest text-foreground-muted mb-2">Durable-timer loop</div>
+      <div className="text-xs font-medium text-foreground mb-1">One workflow that remembers</div>
+      <p className="m-0 text-[10px] text-foreground-muted leading-relaxed">State carries across iterations (watermarks, counters). Cadence is code, so it can be conditional. Serial by construction — a slow run delays the next, never overlaps it.</p>
+    </div>
+    <div className="bg-background px-4 py-3">
+      <div className="text-[10px] font-mono uppercase tracking-widest text-foreground-muted mb-2">Schedule API</div>
+      <div className="text-xs font-medium text-foreground mb-1">Fresh run per tick</div>
+      <p className="m-0 text-[10px] text-foreground-muted leading-relaxed">Cron expression + timezone, each tick starts a new execution. Pause, resume, and retune from the API without touching workers. Overlap is a policy: skip, queue, or allow.</p>
+    </div>
+  </div>
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Need memory between runs? Loop. Need wall-clock cron and ops control? Schedule.</span>
+  </div>
+</div>
+
+## Example: a recurring daily report
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="typescript"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use std::time::Duration;
+
+#[task]
+async fn collect_metrics() -> Result<MetricsData> {
+    let db_stats = db::query_daily_stats().await?;
+    let api_stats = monitoring::query_api_latency().await?;
+    Ok(MetricsData { db_stats, api_stats })
+}
+
+#[task]
+async fn generate_report(data: MetricsData) -> Result<ReportUrl> {
+    let pdf = report_builder::build_daily_report(&data)?;
+    storage::upload("reports", &pdf).await
+}
+
+#[task]
+async fn send_report_email(input: ReportEmailInput) -> Result<()> {
+    email_client::send(
+        &input.recipients,
+        "Daily Report",
+        &format!("Report available at: {}", input.report_url),
+    ).await
+}
+
+// Recurring daily report — runs once, sleeps 24h, repeats
+#[workflow(name = "daily_report", version = "1.0.0")]
+async fn daily_report(ctx: WorkflowContext, config: ReportConfig) -> Result<()> {
+    loop {
+        // Collect and generate
+        let data = ctx.execute_task(collect_metrics, ()).await?;
+        let report_url = ctx.execute_task(generate_report, data).await?;
+
+        // Distribute
+        ctx.execute_task(send_report_email, ReportEmailInput {
+            recipients: config.recipients.clone(),
+            report_url,
+        }).await?;
+
+        // Sleep until tomorrow 9 AM (durable timer)
+        ctx.sleep(Duration::from_secs(24 * 3600)).await?;
+    }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import {
+  Workflow,
+  Tasks,
+  Task,
+  WorkflowContext,
+  createTaskRefs,
+} from '@orcher/sdk';
+
+@Tasks()
+class ReportTasks {
+  @Task()
+  async collectMetrics(): Promise<MetricsData> {
+    const dbStats = await db.queryDailyStats();
+    const apiStats = await monitoring.queryApiLatency();
+    return { dbStats, apiStats };
+  }
+
+  @Task()
+  async generateReport(data: MetricsData): Promise<string> {
+    const pdf = reportBuilder.buildDailyReport(data);
+    return await storage.upload('reports', pdf);
+  }
+
+  @Task()
+  async sendReportEmail(input: ReportEmailInput): Promise<void> {
+    await emailClient.send(
+      input.recipients,
+      'Daily Report',
+      `Report available at: ${input.reportUrl}`,
+    );
+  }
+}
+
+const tasks = createTaskRefs(ReportTasks);
+
+// Recurring daily report — runs once, sleeps 24h, repeats
+@Workflow({ name: 'daily_report', version: '1.0.0' })
+class DailyReport {
+  async run(ctx: WorkflowContext, config: ReportConfig): Promise<void> {
+    while (true) {
+      // Collect and generate
+      const data = await ctx.executeTask(tasks.collectMetrics, undefined);
+      const reportUrl = await ctx.executeTask(tasks.generateReport, data);
+
+      // Distribute
+      await ctx.executeTask(tasks.sendReportEmail, {
+        recipients: config.recipients,
+        reportUrl,
+      });
+
+      // Sleep until tomorrow 9 AM (durable timer)
+      await ctx.sleep(24 * 60 * 60 * 1000);
+    }
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext
+
+@task
+async def collect_metrics() -> MetricsData:
+    db_stats = await db.query_daily_stats()
+    api_stats = await monitoring.query_api_latency()
+    return MetricsData(db_stats=db_stats, api_stats=api_stats)
+
+@task
+async def generate_report(data: MetricsData) -> str:
+    pdf = report_builder.build_daily_report(data)
+    return await storage.upload("reports", pdf)
+
+@task
+async def send_report_email(input: ReportEmailInput) -> None:
+    await email_client.send(
+        input.recipients,
+        "Daily Report",
+        f"Report available at: {input.report_url}",
+    )
+
+# Recurring daily report — runs once, sleeps 24h, repeats
+@workflow(name="daily_report", version="1.0.0")
+async def daily_report(ctx: WorkflowContext, config: ReportConfig) -> None:
+    while True:
+        # Collect and generate
+        data = await ctx.execute_task(collect_metrics, None)
+        report_url = await ctx.execute_task(generate_report, data)
+
+        # Distribute
+        await ctx.execute_task(send_report_email, ReportEmailInput(
+            recipients=config.recipients,
+            report_url=report_url,
+        ))
+
+        # Sleep until tomorrow 9 AM (durable timer)
+        await ctx.sleep(24 * 60 * 60 * 1000)
+```
+
+</TabPanel>
+
+</Tabs>
+
+Start this workflow once and it runs forever. The `ctx.sleep()` at the end of each iteration is a durable timer — if the worker restarts during the 24-hour wait, the timer picks up where it left off. You can also trigger an immediate run by starting a new workflow execution via the CLI: `orcher workflow run daily_report --input '{}'`.
+
+---
+
+## Alternative: Cron Schedules
+
+For standard cron jobs that don't need to carry state between iterations, use the [Schedule API](/guides/api/schedules) instead. Create a schedule via the REST API and the platform triggers new workflow executions on the cron cadence — no long-running workflow needed:
+
+```bash
+POST /api/v1/schedules
+{
+  "name": "nightly-report",
+  "cronExpression": "0 0 2 * * *",
+  "timezone": "UTC",
+  "taskTemplate": {
+    "workflowType": "daily_report",
+    "taskQueue": "reports",
+    "input": { "recipients": ["team@example.com"] }
+  },
+  "overlapPolicy": "skip"
+}
+```
+
+Schedules can be paused, resumed, and managed independently of worker deployments. Use the durable timer loop (above) when you need state across iterations or complex scheduling logic.
+
+## Design notes
+
+- **Fixed sleeps drift.** `sleep(24h)` fires 24 hours after the *work finishes*, not at the same time each day — a 5-minute report pushes every subsequent run 5 minutes later. To anchor to a wall-clock time, compute the delta to the next 9 AM before each sleep, or use the Schedule API's cron expression and timezone, which exist for exactly this.
+- **Bound the loop.** The example's `loop {}` runs forever, and every iteration appends journal entries. Stop after N iterations and restart with the final state — the same journal-growth reasoning as [scheduled sync](/guides/use-cases/data-processing/scheduled-sync).
+- **Overlap is impossible in the loop, a policy in the Schedule.** The loop can't start run N+1 before run N finishes — slow work delays the schedule but never doubles it. Schedule-API runs are independent, so say what you want: `"overlapPolicy": "skip"` drops a tick that would overlap a still-running job.
+- **Late beats lost.** If the platform is down at the scheduled moment, the timer fires on recovery and the run happens late — unlike cron, where a missed tick is simply gone. If a late report is worse than no report, check the time at the start of the run and skip when the window has passed.
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/use-cases/background-tasks/retry-backoff" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Retry with Backoff</h3>
+      <p className="text-sm text-foreground-light">
+        Exponential backoff for external API calls with journaled retry state.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/use-cases/background-tasks/content-processing" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Content Processing</h3>
+      <p className="text-sm text-foreground-light">
+        Multi-step file processing pipelines with parallel execution and checkpointing.
+      </p>
+    </div>
+  </Link>
+</div>

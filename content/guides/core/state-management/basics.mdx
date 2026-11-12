@@ -1,0 +1,229 @@
+---
+id: 'state-basics'
+title: 'Setting & Getting State'
+description: 'Learn how to set, get, and persist state values in Orcher workflows.'
+sidebar_label: 'Basics'
+---
+
+## Setting and Getting State
+
+The `WorkflowContext` provides `set_state()` and `get_state()` methods to store and retrieve typed values by string key. State values are JSON-serialized, so any serializable type can be stored.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[task]
+pub async fn process_payment(_ctx: TaskContext, amount: f64) -> Result<PaymentResult> {
+    // ...
+}
+
+#[workflow]
+pub async fn order_workflow(
+    ctx: WorkflowContext,
+    input: OrderInput,
+) -> Result<OrderResult> {
+    // Set state values
+    ctx.set_state("order_id", &input.order_id)?;
+    ctx.set_state("status", &"processing")?;
+    ctx.set_state("customer_id", &input.customer_id)?;
+
+    // Process order
+    let payment_result: PaymentResult = ctx
+        .execute_task(process_payment, input.amount)
+        .await?;
+
+    // Update state after task completes
+    ctx.set_state("payment_id", &payment_result.payment_id)?;
+    ctx.set_state("status", &"paid")?;
+
+    // Get state value
+    let current_status: Option<String> = ctx.get_state("status")?;
+    println!("Current status: {:?}", current_status);
+
+    Ok(OrderResult {
+        order_id: input.order_id,
+        payment_id: payment_result.payment_id,
+        status: current_status.unwrap_or_default(),
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, WorkflowContext, TaskContext, createTaskRefs } from '@orcher/sdk';
+
+@Tasks({ taskQueue: 'orders' })
+class OrderTasks {
+  @Task()
+  async processPayment(ctx: TaskContext, amount: number): Promise<PaymentResult> {
+    // ...
+  }
+}
+
+const tasks = createTaskRefs(OrderTasks);
+
+@Workflow()
+class OrderWorkflow {
+  async run(ctx: WorkflowContext, input: OrderInput): Promise<OrderResult> {
+    // Set state values
+    ctx.setState('orderId', input.orderId);
+    ctx.setState('status', 'processing');
+    ctx.setState('customerId', input.customerId);
+
+    // Process order
+    const paymentResult = await ctx.executeTask(tasks.processPayment, input.amount);
+
+    // Update state after task completes
+    ctx.setState('paymentId', paymentResult.paymentId);
+    ctx.setState('status', 'paid');
+
+    // Get state value
+    const currentStatus = ctx.getState<string>('status');
+    console.log('Current status:', currentStatus);
+
+    return {
+      orderId: input.orderId,
+      paymentId: paymentResult.paymentId,
+      status: currentStatus || '',
+    };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from dataclasses import dataclass
+from orcher import workflow, task, WorkflowContext, TaskContext
+
+
+@dataclass
+class OrderInput:
+    order_id: str
+    customer_id: str
+    amount: float
+
+
+@dataclass
+class OrderResult:
+    order_id: str
+    payment_id: str
+    status: str
+
+
+@task(name="process_payment")
+async def process_payment(ctx: TaskContext, amount: float) -> PaymentResult:
+    ...
+
+
+@workflow(name="order_workflow")
+async def order_workflow(ctx: WorkflowContext, input: OrderInput) -> OrderResult:
+    # Set state values
+    ctx.set_state("order_id", input.order_id)
+    ctx.set_state("status", "processing")
+    ctx.set_state("customer_id", input.customer_id)
+
+    # Process order
+    payment_result = await ctx.execute_task(process_payment, amount=input.amount)
+
+    # Update state after task completes
+    ctx.set_state("payment_id", payment_result.payment_id)
+    ctx.set_state("status", "paid")
+
+    # Get state value
+    current_status = ctx.get_state("status")
+    print(f"Current status: {current_status}")
+
+    return OrderResult(
+        order_id=input.order_id,
+        payment_id=payment_result.payment_id,
+        status=current_status or "",
+    )
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## State Lifecycle
+
+### State Persistence
+
+State is stored in-memory during workflow execution and reconstructed from the journal on replay. This means state values set before a crash are available after the workflow resumes — the replay re-executes the workflow code, and `set_state()` calls run again with the same deterministic values.
+
+1. **After `set_state()` calls** — Value is stored in the in-memory state map
+2. **After task completions** — The completed task result is journaled; on replay, the same result is returned and the subsequent `set_state()` calls produce identical state
+3. **On crash/restart** — The journal is replayed, reconstructing the same state
+4. **During replay** — `set_state()` calls execute normally but produce the same values because the workflow is deterministic
+
+### State During Replay
+
+The diagram below shows how state is consistent across first execution and replay. Since workflows are deterministic and task results are journaled, every `set_state()` call produces the same value on replay.
+
+<div className="not-prose my-8 max-w-2xl mx-auto">
+  <div className="grid grid-cols-2 gap-px bg-border-default border">
+    <div className="bg-surface-75 p-3">
+      <div className="text-[10px] font-mono uppercase tracking-wide text-foreground-muted mb-2">First execution</div>
+      <div className="space-y-1.5 text-[11px]">
+        <div><span className="font-mono text-foreground">set_state("order_id", "order_123")</span><br /><span className="text-foreground-muted">stored in memory</span></div>
+        <div><span className="font-mono text-foreground">set_state("status", "processing")</span><br /><span className="text-foreground-muted">stored in memory</span></div>
+        <div><span className="font-mono text-foreground">execute_task("process_payment")</span><br /><span className="text-foreground-muted">task executes → result journaled</span></div>
+        <div><span className="font-mono text-foreground">set_state("payment_id", "pay_456")</span><br /><span className="text-foreground-muted">stored in memory</span></div>
+        <div><span className="font-mono text-foreground">set_state("status", "paid")</span><br /><span className="text-foreground-muted">stored in memory</span></div>
+      </div>
+    </div>
+    <div className="bg-background p-3">
+      <div className="text-[10px] font-mono uppercase tracking-wide text-foreground-muted mb-2">Replay after crash</div>
+      <div className="space-y-1.5 text-[11px]">
+        <div><span className="font-mono text-foreground">set_state("order_id", "order_123")</span><br /><span className="text-foreground-muted">same value · deterministic</span></div>
+        <div><span className="font-mono text-foreground">set_state("status", "processing")</span><br /><span className="text-foreground-muted">same value · deterministic</span></div>
+        <div><span className="font-mono text-foreground">execute_task("process_payment")</span><br /><span className="text-foreground-muted">skipped → returns journaled result</span></div>
+        <div><span className="font-mono text-foreground">set_state("payment_id", "pay_456")</span><br /><span className="text-foreground-muted">same value · from journaled result</span></div>
+        <div><span className="font-mono text-foreground">set_state("status", "paid")</span><br /><span className="text-foreground-muted">same value · deterministic</span></div>
+      </div>
+    </div>
+  </div>
+  <p className="text-xs text-foreground-muted text-center mt-2">Every <span className="font-mono">set_state()</span> produces the same value on replay — state stays consistent across crashes.</p>
+</div>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/state-management" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">State Management Overview</h3>
+      <p className="text-sm text-foreground-light">
+        Return to the state management overview
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/state-management/patterns" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">State Patterns</h3>
+      <p className="text-sm text-foreground-light">
+        Common patterns for progress tracking, status machines, and querying state
+      </p>
+    </div>
+  </Link>
+</div>

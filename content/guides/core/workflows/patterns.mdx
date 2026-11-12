@@ -1,0 +1,506 @@
+---
+id: 'workflows-patterns'
+title: 'Common Patterns'
+description: 'Sequential, parallel, conditional, loop, and error handling patterns for workflows.'
+sidebar_label: 'Patterns'
+---
+
+### Sequential Execution
+
+The simplest pattern: execute tasks one after another, where each step depends on the previous one completing. If any step fails, the workflow stops at that point (unless you handle the error). On replay, completed steps are skipped automatically.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[workflow(
+    name = "sequential_workflow",
+    version = "1.0.0"
+)]
+pub async fn sequential_workflow(
+    ctx: WorkflowContext,
+    order_id: String,
+) -> Result<OrderResult> {
+    // Step 1: Process payment
+    let payment: PaymentResult = ctx
+        .execute_task(process_payment, order_id.clone())
+        .await?;
+
+    // Step 2: Reserve inventory (only after payment succeeds)
+    let inventory: InventoryResult = ctx
+        .execute_task(reserve_inventory, order_id.clone())
+        .await?;
+
+    // Step 3: Arrange shipment (only after inventory reserved)
+    let shipment: ShipmentResult = ctx
+        .execute_task(arrange_shipment, order_id.clone())
+        .await?;
+
+    Ok(OrderResult {
+        payment_id: payment.id,
+        tracking_number: shipment.tracking,
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, WorkflowContext, createTaskRefs } from '@orcher/sdk';
+import { OrderTasks } from '../tasks/order.tasks';
+
+const orderTasks = createTaskRefs(OrderTasks);
+
+@Workflow({ name: 'sequential_workflow', version: '1.0.0' })
+export class SequentialWorkflow {
+  async run(ctx: WorkflowContext, orderId: string): Promise<OrderResult> {
+    // Step 1: Process payment
+    const payment = await ctx.executeTask(
+      orderTasks.processPayment, { orderId }
+    );
+
+    // Step 2: Reserve inventory (only after payment succeeds)
+    const inventory = await ctx.executeTask(
+      orderTasks.reserveInventory, { orderId }
+    );
+
+    // Step 3: Arrange shipment (only after inventory reserved)
+    const shipment = await ctx.executeTask(
+      orderTasks.arrangeShipment, { orderId }
+    );
+
+    return {
+      paymentId: payment.id,
+      trackingNumber: shipment.tracking,
+    };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, WorkflowContext
+
+@workflow(name="sequential_workflow", version="1.0")
+async def sequential_workflow(ctx: WorkflowContext, order_id: str) -> dict:
+    # Step 1: Process payment
+    payment = await ctx.execute_task(process_payment, order_id=order_id)
+
+    # Step 2: Reserve inventory (only after payment succeeds)
+    inventory = await ctx.execute_task(reserve_inventory, order_id=order_id)
+
+    # Step 3: Arrange shipment (only after inventory reserved)
+    shipment = await ctx.execute_task(arrange_shipment, order_id=order_id)
+
+    return {
+        "payment_id": payment["id"],
+        "tracking_number": shipment["tracking"],
+    }
+```
+
+</TabPanel>
+
+</Tabs>
+
+### Parallel Execution
+
+When tasks are independent of each other, you can execute them concurrently to reduce total execution time. Orcher journals each task independently, so if the workflow crashes after two of three parallel tasks complete, only the incomplete task re-executes on replay.
+
+Use your language's native concurrency primitives (`tokio::try_join!` in Rust, `Promise.all` in TypeScript, `asyncio.gather` in Python) to run multiple context calls simultaneously.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[workflow(
+    name = "parallel_workflow",
+    version = "1.0.0"
+)]
+pub async fn parallel_workflow(
+    ctx: WorkflowContext,
+    order_id: String,
+) -> Result<OrderResult> {
+    // Execute multiple tasks in parallel
+    let (validation, inventory, credit_check) = tokio::try_join!(
+        ctx.execute_task::<_, _, ValidationResult>(validate_order, order_id.clone()),
+        ctx.execute_task::<_, _, InventoryResult>(check_inventory, order_id.clone()),
+        ctx.execute_task::<_, _, CreditResult>(check_credit, order_id.clone()),
+    )?;
+
+    // Process after all parallel tasks complete
+    let payment: PaymentResult = ctx
+        .execute_task(process_payment, order_id)
+        .await?;
+
+    Ok(OrderResult {
+        validated: validation.valid,
+        payment_id: payment.id,
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, WorkflowContext, createTaskRefs } from '@orcher/sdk';
+import { OrderTasks } from '../tasks/order.tasks';
+
+const orderTasks = createTaskRefs(OrderTasks);
+
+@Workflow({ name: 'parallel_workflow', version: '1.0.0' })
+export class ParallelWorkflow {
+  async run(ctx: WorkflowContext, orderId: string): Promise<OrderResult> {
+    // Execute multiple tasks in parallel
+    const [validation, inventory, creditCheck] = await Promise.all([
+      ctx.executeTask(orderTasks.validateOrder, { orderId }),
+      ctx.executeTask(orderTasks.checkInventory, { orderId }),
+      ctx.executeTask(orderTasks.checkCredit, { orderId }),
+    ]);
+
+    // Process after all parallel tasks complete
+    const payment = await ctx.executeTask(
+      orderTasks.processPayment, { orderId }
+    );
+
+    return {
+      validated: validation.valid,
+      paymentId: payment.id,
+    };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+import asyncio
+from orcher import workflow, WorkflowContext
+
+@workflow(name="parallel_workflow", version="1.0")
+async def parallel_workflow(ctx: WorkflowContext, order_id: str) -> dict:
+    # Execute multiple tasks in parallel
+    validation, inventory, credit_check = await asyncio.gather(
+        ctx.execute_task(validate_order, order_id=order_id),
+        ctx.execute_task(check_inventory, order_id=order_id),
+        ctx.execute_task(check_credit, order_id=order_id),
+    )
+
+    # Process after all parallel tasks complete
+    payment = await ctx.execute_task(process_payment, order_id=order_id)
+
+    return {
+        "validated": validation["valid"],
+        "payment_id": payment["id"],
+    }
+```
+
+</TabPanel>
+
+</Tabs>
+
+### Conditional Logic
+
+Workflows can branch based on task results. Because the branching decision is based on a journaled value (the task result), replay will take the same branch — the determinism requirement is satisfied.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+  <TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[workflow(
+    name = "conditional_workflow",
+    version = "1.0.0"
+)]
+pub async fn conditional_workflow(
+    ctx: WorkflowContext,
+    order_id: String,
+) -> Result<String> {
+    let validation: ValidationResult = ctx
+        .execute_task(validate_order, order_id.clone())
+        .await?;
+
+    if validation.is_valid {
+        ctx.execute_task(process_order, order_id).await?;
+        Ok("Processed".to_string())
+    } else {
+        ctx.execute_task(reject_order, order_id).await?;
+        Ok("Rejected".to_string())
+    }
+}
+```
+
+  </TabPanel>
+  <TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, WorkflowContext, createTaskRefs } from '@orcher/sdk';
+import { OrderTasks } from '../tasks/order.tasks';
+
+const orderTasks = createTaskRefs(OrderTasks);
+
+@Workflow({ name: 'conditional_workflow', version: '1.0.0' })
+export class ConditionalWorkflow {
+  async run(ctx: WorkflowContext, orderId: string): Promise<string> {
+    const validation = await ctx.executeTask(
+      orderTasks.validateOrder, { orderId }
+    );
+
+    if (validation.isValid) {
+      await ctx.executeTask(orderTasks.processOrder, { orderId });
+      return 'Processed';
+    } else {
+      await ctx.executeTask(orderTasks.rejectOrder, { orderId });
+      return 'Rejected';
+    }
+  }
+}
+```
+
+  </TabPanel>
+  <TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, WorkflowContext
+
+@workflow(name="conditional_workflow", version="1.0")
+async def conditional_workflow(ctx: WorkflowContext, order_id: str) -> str:
+    validation = await ctx.execute_task(validate_order, order_id=order_id)
+
+    if validation["is_valid"]:
+        await ctx.execute_task(process_order, order_id=order_id)
+        return "Processed"
+    else:
+        await ctx.execute_task(reject_order, order_id=order_id)
+        return "Rejected"
+```
+
+  </TabPanel>
+</Tabs>
+
+### Loops
+
+Workflows can iterate over collections. Each iteration's task call gets its own journal entry based on its sequence number, so if a workflow crashes on iteration 50 of 100, it replays the first 50 results from the journal and continues from iteration 51.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+  <TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[workflow(
+    name = "batch_workflow",
+    version = "1.0.0"
+)]
+pub async fn batch_workflow(
+    ctx: WorkflowContext,
+    items: Vec<String>,
+) -> Result<Vec<String>> {
+    let mut results = Vec::new();
+
+    for item in items {
+        let result: String = ctx
+            .execute_task(process_item, item)
+            .await?;
+        results.push(result);
+    }
+
+    Ok(results)
+}
+```
+
+  </TabPanel>
+  <TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, WorkflowContext, createTaskRefs } from '@orcher/sdk';
+import { ItemTasks } from '../tasks/item.tasks';
+
+const itemTasks = createTaskRefs(ItemTasks);
+
+@Workflow({ name: 'batch_workflow', version: '1.0.0' })
+export class BatchWorkflow {
+  async run(ctx: WorkflowContext, items: string[]): Promise<string[]> {
+    const results: string[] = [];
+
+    for (const item of items) {
+      const result = await ctx.executeTask(itemTasks.processItem, { item });
+      results.push(result);
+    }
+
+    return results;
+  }
+}
+```
+
+  </TabPanel>
+  <TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, WorkflowContext
+
+@workflow(name="batch_workflow", version="1.0")
+async def batch_workflow(ctx: WorkflowContext, items: list[str]) -> list[str]:
+    results = []
+
+    for item in items:
+        result = await ctx.execute_task(process_item, item=item)
+        results.append(result)
+
+    return results
+```
+
+  </TabPanel>
+</Tabs>
+
+---
+
+## Error Handling
+
+When a task fails (throws an exception or returns an error), the error propagates to the workflow. You can catch errors and run **compensation logic** — tasks that undo or clean up the effects of previously completed steps. This is the foundation of the **Saga pattern**, where a multi-step process is made reliable by pairing each step with a compensating action.
+
+The compensation tasks themselves are also journaled, so if the workflow crashes during compensation, it resumes compensation from where it left off.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+  <TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[workflow(
+    name = "error_handling_workflow",
+    version = "1.0.0"
+)]
+pub async fn error_handling_workflow(
+    ctx: WorkflowContext,
+    order_id: String,
+) -> Result<String> {
+    // Try to process payment
+    let payment_result = ctx
+        .execute_task::<_, _, PaymentResult>(process_payment, order_id.clone())
+        .await;
+
+    match payment_result {
+        Ok(payment) => {
+            // Payment succeeded, continue
+            ctx.execute_task(fulfill_order, order_id).await?;
+            Ok(format!("Success: {}", payment.id))
+        }
+        Err(e) => {
+            // Payment failed, run compensation
+            ctx.execute_task(send_failure_notification, order_id).await?;
+            Err(e)
+        }
+    }
+}
+```
+
+  </TabPanel>
+  <TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, WorkflowContext, createTaskRefs } from '@orcher/sdk';
+import { PaymentTasks } from '../tasks/payment.tasks';
+
+const paymentTasks = createTaskRefs(PaymentTasks);
+
+@Workflow({ name: 'error_handling_workflow', version: '1.0.0' })
+export class ErrorHandlingWorkflow {
+  async run(ctx: WorkflowContext, orderId: string): Promise<string> {
+    // Try to process payment
+    try {
+      const payment = await ctx.executeTask(
+        paymentTasks.processPayment, { orderId }
+      );
+
+      // Payment succeeded, continue
+      await ctx.executeTask(paymentTasks.fulfillOrder, { orderId });
+      return `Success: ${payment.id}`;
+    } catch (e) {
+      // Payment failed, run compensation
+      await ctx.executeTask(paymentTasks.sendFailureNotification, { orderId });
+      throw e;
+    }
+  }
+}
+```
+
+  </TabPanel>
+  <TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, WorkflowContext
+
+@workflow(name="error_handling_workflow", version="1.0")
+async def error_handling_workflow(ctx: WorkflowContext, order_id: str) -> str:
+    # Try to process payment
+    try:
+        payment = await ctx.execute_task(process_payment, order_id=order_id)
+
+        # Payment succeeded, continue
+        await ctx.execute_task(fulfill_order, order_id=order_id)
+        return f"Success: {payment['id']}"
+    except Exception as e:
+        # Payment failed, run compensation
+        await ctx.execute_task(send_failure_notification, order_id=order_id)
+        raise
+```
+
+  </TabPanel>
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/workflows/lifecycle" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Versioning, Lifecycle & Queries</h3>
+      <p className="text-sm text-foreground-light">
+        Manage workflow versions, understand lifecycle states, and query workflows
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/workflows/best-practices" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Best Practices</h3>
+      <p className="text-sm text-foreground-light">
+        Guidelines for writing maintainable, reliable, and performant workflows
+      </p>
+    </div>
+  </Link>
+</div>

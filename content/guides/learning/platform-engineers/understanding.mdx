@@ -1,0 +1,396 @@
+---
+id: platform-engineers-understanding
+title: "Understanding the System"
+description: "Orcher's two-component architecture, how work flows through the system, and operational advantages"
+sidebar_label: 'Understanding'
+---
+
+Before you deploy anything, you need a mental model of how Orcher works at the infrastructure level.
+
+## The Two-Component Architecture
+
+Orcher has exactly two components:
+
+1. **Application Processes** (stateless, horizontally scalable)
+2. **PostgreSQL Database** (stateful, your only persistence layer)
+
+That's it. No queues, no schedulers, no caches, no coordinators. Let's understand each.
+
+#### Component 1: Application Processes
+
+Your application is a standard process (binary, container, whatever) that embeds the Orcher runtime. Think of Orcher as a library, not a separate service.
+
+**Anatomy of an Application Process:**
+
+Your application process has three layers:
+
+**Layer 1 — Business Logic** (Your Code)
+- API handlers (e.g., `POST /api/orders`)
+- Workflow definitions
+- Task implementations
+- Database models
+
+**Layer 2 — Orcher Runtime** (Embedded Library)
+- Workflow executor engine
+- Journal reader/writer
+- Queue poller (polls DB for work)
+- Retry coordinator
+
+**Layer 3 — Database Driver** (SQLx, pg, etc.)
+- Connects to PostgreSQL for all state management
+
+**Critical Characteristics:**
+
+**Stateless**: The application process keeps zero persistent state. You can kill it at any time and start a new one. The new instance picks up exactly where the old one left off by reading from the database.
+
+*Why this matters*: Stateless apps are the easiest thing to operate. They scale horizontally (just add instances). They're easy to update (rolling deployment). They're easy to debug (no local state to inspect).
+
+**Mode Agnostic**: The same binary can run in "API mode" (serving HTTP requests) or "worker mode" (executing workflows). You just set an environment variable.
+
+*Why this matters*: You build one Docker image, deploy it twice. API mode handles inbound traffic. Worker mode processes the queue. Same code, different configuration.
+
+**No Coordination**: Application instances don't know about each other. They don't elect leaders, they don't gossip, they don't coordinate. Each instance independently polls the database for work.
+
+*Why this matters*: No split-brain scenarios. No quorum requirements. No consensus protocols. If two instances try to grab the same work, PostgreSQL's `FOR UPDATE SKIP LOCKED` ensures only one gets it.
+
+**Fast Startup**: No warm-up period, no cache priming, no leader election. An instance starts and is immediately productive.
+
+*Why this matters*: Auto-scaling is fast. Deployments are fast. Recovery from crashes is fast.
+
+#### Component 2: PostgreSQL Database
+
+PostgreSQL is your entire state layer. Everything is here.
+
+**What's Stored:**
+
+```sql
+-- 1. Workflow Queue (pending work)
+CREATE TABLE workflow_queue (
+  id UUID PRIMARY KEY,
+  workflow_name TEXT NOT NULL,        -- e.g., "process_payment"
+  input JSONB,                        -- workflow input data
+  status TEXT NOT NULL,               -- 'pending', 'running', 'completed', 'failed'
+  retry_count INT DEFAULT 0,
+  next_retry_at TIMESTAMP,            -- for exponential backoff
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW(),
+  completed_at TIMESTAMP
+);
+
+-- 2. Workflow Journal (execution history)
+CREATE TABLE workflow_execution_journal (
+  workflow_id UUID NOT NULL,
+  step_id INT NOT NULL,               -- sequential step number
+  task_name TEXT NOT NULL,            -- e.g., "charge_stripe"
+  input JSONB,                        -- task input
+  output JSONB,                       -- task output (cached result)
+  status TEXT NOT NULL,               -- 'completed', 'failed'
+  error TEXT,                         -- error message if failed
+  created_at TIMESTAMP DEFAULT NOW(),
+  PRIMARY KEY (workflow_id, step_id)
+);
+
+-- 3. Your Application Data
+-- (whatever tables your app needs)
+CREATE TABLE orders (...);
+CREATE TABLE users (...);
+-- etc.
+```
+
+**Critical Characteristics:**
+
+**Single Source of Truth**: All state is here. If you want to know if a workflow completed, query this database. No need to check a queue, a cache, and a state store.
+
+*Why this matters*: Debugging is simple. Backup is simple. Disaster recovery is simple. You have one system to understand.
+
+**ACID Guarantees**: Workflow state changes are transactional. Either a step fully completes and is journaled, or it doesn't. No partial states.
+
+*Why this matters*: You can't have a workflow that charged a credit card but didn't record it. Either both happen (transaction commits) or neither happens (transaction rolls back).
+
+**Standard PostgreSQL**: This isn't some custom database. It's PostgreSQL. You already know how to operate it.
+
+*Why this matters*: Use your existing tools (pg_dump, pgAdmin, AWS RDS). Use your existing expertise. Use your existing monitoring. Use your existing backup strategy.
+
+**The Queue Is Just a Table**: There's no separate queue service. Workers poll `SELECT ... FROM workflow_queue WHERE status = 'pending' ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1`.
+
+*Why this matters*: No queue-specific problems. No queue backpressure issues. No queue rebalancing. It's just SELECT queries, which PostgreSQL is very good at.
+
+## How Work Flows Through the System
+
+Let's trace a complete workflow execution to see how the pieces interact.
+
+**Scenario**: A user places an order on your e-commerce site. The order needs to charge payment, update inventory, and send confirmation. Here's the whole lifecycle at a glance before we walk each step in detail — notice that PostgreSQL is the only thing every actor talks to:
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">A Workflow's Lifecycle</div>
+  </div>
+  {[
+    { who: 'API', label: 'enqueue', detail: 'INSERT into workflow_queue → returns 202 in ~15ms', state: '' },
+    { who: 'Worker', label: 'claim', detail: 'poll with FOR UPDATE SKIP LOCKED → status = running', state: '' },
+    { who: 'Worker', label: 'execute + journal', detail: 'each task result INSERTed into workflow_execution_journal', state: '' },
+    { who: 'Worker', label: 'complete', detail: 'status = completed', state: 'done' },
+    { who: 'if crash', label: 'left running', detail: 'no worker updates the row', state: 'crash' },
+    { who: 'Any Worker', label: 'reclaim', detail: 'stale running row (> 5 min) is picked up; journal replays finished steps', state: 'resume' },
+  ].map((row, i, arr) => (
+    <div key={i}>
+      <div className={`px-4 py-2 flex items-center gap-3 ${row.state === 'crash' ? 'bg-red-500/5' : ''} ${row.state === 'resume' ? 'bg-surface-75' : ''}`}>
+        <span className={`text-[9px] font-mono uppercase tracking-wider w-[4.4rem] shrink-0 text-right ${row.state === 'crash' ? 'text-red-400' : 'text-foreground-muted'}`}>{row.who}</span>
+        <div className="w-px self-stretch bg-border-strong" />
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{row.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{row.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-[5rem]">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">No scheduler, no broker — the queue and the journal are both just Postgres tables.</span>
+  </div>
+</div>
+
+#### Step 1: API Request (Workflow Creation)
+
+```text
+User Browser
+    ↓
+   HTTP POST /api/orders
+    ↓
+Load Balancer
+    ↓
+API Pod (any instance)
+    ↓
+  [Business logic validates the order]
+    ↓
+  [Call: orcher.start_workflow("process_order", order_data)]
+    ↓
+PostgreSQL
+  INSERT INTO workflow_queue (
+    id, workflow_name, input, status, created_at
+  ) VALUES (
+    'wf_abc123', 'process_order', '{"order_id": "..."}', 'pending', NOW()
+  );
+    ↓
+API Pod
+    ↓
+  [Return HTTP 202 Accepted with workflow_id]
+    ↓
+User Browser (gets {"workflow_id": "wf_abc123"})
+```
+
+**Timeline**: This entire flow takes 10-20 milliseconds.
+
+**Key Points**:
+- The API doesn't execute the workflow. It just enqueues it (inserts a row).
+- The response is immediate. The user doesn't wait for the workflow.
+- Any API instance can handle this. No routing or coordination needed.
+- If the API pod crashes after the INSERT, the workflow is safe in the database.
+
+#### Step 2: Worker Polls for Work
+
+```text
+Worker Pod (background loop)
+    ↓
+  [Every 100ms, poll for work]
+    ↓
+PostgreSQL Query:
+  SELECT * FROM workflow_queue
+  WHERE status = 'pending'
+    AND (next_retry_at IS NULL OR next_retry_at <= NOW())
+  ORDER BY created_at ASC
+  FOR UPDATE SKIP LOCKED
+  LIMIT 1;
+    ↓
+PostgreSQL Returns: workflow_id 'wf_abc123'
+    ↓
+Worker Pod
+    ↓
+  UPDATE workflow_queue
+  SET status = 'running', updated_at = NOW()
+  WHERE id = 'wf_abc123';
+```
+
+**Timeline**: The SELECT + UPDATE takes 2-5 milliseconds.
+
+**Key Points**:
+- `FOR UPDATE SKIP LOCKED` is the magic. If another worker is checking the same row, it's skipped. No conflicts.
+- The worker "claims" the workflow by updating the status to 'running'.
+- If the worker crashes before updating, the workflow remains 'pending' and another worker will pick it up.
+- Polling every 100ms means workflows start within 100ms of being enqueued.
+
+#### Step 3: Workflow Execution
+
+```text
+Worker Pod
+    ↓
+  [Load workflow definition for "process_order"]
+    ↓
+  [Check journal for existing steps]
+    SELECT * FROM workflow_execution_journal WHERE workflow_id = 'wf_abc123';
+  (empty result - this is a new workflow)
+    ↓
+  [Execute task 1: charge_payment]
+    ↓
+  [Call Stripe API to charge card]
+  Stripe returns: {"charge_id": "ch_xyz", "status": "succeeded"}
+    ↓
+  INSERT INTO workflow_execution_journal (
+    workflow_id, step_id, task_name, input, output, status, created_at
+  ) VALUES (
+    'wf_abc123', 1, 'charge_payment', '{"amount": 5000}', '{"charge_id": "ch_xyz"}', 'completed', NOW()
+  );
+    ↓
+  [Execute task 2: update_inventory]
+    ↓
+  [Call inventory service]
+  Inventory service returns: {"reserved": true}
+    ↓
+  INSERT INTO workflow_execution_journal (
+    workflow_id, step_id, task_name, input, output, status, created_at
+  ) VALUES (
+    'wf_abc123', 2, 'update_inventory', '{"order_id": "..."}', '{"reserved": true}', 'completed', NOW()
+  );
+    ↓
+  [Execute task 3: send_confirmation_email]
+    ↓
+  [Call email service]
+    ↓
+  INSERT INTO workflow_execution_journal (...);
+    ↓
+  [All tasks complete]
+    ↓
+  UPDATE workflow_queue
+  SET status = 'completed', completed_at = NOW()
+  WHERE id = 'wf_abc123';
+```
+
+**Timeline**: This varies based on the tasks. Let's say 500ms total (300ms for Stripe, 100ms for inventory, 100ms for email).
+
+**Key Points**:
+- Each task execution is immediately journaled before moving to the next.
+- If the worker crashes after task 1, the journal has task 1's result. On retry, task 1 returns the cached result instantly.
+- The workflow code looks like normal sequential code, but it's durable.
+- The database commits each journal entry independently. ACID guarantees no partial states.
+
+#### Step 4: Failure Scenario (What If the Worker Crashes?)
+
+Let's say the worker crashes after completing task 1 (charge_payment) but before starting task 2.
+
+```text
+Worker Pod
+    ↓
+  [Completes task 1: charge_payment]
+    ↓
+  INSERT INTO workflow_execution_journal (step_id = 1, status = 'completed');
+    ↓
+  [Worker crashes - pod evicted, out of memory, network issue, etc.]
+    ↓
+  [workflow_queue.status is still 'running']
+  [workflow_execution_journal has 1 entry for step 1]
+```
+
+**What happens next?**
+
+After a timeout (configurable, default 5 minutes), the workflow is marked as stale:
+
+```text
+Another Worker Pod (or the same one restarted)
+    ↓
+  [Polls for work]
+    ↓
+  SELECT * FROM workflow_queue
+  WHERE status = 'running'
+    AND updated_at < NOW() - INTERVAL '5 minutes';
+  (finds 'wf_abc123')
+    ↓
+  UPDATE workflow_queue
+  SET status = 'pending', retry_count = retry_count + 1
+  WHERE id = 'wf_abc123';
+    ↓
+  [Another poll loop picks it up]
+    ↓
+  [Load workflow definition]
+    ↓
+  [Check journal]
+    SELECT * FROM workflow_execution_journal WHERE workflow_id = 'wf_abc123';
+  (finds step 1: charge_payment, status = 'completed')
+    ↓
+  [Replay step 1 from journal - return cached result]
+  (no Stripe API call, no duplicate charge!)
+    ↓
+  [Execute step 2: update_inventory - first time]
+    ↓
+  [Execute step 3: send_confirmation_email]
+    ↓
+  [Mark completed]
+```
+
+**Timeline**: The retry happens 5 minutes after the crash. Execution resumes and completes in ~200ms (no re-execution of step 1).
+
+**Key Points**:
+- The charge was not repeated (step 1's journaled result was reused).
+- No manual intervention required. The system self-healed.
+- The journal provides automatic idempotency.
+- From the user's perspective, the workflow just completed (with a 5-minute delay).
+
+## Why This Architecture Works for Operations
+
+**Simplicity Enables Reliability**
+
+Traditional orchestration platforms fail in complex ways because they have many failure modes. Orcher fails in simple ways:
+
+1. **App crashes**: Kubernetes restarts it. Workflows resume from journal.
+2. **Database goes down**: Apps wait. When DB comes back, everything resumes.
+3. **Network partition**: Apps can't reach DB, so they wait. When connectivity returns, everything resumes.
+
+That's it. Three failure modes. Compare to traditional platforms with dozens.
+
+**Observability Is Built-In**
+
+Want to know what's happening? Query the database:
+
+```sql
+-- How many workflows are pending?
+SELECT COUNT(*) FROM workflow_queue WHERE status = 'pending';
+
+-- What's taking so long?
+SELECT workflow_name, AVG(EXTRACT(EPOCH FROM (completed_at - created_at))) as avg_duration
+FROM workflow_queue
+WHERE status = 'completed'
+  AND completed_at > NOW() - INTERVAL '1 hour'
+GROUP BY workflow_name;
+
+-- Show me the failed workflows
+SELECT id, workflow_name, retry_count, updated_at
+FROM workflow_queue
+WHERE status = 'failed'
+ORDER BY updated_at DESC;
+```
+
+No custom UIs, no special tools. Just SQL.
+
+**Scaling Is Simple**
+
+Need more throughput? Add worker pods. Need to scale down? Remove worker pods. No rebalancing, no coordination, no complicated procedures.
+
+```bash
+# Scale up
+kubectl scale deployment orcher-worker --replicas=20
+
+# Scale down
+kubectl scale deployment orcher-worker --replicas=5
+```
+
+Orcher's architecture makes operations straightforward by removing complexity. That's the fundamental insight.
+
+---
+
+## Next Steps
+
+- [Deploying to Production](/guides/learning/platform-engineers/deploying) — Kubernetes, database, HA
+- [Back to Overview](/guides/learning/platform-engineers)

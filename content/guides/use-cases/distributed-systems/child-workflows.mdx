@@ -1,0 +1,391 @@
+---
+id: 'distributed-child-workflows'
+title: 'Child Workflows for Service Composition'
+sidebar_label: 'Child Workflows'
+---
+
+Child workflows let you break complex orchestrations into smaller, independently testable components. Each child runs with its own execution context and lifecycle — if a child fails, the parent can catch the error, try a fallback, or compensate. This pattern maps naturally to microservice boundaries: one child workflow per service domain (payments, inventory, shipping), composed by a parent that coordinates the overall transaction.
+
+## How it works
+
+The parent reads like a function calling functions — and that's the point. Each `start_child_workflow(...)` here is awaited before the next begins, because the phases depend on each other: no payment without a reservation, no shipment without payment. Note the example also mixes granularity deliberately: two phases are child workflows, the third is a plain task.
+
+<div className="not-prose my-8 max-w-xl mx-auto">
+  <div className="flex justify-center">
+    <div className="border bg-surface-100 px-6 py-3 text-center">
+      <div className="text-xs font-medium font-mono text-foreground">order_fulfillment</div>
+      <div className="text-[10px] text-foreground-muted mt-1">parent — three phases, each awaited before the next</div>
+    </div>
+  </div>
+  <div className="flex justify-center">
+    <div className="flex items-center gap-1.5">
+      <div className="w-px h-6 bg-border-strong" />
+      <span className="text-[10px] font-mono text-foreground-muted">sequential composition</span>
+    </div>
+  </div>
+  <div className="grid grid-cols-3 gap-3">
+    <div className="flex flex-col">
+      <div className="text-[9px] font-mono uppercase tracking-widest text-foreground-muted text-center pb-1">1 · child workflow</div>
+      <div className="border bg-surface-75 px-2 py-2.5 text-center flex-1">
+        <div className="text-[11px] font-medium font-mono text-foreground">reserve_inventory</div>
+        <div className="text-[10px] text-foreground-muted mt-1.5">check_stock</div>
+        <div className="text-[10px] text-foreground-muted">→ reserve_items</div>
+      </div>
+    </div>
+    <div className="flex flex-col">
+      <div className="text-[9px] font-mono uppercase tracking-widest text-foreground-muted text-center pb-1">2 · child workflow</div>
+      <div className="border bg-surface-75 px-2 py-2.5 text-center flex-1">
+        <div className="text-[11px] font-medium font-mono text-foreground">process_payment</div>
+        <div className="text-[10px] text-foreground-muted mt-1.5">charge_card</div>
+        <div className="text-[10px] text-foreground-muted">→ send_receipt</div>
+      </div>
+    </div>
+    <div className="flex flex-col">
+      <div className="text-[9px] font-mono uppercase tracking-widest text-foreground-muted text-center pb-1">3 · plain task</div>
+      <div className="border bg-background px-2 py-2.5 text-center flex-1">
+        <div className="text-[11px] font-medium font-mono text-foreground">create_shipment</div>
+        <div className="text-[10px] text-foreground-muted mt-1.5">one atomic call</div>
+        <div className="text-[10px] text-foreground-muted">no inner steps</div>
+      </div>
+    </div>
+  </div>
+  <p className="text-[10px] text-foreground-muted text-center mt-3 mb-0">
+    Tinted boxes have their own journal and failure boundary; the plain task belongs to the parent's.
+  </p>
+</div>
+
+## Example: composing an order fulfillment
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="typescript"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+// Child workflow: Validate and reserve inventory
+#[task]
+async fn check_stock(items: Vec<OrderItem>) -> Result<StockResult> {
+    // Call inventory service API
+    inventory_client::check_availability(items).await
+}
+
+#[task]
+async fn reserve_items(reservation: ReservationRequest) -> Result<ReservationId> {
+    inventory_client::reserve(reservation).await
+}
+
+#[workflow(name = "reserve_inventory", version = "1.0.0")]
+async fn reserve_inventory(
+    ctx: WorkflowContext,
+    items: Vec<OrderItem>,
+) -> Result<InventoryReservation> {
+    let stock = ctx.execute_task(check_stock, items.clone()).await?;
+    if !stock.all_available {
+        return Err(anyhow::anyhow!("Items out of stock: {:?}", stock.missing));
+    }
+    let reservation_id = ctx.execute_task(reserve_items, ReservationRequest {
+        items,
+        ttl_minutes: 15,
+    }).await?;
+    Ok(InventoryReservation { reservation_id, items: stock.confirmed })
+}
+
+// Child workflow: Process payment
+#[task]
+async fn charge_card(input: ChargeInput) -> Result<ChargeResult> {
+    payment_client::charge(input).await
+}
+
+#[task]
+async fn send_receipt(charge_id: String) -> Result<()> {
+    email_client::send_receipt(charge_id).await
+}
+
+#[workflow(name = "process_payment", version = "1.0.0")]
+async fn process_payment(
+    ctx: WorkflowContext,
+    input: PaymentInput,
+) -> Result<PaymentResult> {
+    let charge = ctx.execute_task(charge_card, ChargeInput {
+        amount: input.amount,
+        currency: input.currency,
+        method: input.method,
+    }).await?;
+    ctx.execute_task(send_receipt, charge.id.clone()).await?;
+    Ok(PaymentResult { charge_id: charge.id, status: "completed".into() })
+}
+
+// Parent workflow: Compose child workflows
+#[task]
+async fn create_shipment(input: ShipmentInput) -> Result<TrackingNumber> {
+    shipping_client::create(input).await
+}
+
+#[workflow(name = "order_fulfillment", version = "1.0.0")]
+async fn order_fulfillment(
+    ctx: WorkflowContext,
+    order: OrderInput,
+) -> Result<OrderResult> {
+    // Phase 1: Reserve inventory (child workflow)
+    let reservation = ctx.start_child_workflow(
+        reserve_inventory, order.items.clone(),
+    ).await?;
+
+    // Phase 2: Process payment (child workflow)
+    let payment = ctx.start_child_workflow(
+        process_payment, order.payment.clone(),
+    ).await?;
+
+    // Phase 3: Ship order (task)
+    let tracking = ctx.execute_task(create_shipment, ShipmentInput {
+        reservation_id: reservation.reservation_id,
+        address: order.shipping_address,
+    }).await?;
+
+    Ok(OrderResult {
+        payment_id: payment.charge_id,
+        tracking_number: tracking,
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import {
+  Workflow,
+  Tasks,
+  Task,
+  WorkflowContext,
+  createTaskRefs,
+  WorkerBuilder,
+} from '@orcher/sdk';
+
+// Child workflow tasks: Inventory
+@Tasks()
+class InventoryTasks {
+  @Task()
+  async checkStock(items: OrderItem[]): Promise<StockResult> {
+    return await inventoryClient.checkAvailability(items);
+  }
+
+  @Task()
+  async reserveItems(req: ReservationRequest): Promise<string> {
+    return await inventoryClient.reserve(req);
+  }
+}
+
+const inventoryTasks = createTaskRefs(InventoryTasks);
+
+// Child workflow: Reserve inventory
+@Workflow({ name: 'reserve_inventory', version: '1.0.0' })
+class ReserveInventory {
+  async run(ctx: WorkflowContext, items: OrderItem[]): Promise<InventoryReservation> {
+    const stock = await ctx.executeTask(inventoryTasks.checkStock, items);
+    if (!stock.allAvailable) {
+      throw new Error(`Items out of stock: ${stock.missing.join(', ')}`);
+    }
+    const reservationId = await ctx.executeTask(inventoryTasks.reserveItems, {
+      items,
+      ttlMinutes: 15,
+    });
+    return { reservationId, items: stock.confirmed };
+  }
+}
+
+// Child workflow tasks: Payments
+@Tasks()
+class PaymentTasks {
+  @Task()
+  async chargeCard(input: ChargeInput): Promise<ChargeResult> {
+    return await paymentClient.charge(input);
+  }
+
+  @Task()
+  async sendReceipt(chargeId: string): Promise<void> {
+    await emailClient.sendReceipt(chargeId);
+  }
+}
+
+const paymentTasks = createTaskRefs(PaymentTasks);
+
+// Child workflow: Process payment
+@Workflow({ name: 'process_payment', version: '1.0.0' })
+class ProcessPayment {
+  async run(ctx: WorkflowContext, input: PaymentInput): Promise<PaymentResult> {
+    const charge = await ctx.executeTask(paymentTasks.chargeCard, {
+      amount: input.amount,
+      currency: input.currency,
+      method: input.method,
+    });
+    await ctx.executeTask(paymentTasks.sendReceipt, charge.id);
+    return { chargeId: charge.id, status: 'completed' };
+  }
+}
+
+// Parent workflow tasks
+@Tasks()
+class ShippingTasks {
+  @Task()
+  async createShipment(input: ShipmentInput): Promise<string> {
+    return await shippingClient.create(input);
+  }
+}
+
+const shippingTasks = createTaskRefs(ShippingTasks);
+
+// Parent workflow: Compose child workflows
+@Workflow({ name: 'order_fulfillment', version: '1.0.0' })
+class OrderFulfillment {
+  async run(ctx: WorkflowContext, order: OrderInput): Promise<OrderResult> {
+    // Phase 1: Reserve inventory (child workflow)
+    const reservation = await ctx.startChildWorkflow(
+      ReserveInventory, order.items,
+    );
+
+    // Phase 2: Process payment (child workflow)
+    const payment = await ctx.startChildWorkflow(
+      ProcessPayment, order.payment,
+    );
+
+    // Phase 3: Ship order (task)
+    const tracking = await ctx.executeTask(shippingTasks.createShipment, {
+      reservationId: reservation.reservationId,
+      address: order.shippingAddress,
+    });
+
+    return { paymentId: payment.chargeId, trackingNumber: tracking };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext
+
+# Child workflow tasks: Inventory
+@task
+async def check_stock(items: list[OrderItem]) -> StockResult:
+    return await inventory_client.check_availability(items)
+
+@task
+async def reserve_items(req: ReservationRequest) -> str:
+    return await inventory_client.reserve(req)
+
+# Child workflow: Reserve inventory
+@workflow(name="reserve_inventory", version="1.0.0")
+async def reserve_inventory(
+    ctx: WorkflowContext, items: list[OrderItem]
+) -> InventoryReservation:
+    stock = await ctx.execute_task(check_stock, items)
+    if not stock.all_available:
+        raise ValueError(f"Items out of stock: {stock.missing}")
+    reservation_id = await ctx.execute_task(reserve_items, ReservationRequest(
+        items=items, ttl_minutes=15,
+    ))
+    return InventoryReservation(reservation_id=reservation_id, items=stock.confirmed)
+
+# Child workflow tasks: Payments
+@task
+async def charge_card(input: ChargeInput) -> ChargeResult:
+    return await payment_client.charge(input)
+
+@task
+async def send_receipt(charge_id: str) -> None:
+    await email_client.send_receipt(charge_id)
+
+# Child workflow: Process payment
+@workflow(name="process_payment", version="1.0.0")
+async def process_payment(
+    ctx: WorkflowContext, input: PaymentInput
+) -> PaymentResult:
+    charge = await ctx.execute_task(charge_card, ChargeInput(
+        amount=input.amount, currency=input.currency, method=input.method,
+    ))
+    await ctx.execute_task(send_receipt, charge.id)
+    return PaymentResult(charge_id=charge.id, status="completed")
+
+# Parent workflow tasks
+@task
+async def create_shipment(input: ShipmentInput) -> str:
+    return await shipping_client.create(input)
+
+# Parent workflow: Compose child workflows
+@workflow(name="order_fulfillment", version="1.0.0")
+async def order_fulfillment(
+    ctx: WorkflowContext, order: OrderInput
+) -> OrderResult:
+    # Phase 1: Reserve inventory (child workflow)
+    reservation = await ctx.start_child_workflow(reserve_inventory, order.items)
+
+    # Phase 2: Process payment (child workflow)
+    payment = await ctx.start_child_workflow(process_payment, order.payment)
+
+    # Phase 3: Ship order (task)
+    tracking = await ctx.execute_task(create_shipment, ShipmentInput(
+        reservation_id=reservation.reservation_id,
+        address=order.shipping_address,
+    ))
+
+    return OrderResult(payment_id=payment.charge_id, tracking_number=tracking)
+```
+
+</TabPanel>
+
+</Tabs>
+
+Each child workflow has its own execution history and can be tested independently. The parent catches child failures and can retry, fall back to alternatives, or compensate — exactly like calling functions in regular code, but with automatic journaling and crash recovery.
+
+## Child workflow or plain task?
+
+The example draws the line deliberately, and it's the decision you'll make most often with this pattern:
+
+<div className="not-prose my-8 max-w-lg mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Choosing the Granularity</div>
+  </div>
+  <div className="grid grid-cols-2 gap-px bg-border-default">
+    <div className="bg-background px-4 py-3">
+      <div className="text-[10px] font-mono uppercase tracking-widest text-foreground-muted mb-2">Child workflow</div>
+      <div className="text-xs font-medium text-foreground mb-1">A process to own</div>
+      <p className="m-0 text-[10px] text-foreground-muted leading-relaxed">Multiple steps, its own failure boundary and retries, reusable from other parents, often owned by another team. Inventory and payment here.</p>
+    </div>
+    <div className="bg-background px-4 py-3">
+      <div className="text-[10px] font-mono uppercase tracking-widest text-foreground-muted mb-2">Plain task</div>
+      <div className="text-xs font-medium text-foreground mb-1">A call to make</div>
+      <p className="m-0 text-[10px] text-foreground-muted leading-relaxed">One atomic operation with no internal state worth isolating. Wrapping it in a workflow adds ceremony, not safety. Shipment creation here.</p>
+    </div>
+  </div>
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Default to a task; promote it to a child workflow when it grows steps or its own callers.</span>
+  </div>
+</div>
+
+## Design notes
+
+- **Sequential here, parallel when independent.** These phases depend on each other, so each child is awaited immediately. When the units are independent — sources, regions, partitions — collect the handles first and await them together, as in [multi-service deployment](/guides/use-cases/distributed-systems/multi-service-deployment).
+- **A child failure is the parent's decision point.** Out-of-stock propagates from `reserve_inventory` as an ordinary error the parent can catch: retry, fall back to another warehouse, or [compensate what already completed](/guides/use-cases/distributed-systems/saga-pattern). The child stays simple; policy lives in the parent.
+- **Children are real workflows.** `reserve_inventory` and `process_payment` can be started directly — in tests, from other parents, or by themselves in production. Composition is reuse, not just decomposition.
+- **Keep the hierarchy shallow.** Parent → children mapped to service domains is usually enough; grandchildren of grandchildren make execution history hard to follow. See [Best Practices](/guides/use-cases/distributed-systems/best-practices).
+
+---
+
+## Next Steps
+
+- [Saga Pattern with Automatic Rollback](/guides/use-cases/distributed-systems/saga-pattern) — Handle multi-service transaction failures with compensating actions.
+- [Event Gates for Human Approvals](/guides/use-cases/distributed-systems/event-gates) — Pause workflows until external input arrives.
+- [Multi-Service Deployment](/guides/use-cases/distributed-systems/multi-service-deployment) — Fan-out across regions with parallel execution.
+- [Best Practices & Performance](/guides/use-cases/distributed-systems/best-practices) — Guidelines and benchmarks for distributed workflows.

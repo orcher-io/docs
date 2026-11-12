@@ -1,0 +1,411 @@
+---
+id: 'long-running-order-fulfillment'
+title: 'Order Fulfillment Process'
+sidebar_label: 'Order Fulfillment'
+---
+
+## Order Fulfillment Process
+
+Order fulfillment is a multi-day process with distinct stages — payment processing, warehouse picking, packing, shipping, and delivery confirmation. Each stage may involve waiting for external systems or physical operations. Orcher handles this naturally by sleeping between stages and waiting for delivery confirmation signals with automatic timeouts.
+
+<div className="not-prose my-8 max-w-md mx-auto">
+  <div className="flex flex-col items-center">
+    {[
+      { label: 'Process Payment', sub: 'Charge card · reserve funds', type: 'task' },
+      { label: 'Reserve Inventory', sub: 'Warehouse DB update', type: 'task' },
+      { label: 'Pick & Pack', sub: 'Warehouse fulfillment', type: 'task' },
+      { label: '', sub: 'wait_for_event("packed") · timeout 24h', type: 'wait' },
+      { label: 'Ship Order', sub: 'Generate label · hand to carrier', type: 'task' },
+      { label: '', sub: 'wait_for_event("delivered") · timeout 7d', type: 'wait' },
+      { label: 'Confirm Delivery', sub: '', type: 'decision' },
+    ].map((step, i, arr) => (
+      <div key={i} className="flex flex-col items-center w-full">
+        {step.type === 'wait' ? (
+          <div className="border border-dashed bg-surface-75 px-5 py-2 text-center w-full">
+            <div className="text-[10px] font-mono text-foreground-muted italic">{step.sub}</div>
+          </div>
+        ) : step.type === 'decision' ? (
+          <div className="border bg-surface-100 px-5 py-2 text-center w-full">
+            <div className="text-xs font-medium text-foreground">{step.label}</div>
+          </div>
+        ) : (
+          <div className="border bg-background px-5 py-2.5 w-full flex items-center gap-3">
+            <span className="w-5 h-5 flex items-center justify-center border bg-surface-75 text-[10px] font-mono text-foreground-muted shrink-0">{i < 3 ? i + 1 : i - 1}</span>
+            <div>
+              <div className="text-xs font-medium text-foreground">{step.label}</div>
+              <div className="text-[10px] text-foreground-muted">{step.sub}</div>
+            </div>
+          </div>
+        )}
+        {i < arr.length - 1 && <div className="w-px h-3 bg-border-strong" />}
+      </div>
+    ))}
+    {/* Decision branch */}
+    <div className="w-px h-3 bg-border-strong" />
+    <div className="relative w-full">
+      <div className="absolute top-0 h-px bg-border-strong" style={{ left: 'calc(25% - 0.30rem)', right: 'calc(25% - 0.30rem)' }} />
+      <div className="flex gap-4">
+        <div className="flex-1 flex flex-col items-center">
+          <div className="w-px h-4 bg-border-strong" />
+          <div className="border bg-background w-full p-2.5 text-center flex flex-col justify-center min-h-[3.5rem]">
+            <div className="text-[10px] font-medium text-foreground">Delivered</div>
+            <div className="text-[10px] text-foreground-muted mt-0.5">Send receipt · close order</div>
+          </div>
+        </div>
+        <div className="flex-1 flex flex-col items-center">
+          <div className="w-px h-4 bg-border-strong" />
+          <div className="border border-dashed w-full p-2.5 text-center flex flex-col justify-center min-h-[3.5rem]">
+            <div className="text-[10px] font-medium text-foreground">Timeout</div>
+            <div className="text-[10px] text-foreground-muted mt-0.5">Investigate · contact carrier</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use std::time::Duration;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Order {
+    order_id: String,
+    customer_id: String,
+    items: Vec<String>,
+    total: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FulfillmentResult {
+    order_id: String,
+    status: String,
+    days_taken: u64,
+    checkpoints: Vec<String>,
+}
+
+#[task]
+async fn validate_order(order: Order) -> Result<()> { Ok(()) }
+
+#[task]
+async fn charge_payment(total: f64) -> Result<()> { Ok(()) }
+
+#[task]
+async fn warehouse_pick(items: Vec<String>) -> Result<bool> { Ok(true) }
+
+#[task]
+async fn pack_items(order_id: String) -> Result<()> { Ok(()) }
+
+#[task]
+async fn create_shipment(order: Order) -> Result<String> { Ok("TRACK-123".to_string()) }
+
+#[task]
+async fn send_delivery_notification(customer_id: String) -> Result<()> { Ok(()) }
+
+// Multi-day order fulfillment workflow
+#[workflow(name = "order_fulfillment", version = "1.0.0")]
+pub async fn order_fulfillment(
+    ctx: WorkflowContext,
+    order: Order,
+) -> Result<FulfillmentResult> {
+    let start = chrono::Utc::now();
+    let mut checkpoints = Vec::new();
+
+    println!("Order {} - Starting fulfillment", order.order_id);
+
+    // Day 0: Process order
+    ctx.execute_task(validate_order, order.clone()).await?;
+    ctx.execute_task(charge_payment, order.total).await?;
+    checkpoints.push("order_processed".to_string());
+
+    // Day 0: Wait for warehouse to pick items (typically same day)
+    ctx.sleep(Duration::from_secs(14400)).await?; // 4 hours
+
+    let pick_result: bool = ctx
+        .execute_task(warehouse_pick, order.items.clone())
+        .await?;
+
+    if !pick_result {
+        // Wait for inventory restock (could take days)
+        ctx.sleep(Duration::from_secs(259200)).await?; // 3 days
+        ctx.execute_task(warehouse_pick, order.items.clone()).await?;
+    }
+    checkpoints.push("items_picked".to_string());
+
+    // Day 1: Pack and ship
+    ctx.sleep(Duration::from_secs(86400)).await?; // 1 day
+    ctx.execute_task(pack_items, order.order_id.clone()).await?;
+    let _tracking_id: String = ctx.execute_task(create_shipment, order.clone()).await?;
+    checkpoints.push("shipped".to_string());
+
+    // Day 1-5: Transit time
+    ctx.sleep(Duration::from_secs(345600)).await?; // 4 days
+
+    // Day 5: Delivery confirmation
+    let delivered: Option<bool> = ctx
+        .wait_for_event_with_timeout(
+            "delivery_confirmed",
+            Duration::from_secs(86400) // 1 day grace period
+        )
+        .await?;
+
+    if delivered.unwrap_or(false) {
+        checkpoints.push("delivered".to_string());
+        ctx.execute_task(send_delivery_notification, order.customer_id.clone()).await?;
+    } else {
+        println!("Delivery not confirmed - marking as complete anyway");
+        checkpoints.push("delivery_uncertain".to_string());
+    }
+
+    let days_taken = (chrono::Utc::now() - start).num_days() as u64;
+
+    Ok(FulfillmentResult {
+        order_id: order.order_id,
+        status: "completed".to_string(),
+        days_taken,
+        checkpoints,
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, WorkflowContext, createTaskRefs, Duration } from '@orcher/sdk';
+
+interface Order {
+  orderId: string;
+  customerId: string;
+  items: string[];
+  total: number;
+}
+
+interface FulfillmentResult {
+  orderId: string;
+  status: string;
+  daysTaken: number;
+  checkpoints: string[];
+}
+
+@Tasks()
+class FulfillmentTasks {
+  @Task()
+  async validateOrder(order: Order): Promise<void> {}
+
+  @Task()
+  async chargePayment(total: number): Promise<void> {}
+
+  @Task()
+  async warehousePick(items: string[]): Promise<boolean> { return true; }
+
+  @Task()
+  async packItems(orderId: string): Promise<void> {}
+
+  @Task()
+  async createShipment(order: Order): Promise<string> { return 'TRACK-123'; }
+
+  @Task()
+  async sendDeliveryNotification(customerId: string): Promise<void> {}
+}
+
+const tasks = createTaskRefs(FulfillmentTasks);
+
+// Multi-day order fulfillment workflow
+@Workflow({ name: 'order_fulfillment', version: '1.0.0' })
+class OrderFulfillmentWorkflow {
+  async run(ctx: WorkflowContext, order: Order): Promise<FulfillmentResult> {
+    const start = Date.now();
+    const checkpoints: string[] = [];
+
+    console.log(`Order ${order.orderId} - Starting fulfillment`);
+
+    // Day 0: Process order
+    await ctx.executeTask(tasks.validateOrder, order);
+    await ctx.executeTask(tasks.chargePayment, order.total);
+    checkpoints.push('order_processed');
+
+    // Day 0: Wait for warehouse to pick items (typically same day)
+    await ctx.sleep(Duration.fromHours(4)); // 4 hours
+
+    const pickResult = await ctx.executeTask<boolean>(tasks.warehousePick, order.items);
+
+    if (!pickResult) {
+      // Wait for inventory restock (could take days)
+      await ctx.sleep(Duration.fromDays(3)); // 3 days
+      await ctx.executeTask(tasks.warehousePick, order.items);
+    }
+    checkpoints.push('items_picked');
+
+    // Day 1: Pack and ship
+    await ctx.sleep(Duration.fromDays(1)); // 1 day
+    await ctx.executeTask(tasks.packItems, order.orderId);
+    const trackingId = await ctx.executeTask(tasks.createShipment, order);
+    checkpoints.push('shipped');
+
+    // Day 1-5: Transit time
+    await ctx.sleep(Duration.fromDays(4)); // 4 days
+
+    // Day 5: Delivery confirmation
+    const delivered = await ctx.waitForEventWithTimeout<boolean>(
+      'delivery_confirmed',
+      86400000 // 1 day grace period
+    );
+
+    if (delivered) {
+      checkpoints.push('delivered');
+      await ctx.executeTask(tasks.sendDeliveryNotification, order.customerId);
+    } else {
+      console.log('Delivery not confirmed - marking as complete anyway');
+      checkpoints.push('delivery_uncertain');
+    }
+
+    const daysTaken = Math.floor((Date.now() - start) / 86400000);
+
+    return {
+      orderId: order.orderId,
+      status: 'completed',
+      daysTaken,
+      checkpoints,
+    };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext
+from dataclasses import dataclass, field
+from typing import Optional
+from datetime import datetime, timedelta
+
+@dataclass
+class Order:
+    order_id: str
+    customer_id: str
+    items: list[str]
+    total: float
+
+@dataclass
+class FulfillmentResult:
+    order_id: str
+    status: str
+    days_taken: int
+    checkpoints: list[str]
+
+@task
+async def validate_order(order: Order) -> None: pass
+
+@task
+async def charge_payment(total: float) -> None: pass
+
+@task
+async def warehouse_pick(items: list[str]) -> bool: return True
+
+@task
+async def pack_items(order_id: str) -> None: pass
+
+@task
+async def create_shipment(order: Order) -> str: return "TRACK-123"
+
+@task
+async def send_delivery_notification(customer_id: str) -> None: pass
+
+# Multi-day order fulfillment workflow
+@workflow(name="order_fulfillment", version="1.0.0")
+async def order_fulfillment(ctx: WorkflowContext, order: Order) -> FulfillmentResult:
+    start = datetime.utcnow()
+    checkpoints = []
+
+    print(f"Order {order.order_id} - Starting fulfillment")
+
+    # Day 0: Process order
+    await ctx.execute_task(validate_order, order)
+    await ctx.execute_task(charge_payment, order.total)
+    checkpoints.append("order_processed")
+
+    # Day 0: Wait for warehouse to pick items (typically same day)
+    await ctx.sleep(timedelta(hours=4))  # 4 hours
+
+    pick_result = await ctx.execute_task(warehouse_pick, order.items)
+
+    if not pick_result:
+        # Wait for inventory restock (could take days)
+        await ctx.sleep(timedelta(days=3))  # 3 days
+        await ctx.execute_task(warehouse_pick, order.items)
+    checkpoints.append("items_picked")
+
+    # Day 1: Pack and ship
+    await ctx.sleep(timedelta(days=1))  # 1 day
+    await ctx.execute_task(pack_items, order.order_id)
+    tracking_id = await ctx.execute_task(create_shipment, order)
+    checkpoints.append("shipped")
+
+    # Day 1-5: Transit time
+    await ctx.sleep(timedelta(days=4))  # 4 days
+
+    # Day 5: Delivery confirmation
+    delivered: Optional[bool] = await ctx.wait_for_event_with_timeout(
+        "delivery_confirmed",
+        timeout=86400  # 1 day grace period
+    )
+
+    if delivered:
+        checkpoints.append("delivered")
+        await ctx.execute_task(send_delivery_notification, order.customer_id)
+    else:
+        print("Delivery not confirmed - marking as complete anyway")
+        checkpoints.append("delivery_uncertain")
+
+    days_taken = (datetime.utcnow() - start).days
+
+    return FulfillmentResult(
+        order_id=order.order_id,
+        status="completed",
+        days_taken=days_taken,
+        checkpoints=checkpoints,
+    )
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/patterns/long-running/trial-management" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Trial Period Management</h3>
+      <p className="text-sm text-scale-1100">
+        Manage SaaS trial periods with milestone reminders.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/long-running/recurring-tasks" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Recurring Tasks</h3>
+      <p className="text-sm text-scale-1100">
+        Schedule repeating operations with conditional logic.
+      </p>
+    </div>
+  </Link>
+</div>

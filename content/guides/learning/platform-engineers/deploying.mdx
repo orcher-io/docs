@@ -1,0 +1,824 @@
+---
+id: 'platform-engineers-deploying'
+title: 'Deploying to Production'
+description: 'Deployment models, database selection, Kubernetes step-by-step deployment, HA, and multi-region strategies'
+sidebar_label: 'Deploying'
+---
+
+Now that you understand how Orcher works, let's deploy it.
+
+## Choosing a Deployment Model
+
+Because Orcher workers are just stateless app processes, they run anywhere you already run services — the choice is about *your* operational comfort, not Orcher's requirements. Three common options, at a glance:
+
+<div className="not-prose my-8 max-w-3xl mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Deployment Models at a Glance</div>
+  </div>
+  <div className="grid grid-cols-3 gap-px bg-border-default">
+    {[
+      { name: 'Kubernetes', tag: 'recommended', ops: 'you run the cluster', scale: 'kubectl scale · autoscale', fit: 'already on K8s; want autoscaling' },
+      { name: 'VMs + LB', tag: 'full control', ops: 'you manage the hosts', scale: 'provision VMs manually', fit: 'no containers; want SSH-level control' },
+      { name: 'Serverless', tag: 'zero ops', ops: 'provider manages all', scale: 'scale to zero → thousands', fit: 'bursty load; minimal ops' },
+    ].map((m) => (
+      <div key={m.name} className="bg-background px-4 py-3">
+        <div className="text-xs font-medium text-foreground">{m.name}</div>
+        <div className="text-[9px] font-mono uppercase tracking-widest text-foreground-muted mb-2">{m.tag}</div>
+        <div className="text-[10px] text-foreground-muted leading-relaxed">
+          <div><span className="text-foreground-light">ops:</span> {m.ops}</div>
+          <div><span className="text-foreground-light">scale:</span> {m.scale}</div>
+          <div className="mt-1"><span className="text-foreground-light">best when:</span> {m.fit}</div>
+        </div>
+      </div>
+    ))}
+  </div>
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">The database is the only stateful piece in every model — pick workers by the ops model you already know.</span>
+  </div>
+</div>
+
+#### Option 1: Kubernetes (Recommended)
+
+**Pros:**
+- **Easy Horizontal Scaling**: `kubectl scale` is all you need
+- **Built-in Health Checks**: Kubernetes restarts failed pods automatically
+- **Service Discovery**: Load balancing is free
+- **Rolling Updates**: Zero-downtime deployments
+- **Resource Limits**: Prevent runaway processes
+- **Mature Ecosystem**: Helm charts, operators, ingress controllers
+
+**Cons:**
+- **Kubernetes Learning Curve**: If you don't already use K8s, this is a big lift
+- **Cluster Overhead**: You need to run and maintain a Kubernetes cluster
+- **Complexity**: K8s adds moving parts (though it manages them for you)
+
+**When to Choose This:**
+- You're already on Kubernetes
+- You need autoscaling
+- You want a mature deployment platform
+- You have the expertise (or want to build it)
+
+
+#### Option 2: VMs with Load Balancer
+
+**Pros:**
+- **Simplicity**: No container orchestration needed
+- **Full Control**: You manage the entire environment
+- **Easier Debugging**: SSH into machines, inspect directly
+- **Lower Overhead**: No container runtime or orchestrator
+
+**Cons:**
+- **Manual Scaling**: You have to provision VMs yourself
+- **Manual Deployments**: You coordinate updates across VMs
+- **Manual Health Checks**: You build monitoring to restart failed processes
+- **More Operational Work**: Things Kubernetes does for you, you do manually
+
+**When to Choose This:**
+- You're not on Kubernetes and don't want to learn it
+- You have strict regulatory requirements (air-gapped, on-prem)
+- You prefer full control over automation
+- Your team is stronger with VMs than containers
+
+
+#### Option 3: Serverless (Lambda, Cloud Run, Fargate)
+
+**Pros:**
+- **Zero Ops**: Provider manages everything
+- **Auto-scaling**: Scales to zero, scales to thousands
+- **Pay Per Use**: No idle resource costs
+- **Fastest Time to Production**: No infra to set up
+
+**Cons:**
+- **Cold Starts**: API responses might be slow on first hit
+- **Connection Pooling**: Requires careful database connection management
+- **Vendor Lock-In**: Hard to move between clouds
+- **Cost at Scale**: Can be more expensive than VMs at high utilization
+
+**When to Choose This:**
+- You want minimal operational overhead
+- Your workload is bursty (not constant high volume)
+- You're okay with cold starts
+- You're comfortable with cloud-specific services
+
+
+**Our Recommendation**: Start with Kubernetes if you have the expertise. It's the most mature and flexible. If not, use your cloud's managed container service (ECS, Cloud Run) as a middle ground.
+
+## Database Selection
+
+Your database choice is critical because it's your only stateful component.
+
+#### Option 1: Managed PostgreSQL (Recommended for Most)
+
+**Cloud Options:**
+- **AWS RDS for PostgreSQL**: Mature, lots of features, automated backups, Multi-AZ HA
+- **Google Cloud SQL for PostgreSQL**: Similar to RDS, good performance
+- **Azure Database for PostgreSQL**: Integrated with Azure ecosystem
+- **DigitalOcean Managed Databases**: Simpler, cheaper, good for smaller deployments
+
+**Why Managed Is Good:**
+- **Automated Backups**: Daily backups with point-in-time recovery
+- **Automated Patching**: Security updates applied automatically
+- **High Availability**: Multi-AZ with automatic failover (depending on tier)
+- **Monitoring**: Built-in metrics and logs
+- **Scaling**: Vertical scaling with a few clicks
+- **Less Work**: You don't manage the database server
+
+**Why Managed Can Be Bad:**
+- **Cost**: usually more expensive than running PostgreSQL yourself
+- **Less Control**: Can't tune low-level settings
+- **Vendor Lock-In**: Hard to move between clouds
+
+**A starting tier:** a 2 vCPU, 4 GB instance with high availability is a reasonable place to start for moderate volume; check your provider's current pricing.
+
+#### Option 2: Self-Managed PostgreSQL (For Control or Cost)
+
+**Why Self-Manage:**
+- **Cost**: 50-70% cheaper than managed
+- **Control**: Tune every setting
+- **Flexibility**: Run on your own hardware, in your own datacenter
+
+**Why It's Harder:**
+- **You Manage Everything**: Backups, patches, upgrades, monitoring, HA
+- **Expertise Required**: You need to really know PostgreSQL
+- **Time Investment**: Ongoing maintenance work
+
+**Options:**
+- **Kubernetes Operator** (Zalando Postgres Operator, Crunchy Data, CloudNativePG)
+- **VM with Patroni** (automated failover)
+- **VM with Streaming Replication** (manual failover)
+
+**When to Self-Manage:**
+- You already have PostgreSQL expertise
+- You have strict compliance requirements (data residency, air-gapped)
+- Cost is critical
+- You need very high performance (vertical scaling beyond managed offerings)
+
+#### Database Sizing
+
+Size the database from a measurement of your own workload rather than a table: the [sdk-core benchmark suite](https://github.com/orcher-io/sdk-core/tree/main/bench) runs standard scenarios against any engine, and the engine's metrics show what production load costs it.
+
+Always start smaller and scale up based on actual metrics. It's easier to upgrade than downgrade.
+
+## Kubernetes Deployment (Step by Step)
+
+Let's walk through a complete production deployment on Kubernetes.
+
+#### Prerequisites
+
+Before you begin:
+
+```bash
+# 1. Kubernetes cluster (1.24+)
+kubectl version
+
+# 2. Helm (for easier deployment)
+helm version
+
+# 3. kubectl context set to your cluster
+kubectl config current-context
+
+# 4. Container registry access
+docker login your-registry.com
+```
+
+#### Step 1: Create Namespace and Secrets
+
+```bash
+# Create a dedicated namespace
+kubectl create namespace orcher
+
+# Create database credentials secret
+kubectl create secret generic postgres-credentials \
+  --from-literal=username=orcher \
+  --from-literal=password='your-super-secure-password-here' \
+  --from-literal=database=orcher \
+  -n orcher
+
+# Create connection string secret (for app)
+kubectl create secret generic orcher-config \
+  --from-literal=database-url='postgresql://orcher:your-super-secure-password-here@postgres:5432/orcher' \
+  -n orcher
+```
+
+**Security Note**: In production, use a secrets manager (AWS Secrets Manager, HashiCorp Vault, Kubernetes External Secrets) instead of kubectl secrets.
+
+#### Step 2: Deploy PostgreSQL
+
+For production, use a managed service (RDS, Cloud SQL). For self-hosting, use this StatefulSet:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="yaml"
+  queryGroup="deployment"
+>
+<TabPanel id="yaml" label="Kubernetes Manifest">
+
+```yaml
+# postgres.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: orcher
+spec:
+  ports:
+  - port: 5432
+    targetPort: 5432
+  selector:
+    app: postgres
+  clusterIP: None  # Headless service for StatefulSet
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: orcher
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15
+        ports:
+        - containerPort: 5432
+          name: postgres
+        env:
+        - name: POSTGRES_DB
+          valueFrom:
+            secretKeyRef:
+              name: postgres-credentials
+              key: database
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: postgres-credentials
+              key: username
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-credentials
+              key: password
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1"
+          limits:
+            memory: "4Gi"
+            cpu: "2"
+        livenessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - orcher
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - orcher
+          initialDelaySeconds: 5
+          periodSeconds: 5
+  volumeClaimTemplates:
+  - metadata:
+      name: postgres-storage
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: "fast-ssd"  # Use your cluster's fast storage class
+      resources:
+        requests:
+          storage: 100Gi
+```
+
+</TabPanel>
+</Tabs>
+
+**Apply it:**
+
+```bash
+kubectl apply -f postgres.yaml
+
+# Wait for it to be ready
+kubectl wait --for=condition=ready pod -l app=postgres -n orcher --timeout=300s
+
+# Verify
+kubectl get pods -n orcher
+# Should show postgres-0 Running
+```
+
+**Initialize the database schema:**
+
+```bash
+# Connect to the database
+kubectl exec -it postgres-0 -n orcher -- psql -U orcher
+
+# Run initialization SQL
+CREATE TABLE IF NOT EXISTS workflow_queue (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workflow_name TEXT NOT NULL,
+  input JSONB,
+  status TEXT NOT NULL DEFAULT 'pending',
+  retry_count INT DEFAULT 0,
+  next_retry_at TIMESTAMP,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW(),
+  completed_at TIMESTAMP
+);
+
+CREATE INDEX idx_workflow_queue_status ON workflow_queue(status, created_at);
+CREATE INDEX idx_workflow_queue_retry ON workflow_queue(next_retry_at) WHERE status = 'pending';
+
+CREATE TABLE IF NOT EXISTS workflow_execution_journal (
+  workflow_id UUID NOT NULL,
+  step_id INT NOT NULL,
+  task_name TEXT NOT NULL,
+  input JSONB,
+  output JSONB,
+  status TEXT NOT NULL,
+  error TEXT,
+  created_at TIMESTAMP DEFAULT NOW(),
+  PRIMARY KEY (workflow_id, step_id)
+);
+
+CREATE INDEX idx_workflow_execution_journal_lookup ON workflow_execution_journal(workflow_id, step_id);
+CREATE INDEX idx_workflow_execution_journal_workflow ON workflow_execution_journal(workflow_id);
+
+-- Exit
+\q
+```
+
+#### Step 3: Build and Push Your Application Image
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust Dockerfile">
+
+```dockerfile
+# Dockerfile
+# Multi-stage build for small final image
+FROM rust:1.75 as builder
+
+WORKDIR /app
+
+# Copy dependency manifests
+COPY Cargo.toml Cargo.lock ./
+
+# Create dummy main to cache dependencies
+RUN mkdir src && \
+    echo "fn main() {}" > src/main.rs && \
+    cargo build --release && \
+    rm -rf src
+
+# Copy real source code
+COPY src ./src
+
+# Build real application
+RUN touch src/main.rs && cargo build --release
+
+# Final stage - minimal runtime image
+FROM debian:bookworm-slim
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    libpq5 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy binary from builder
+COPY --from=builder /app/target/release/orcher-app /usr/local/bin/orcher-app
+
+# Create non-root user
+RUN useradd -m -u 1000 orcher
+
+USER orcher
+
+EXPOSE 3000
+
+# Health check endpoint
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:3000/health || exit 1
+
+CMD ["orcher-app"]
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript Dockerfile">
+
+```dockerfile
+# Dockerfile
+FROM node:20-alpine as builder
+
+WORKDIR /app
+
+# Copy package files
+COPY package.json package-lock.json ./
+
+# Install dependencies
+RUN npm ci --only=production
+
+# Copy source
+COPY tsconfig.json ./
+COPY src ./src
+
+# Build
+RUN npm run build
+
+# Final stage
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Install dumb-init (proper signal handling)
+RUN apk add --no-cache dumb-init
+
+# Copy built artifacts
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/dist ./dist
+COPY package.json ./
+
+# Create non-root user
+RUN addgroup -g 1000 orcher && \
+    adduser -D -u 1000 -G orcher orcher
+
+USER orcher
+
+EXPOSE 3000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD node -e "require('http').get('http://localhost:3000/health',(r)=>{process.exit(r.statusCode===200?0:1)})"
+
+ENTRYPOINT ["dumb-init", "--"]
+CMD ["node", "dist/index.js"]
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python Dockerfile">
+
+```dockerfile
+# Dockerfile
+FROM python:3.12-slim as builder
+
+WORKDIR /app
+
+# Install build dependencies
+RUN pip install --no-cache-dir poetry
+
+# Copy dependency files
+COPY pyproject.toml poetry.lock ./
+
+# Install dependencies (no dev deps)
+RUN poetry config virtualenvs.in-project true && \
+    poetry install --no-dev --no-interaction --no-ansi
+
+# Copy source
+COPY src ./src
+
+# Final stage
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Copy virtual environment and source
+COPY --from=builder /app/.venv ./.venv
+COPY --from=builder /app/src ./src
+
+# Create non-root user
+RUN useradd -m -u 1000 orcher
+
+USER orcher
+
+EXPOSE 3000
+
+# Activate virtualenv
+ENV PATH="/app/.venv/bin:$PATH"
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:3000/health')"
+
+CMD ["python", "-m", "src.main"]
+```
+
+</TabPanel>
+</Tabs>
+
+**Build and push:**
+
+```bash
+# Build
+docker build -t your-registry.com/orcher-app:v1.0 .
+
+# Push
+docker push your-registry.com/orcher-app:v1.0
+
+# Tag as latest
+docker tag your-registry.com/orcher-app:v1.0 your-registry.com/orcher-app:latest
+docker push your-registry.com/orcher-app:latest
+```
+
+#### Step 4: Deploy Application (API + Workers)
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="yaml"
+  queryGroup="deployment"
+>
+<TabPanel id="yaml" label="Kubernetes Manifest">
+
+```yaml
+# orcher-app.yaml
+---
+# ConfigMap for shared configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orcher-config
+  namespace: orcher
+data:
+  LOG_LEVEL: "info"
+  WORKER_CONCURRENCY: "10"
+  POLL_INTERVAL_MS: "100"
+  MAX_WORKFLOW_DURATION_SECS: "3600"
+---
+# API Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orcher-api
+  namespace: orcher
+  labels:
+    app: orcher-api
+    component: api
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0  # Zero downtime
+  selector:
+    matchLabels:
+      app: orcher-api
+  template:
+    metadata:
+      labels:
+        app: orcher-api
+        component: api
+    spec:
+      # Spread across availability zones
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - orcher-api
+              topologyKey: topology.kubernetes.io/zone
+      containers:
+      - name: api
+        image: your-registry.com/orcher-app:latest
+        ports:
+        - containerPort: 3000
+          name: http
+          protocol: TCP
+        env:
+        - name: MODE
+          value: "api"
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: orcher-config
+              key: database-url
+        envFrom:
+        - configMapRef:
+            name: orcher-config
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+---
+# Worker Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orcher-worker
+  namespace: orcher
+  labels:
+    app: orcher-worker
+    component: worker
+spec:
+  replicas: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 2
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: orcher-worker
+  template:
+    metadata:
+      labels:
+        app: orcher-worker
+        component: worker
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - orcher-worker
+              topologyKey: topology.kubernetes.io/zone
+      containers:
+      - name: worker
+        image: your-registry.com/orcher-app:latest
+        env:
+        - name: MODE
+          value: "worker"
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: orcher-config
+              key: database-url
+        envFrom:
+        - configMapRef:
+            name: orcher-config
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "1000m"
+          limits:
+            memory: "2Gi"
+            cpu: "2000m"
+        livenessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - "pgrep -f worker || exit 1"
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+---
+# Service for API
+apiVersion: v1
+kind: Service
+metadata:
+  name: orcher-api
+  namespace: orcher
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 80
+    targetPort: 3000
+    protocol: TCP
+    name: http
+  selector:
+    app: orcher-api
+---
+# Horizontal Pod Autoscaler for Workers
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: orcher-worker-hpa
+  namespace: orcher
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: orcher-worker
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300  # Wait 5 min before scaling down
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0  # Scale up immediately
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 30
+```
+
+</TabPanel>
+</Tabs>
+
+**Deploy everything:**
+
+```bash
+# Apply the manifests
+kubectl apply -f orcher-app.yaml
+
+# Watch the rollout
+kubectl rollout status deployment/orcher-api -n orcher
+kubectl rollout status deployment/orcher-worker -n orcher
+
+# Get the LoadBalancer IP
+kubectl get svc orcher-api -n orcher
+
+# Test the API
+export API_URL=$(kubectl get svc orcher-api -n orcher -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+curl http://$API_URL/health
+# Should return: {"status": "healthy"}
+```
+
+**Verification checklist:**
+
+```bash
+# Check all pods are running
+kubectl get pods -n orcher
+# Should show:
+# - postgres-0 (Running)
+# - orcher-api-xxxxx (3 replicas, all Running)
+# - orcher-worker-xxxxx (5 replicas, all Running)
+
+# Check logs for errors
+kubectl logs -l app=orcher-api -n orcher --tail=100
+kubectl logs -l app=orcher-worker -n orcher --tail=100
+
+# Check database connectivity from app
+kubectl exec -it deployment/orcher-api -n orcher -- /bin/sh
+# Inside pod:
+# Test database connection (if you have psql)
+```
+
+Congratulations! Orcher is now running in production.
+
+---
+
+## Next Steps
+
+- [Scaling and Performance](/guides/learning/platform-engineers/scaling) -- Worker pools, database tuning
+- [Back to Overview](/guides/learning/platform-engineers)

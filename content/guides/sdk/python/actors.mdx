@@ -1,0 +1,67 @@
+---
+id: python-actors
+title: Actors
+description: Define actors with the Python SDK, keyed objects whose operations read and write durable state
+sidebar_label: 'Actors'
+---
+
+An actor is an object identified by a type name and a key (`ShoppingCart` / `user-123`) with its own durable key-value state. Operations on one actor key that change state run one at a time, so an operation can read, change and write its state without another operation interleaving.
+
+---
+
+## Defining an actor
+
+Decorate the class with `@actor` and each operation with `@operation`. An operation's name is its method name, and its first parameter after `self` is the context:
+
+<$CodeSample path="python/actors/cart.py" region="actor" />
+
+`@operation()` takes a `mode` and an optional `timeout` in seconds. Like workflows and tasks, an actor registers when its module is imported, and a worker that has actors registered also polls for actor operations.
+
+An operation's input arrives the way a workflow's does: a dict is spread into keyword arguments, and any other value is passed as one positional argument.
+
+---
+
+## Operation modes
+
+| Mode | Context | Use for |
+|---|---|---|
+| `OperationMode.EXCLUSIVE` (default) | `ActorContext` | Operations that change state. They run one at a time per actor key. |
+| `OperationMode.SHARED` | `SharedActorContext` | Operations that only read state. The worker registers the mode with the engine, which may run shared operations alongside each other. |
+
+A shared operation can still call the state's write methods; the mode is a declaration, so keep shared operations read-only yourself.
+
+---
+
+## State and context
+
+`ctx.state` reads and writes the actor's state; every method is `async`:
+
+| Method | Description |
+|---|---|
+| `get(key)` | The value, or `None` |
+| `set(key, value)` | Store a JSON-serializable value |
+| `update(key, fn)` | Read, apply `fn` to the current value (or `None`), write back and return the new value |
+| `delete(key)` | Remove a key; returns whether it existed |
+| `exists(key)` | Whether a key is set |
+| `list(prefix=None)` | The state's keys |
+| `clear_all()` | Remove every key |
+
+`update` is a read followed by a write, which is safe inside an exclusive operation because nothing else runs on that key in between. The context also identifies the actor and the operation:
+
+<$CodeSample path="python/actors/cart.py" region="context" />
+
+`ctx.deterministic_uuid(seed)` returns a UUID derived from the actor's name and key and the seed, so the same seed gives the same UUID on every call for that actor.
+
+---
+
+## Invoking operations
+
+`orcher-sdk` 0.4.4 has no public API for invoking actor operations: neither `Client` nor `WorkflowContext` can call one. The `ActorInvocationClient` class in `orcher.actor` needs the worker's internal native bridge, which isn't part of the public API.
+
+---
+
+## Next steps
+
+- [Workflows](/guides/sdk/python/workflows): durable orchestration
+- [Tasks](/guides/sdk/python/tasks): side effects with retries
+- [Worker](/guides/sdk/python/worker): worker configuration

@@ -1,0 +1,69 @@
+---
+id: 'debugging-logs'
+title: 'Viewing Logs'
+description: 'Stream text logs, view journal entries, inspect task execution details, and browse workflow history'
+sidebar_label: 'Viewing Logs'
+---
+
+The `orcher logs` command retrieves three types of execution data from the server.
+
+## Text Logs (Default)
+
+Human-readable logs from the `workflow_execution_logs` table:
+
+```bash
+# View recent logs for a workflow
+orcher logs workflow/my-workflow
+
+# Follow logs in real-time (SSE streaming)
+orcher logs workflow/my-workflow --follow
+
+# Filter by log level
+orcher logs workflow/my-workflow --level error
+
+# Filter by time range
+orcher logs workflow/my-workflow --since "2024-01-15T10:00:00Z"
+
+# Search logs
+orcher logs workflow/my-workflow --grep "payment failed"
+
+# Show last N entries
+orcher logs workflow/my-workflow --tail 50
+```
+
+## Journal Entries
+
+View the event-sourced journal — every step recorded for replay protection:
+
+```bash
+orcher logs workflow/my-workflow --journal
+```
+
+This shows the sequence of journaled events: `WorkflowStarted`, `StepCompleted`, `TimerFired`, `EventReceived`, `WorkflowCompleted`, etc. Useful for understanding exactly what happened during execution and what would be replayed on recovery.
+
+## Task Execution Details
+
+View task-level execution records from the `task_executions` table:
+
+```bash
+orcher logs workflow/my-workflow --tasks
+```
+
+This shows each task's status, duration, retry count, and result.
+
+## Workflow History
+
+The `orcher workflow history` command (aliases: `journal`, `events`) provides another way to view the execution journal:
+
+```bash
+orcher workflow history <execution-id>
+```
+
+---
+
+## Next Steps
+
+- [Debugging Overview](/guides/observability/debugging) — Inspecting executions with describe, list, and get commands
+- [Understanding Replay](/guides/observability/debugging/replay) — How deterministic replay works and how to debug it
+- [Scenarios & Management](/guides/observability/debugging/scenarios) — Managing running workflows, common debugging scenarios, and CLI reference
+- [Logging](/guides/observability/logging) — Configure structured logging formats

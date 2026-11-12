@@ -1,0 +1,318 @@
+---
+id: 'fan-out-fan-in'
+title: 'Fan-Out/Fan-In Pattern'
+description: 'Execute work in parallel and aggregate results using the Fan-Out/Fan-In pattern in Orcher'
+sidebar_label: 'Overview'
+---
+
+The Fan-Out/Fan-In pattern splits work across multiple parallel operations (fan-out) and then collects and aggregates their results (fan-in). This maximizes throughput by executing independent operations concurrently — the total latency equals the slowest operation rather than the sum of all operations. Use this pattern when you need to process multiple items in a batch, call multiple APIs simultaneously, aggregate data from distributed sources, run independent validation checks in parallel, or perform map-reduce style dataset transformations.
+
+<div className="not-prose my-8 max-w-md mx-auto">
+  <div className="flex flex-col items-center">
+    {/* Workflow Start */}
+    <div className="border bg-surface-75 px-5 py-2 text-center">
+      <div className="text-xs font-medium text-foreground">Workflow Start</div>
+    </div>
+    <div className="w-px h-5 bg-border-strong" />
+    {/* Fan-Out: single point spreading to 5 columns */}
+    <div className="text-[10px] font-mono uppercase tracking-wider text-foreground-muted mb-1">fan-out</div>
+    <div className="relative w-full">
+      {/* Horizontal bar across all 5 columns */}
+      <div className="absolute top-0 h-px bg-border-strong" style={{ left: 'calc(10% - 0.2rem)', right: 'calc(10% - 0.2rem)' }} />
+      {/* 5 vertical drops + operation cards */}
+      <div className="grid grid-cols-5 gap-1.5">
+        {[1, 2, 3, 4, 5].map((n) => (
+          <div key={n} className="flex flex-col items-center">
+            <div className="w-px h-5 bg-border-strong" />
+            <div className="border bg-background w-full py-2 px-1 text-center">
+              <div className="text-[10px] font-medium text-foreground">Op {n}</div>
+            </div>
+            <div className="w-px h-5 bg-border-strong" />
+          </div>
+        ))}
+      </div>
+      {/* Bottom horizontal bar converging */}
+      <div className="absolute bottom-0 h-px bg-border-strong" style={{ left: 'calc(10% - 0.2rem)', right: 'calc(10% - 0.2rem)' }} />
+    </div>
+    <div className="text-[10px] font-mono uppercase tracking-wider text-foreground-muted mt-1">fan-in</div>
+    <div className="w-px h-5 bg-border-strong" />
+    {/* Aggregate */}
+    <div className="border bg-surface-100 px-5 py-2 text-center">
+      <div className="text-xs font-medium text-foreground">Aggregate Results</div>
+    </div>
+    <div className="w-px h-5 bg-border-strong" />
+    {/* Complete */}
+    <div className="border bg-surface-75 px-5 py-2 text-center">
+      <div className="text-xs font-medium text-foreground">Workflow Complete</div>
+    </div>
+  </div>
+</div>
+
+---
+
+## Basic Fan-Out/Fan-In
+
+The simplest form of fan-out/fan-in dispatches all tasks at once and waits for every result. Each item is processed independently as a separate task, and the workflow collects all results into a single aggregated response. This approach works well when the number of items is moderate (under a few hundred) and you can tolerate all-or-nothing semantics — if any task fails, the workflow fails.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BatchInput {
+    job_id: String,
+    items: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ItemResult {
+    item_id: String,
+    processed: bool,
+    value: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BatchResult {
+    job_id: String,
+    total_items: usize,
+    total_value: i32,
+    results: Vec<ItemResult>,
+}
+
+// Task to process a single item
+#[task(name = "process_item")]
+pub async fn process_item(
+    _ctx: TaskContext,
+    item_id: String,
+) -> Result<ItemResult> {
+    let value = item_id.len() as i32 * 10;
+
+    Ok(ItemResult {
+        item_id,
+        processed: true,
+        value,
+    })
+}
+
+// Basic fan-out/fan-in workflow
+#[workflow(name = "batch_processor", version = "1.0.0")]
+pub async fn batch_processor(
+    ctx: WorkflowContext,
+    input: BatchInput,
+) -> Result<BatchResult> {
+    println!("Processing batch {} with {} items", input.job_id, input.items.len());
+
+    // Fan-Out: Start processing all items in parallel
+    let mut task_futures = Vec::new();
+
+    for item in &input.items {
+        let task = ctx.execute_task(process_item, item.clone());
+        task_futures.push(task);
+    }
+
+    // Fan-In: Wait for all tasks to complete
+    let mut results = Vec::new();
+    let mut total_value = 0;
+
+    for task in task_futures {
+        let result: ItemResult = task.await?;
+        total_value += result.value;
+        results.push(result);
+    }
+
+    println!("Batch processing complete: {} items, total value: {}",
+        results.len(), total_value);
+
+    Ok(BatchResult {
+        job_id: input.job_id,
+        total_items: results.len(),
+        total_value,
+        results,
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import {
+  Workflow, Tasks, Task, WorkflowContext, TaskContext, createTaskRefs
+} from '@orcher/sdk';
+
+interface BatchInput {
+  jobId: string;
+  items: string[];
+}
+
+interface ItemResult {
+  itemId: string;
+  processed: boolean;
+  value: number;
+}
+
+interface BatchResult {
+  jobId: string;
+  totalItems: number;
+  totalValue: number;
+  results: ItemResult[];
+}
+
+@Tasks()
+class BatchTasks {
+  // Task to process a single item
+  @Task({ name: 'processItem' })
+  async processItem(ctx: TaskContext, itemId: string): Promise<ItemResult> {
+    const value = itemId.length * 10;
+
+    return {
+      itemId,
+      processed: true,
+      value,
+    };
+  }
+}
+
+const tasks = createTaskRefs(BatchTasks);
+
+// Basic fan-out/fan-in workflow
+@Workflow()
+class BatchProcessor {
+  async run(ctx: WorkflowContext, input: BatchInput): Promise<BatchResult> {
+    console.log(`Processing batch ${input.jobId} with ${input.items.length} items`);
+
+    // Fan-Out: Start processing all items in parallel
+    const taskPromises = input.items.map((item) =>
+      ctx.executeTask(tasks.processItem, item),
+    );
+
+    // Fan-In: Wait for all tasks to complete
+    const results = await Promise.all(taskPromises);
+
+    const totalValue = results.reduce((sum, r) => sum + r.value, 0);
+
+    console.log(`Batch processing complete: ${results.length} items, total value: ${totalValue}`);
+
+    return {
+      jobId: input.jobId,
+      totalItems: results.length,
+      totalValue,
+      results,
+    };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext, TaskContext
+
+# Task to process a single item
+@task(name="process_item")
+async def process_item(ctx: TaskContext, item_id: str) -> dict:
+    value = len(item_id) * 10
+
+    return {
+        "item_id": item_id,
+        "processed": True,
+        "value": value,
+    }
+
+# Basic fan-out/fan-in workflow
+@workflow(name="batch_processor", version="1.0.0")
+async def batch_processor(ctx: WorkflowContext, input: dict) -> dict:
+    print(f"Processing batch {input['job_id']} with {len(input['items'])} items")
+
+    # Fan-Out: Start processing all items in parallel
+    task_futures = []
+    for item in input["items"]:
+        task_futures.append(ctx.execute_task(process_item, item))
+
+    # Fan-In: Wait for all tasks to complete
+    results = []
+    total_value = 0
+
+    for task_future in task_futures:
+        result = await task_future
+        total_value += result["value"]
+        results.append(result)
+
+    print(f"Batch processing complete: {len(results)} items, total value: {total_value}")
+
+    return {
+        "job_id": input["job_id"],
+        "total_items": len(results),
+        "total_value": total_value,
+        "results": results,
+    }
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/patterns/fan-out-fan-in/rate-limiting" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Rate-Limited Fan-Out</h3>
+      <p className="text-sm text-foreground-light">
+        Control concurrency to avoid overwhelming downstream systems
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/fan-out-fan-in/partial-failures" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Partial Failure Handling</h3>
+      <p className="text-sm text-foreground-light">
+        Continue processing when individual items fail
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/fan-out-fan-in/dynamic" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Dynamic Fan-Out</h3>
+      <p className="text-sm text-foreground-light">
+        Determine parallelism from runtime data
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/fan-out-fan-in/nested" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Nested Fan-Out/Fan-In</h3>
+      <p className="text-sm text-foreground-light">
+        Hierarchical parallel processing with child workflows
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/fan-out-fan-in/best-practices" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Best Practices & Performance</h3>
+      <p className="text-sm text-foreground-light">
+        Guidelines, performance tuning, and real-world use cases
+      </p>
+    </div>
+  </Link>
+</div>

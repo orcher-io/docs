@@ -1,0 +1,101 @@
+---
+id: typescript
+title: TypeScript SDK
+description: Write durable workflows as plain async TypeScript, with functional or decorator-based definitions and dependency injection for tasks
+sidebar_label: 'Overview'
+---
+
+The ORCHER TypeScript SDK (`@orcher/sdk`) lets you write workflows and tasks as plain async
+TypeScript. It offers two ways to define them, and you can mix them in one worker:
+
+- **Functional**: `task({ ... })` and `workflow({ ... })` return typed references, with no classes.
+- **Decorators**: `@Tasks()`/`@Task()` on a class whose constructor dependencies are injected,
+  and `@Workflow({ name })` on a class with a `run()` method.
+
+Both register what they define in the process when the module is imported, and a worker
+started in that process serves everything registered. Task references carry their input and
+output types, so `ctx.executeTask()` is checked by the compiler.
+
+---
+
+## Installation
+
+```bash
+npm install @orcher/sdk
+```
+
+### Requirements
+
+- **Node.js 22 or later.**
+- **A supported platform.** The SDK runs on a native core, shipped prebuilt for macOS (arm64
+  and x64) and Linux (x64 and arm64, with glibc or musl). npm installs the one that matches
+  your machine. Windows is not supported.
+- **Legacy decorators.** The decorators need `experimentalDecorators`, and constructor
+  injection needs `emitDecoratorMetadata`:
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "commonjs",
+    "strict": true,
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true
+  }
+}
+```
+
+---
+
+## Quick Start
+
+### 1. Define Tasks
+
+Tasks are where side effects go: API calls, database writes, emails. A functional task:
+
+<$CodeSample path="typescript/src/overview/tasks.ts" region="functional" />
+
+Or a class of tasks, when they share injected services. Each `@Task()` method is a task named
+after the method, and `createTaskRefs()` gives you typed references to them:
+
+<$CodeSample path="typescript/src/overview/tasks.ts" region="class" />
+
+### 2. Define a Workflow
+
+A workflow orchestrates tasks. Its code must be deterministic: it is replayed from its journal
+after a restart, and must make the same calls in the same order each time. Functional:
+
+<$CodeSample path="typescript/src/overview/workflows.ts" region="functional" />
+
+Or as a class. `@Workflow()` requires a `name`, and the class must have a `run()` method:
+
+<$CodeSample path="typescript/src/overview/workflows.ts" region="class" />
+
+### 3. Run a Worker
+
+<$CodeSample path="typescript/src/overview/worker.ts" region="worker" />
+
+### 4. Start a Workflow (Client)
+
+<$CodeSample path="typescript/src/overview/start.ts" region="client" />
+
+<Admonition type="note">
+
+A workflow and a task each take one input. Pass an object (or a single string, number or
+boolean), not a top-level array: in `@orcher/sdk` 0.5.4 an array input reaches the function
+as its first element only. Wrap lists in an object, as in `{ items: [...] }`.
+
+</Admonition>
+
+---
+
+## Next Steps
+
+- [Workflows](/guides/sdk/typescript/workflows): the `WorkflowContext` API, timers, child workflows, events, queries
+- [Tasks](/guides/sdk/typescript/tasks): task options, retries, heartbeats, cancellation, injection
+- [Client](/guides/sdk/typescript/client): starting workflows, handles, errors, authentication
+- [Worker](/guides/sdk/typescript/worker): worker options, registration, shutdown
+- [Actors](/guides/sdk/typescript/actors): virtual actors with server-side state
+- [Sessions](/guides/sdk/typescript/sessions): pinning a series of tasks to one worker
+- [Testing](/guides/sdk/typescript/testing): running workflows in memory with mocked tasks
+- [Patterns](/guides/sdk/typescript/patterns): sagas, fan-out, approvals, batching

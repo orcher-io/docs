@@ -1,0 +1,202 @@
+---
+id: orchestrator-monitoring
+title: Monitoring & Operations
+description: Health checks, database schema, performance tuning, graceful shutdown, and troubleshooting for the Orcher orchestrator
+---
+
+## Health Checks
+
+### Orchestrator Endpoints
+
+The orchestrator's HTTP listener (port 8080) serves the health endpoints alongside the REST API:
+
+```bash
+# Health
+curl http://localhost:8080/health
+
+# Liveness — is the orchestrator process running?
+curl http://localhost:8080/health/live
+
+# Readiness
+curl http://localhost:8080/health/ready
+
+# Prometheus metrics
+curl http://localhost:8080/metrics
+```
+
+### Kubernetes Probes
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orcher-orchestrator
+spec:
+  replicas: 3
+  template:
+    spec:
+      containers:
+      - name: orchestrator
+        ports:
+        - containerPort: 50051
+          name: grpc
+        - containerPort: 8080
+          name: http
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          failureThreshold: 3
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2000m"
+```
+
+---
+
+## Database Schema
+
+The orchestrator uses these core tables:
+
+| Table | Purpose |
+|-------|---------|
+| `workflow_executions` | Workflow instances with claim tracking (`claimed_by`, `claim_timeout_at`) |
+| `task_executions` | Task lifecycle (scheduled, started, completed, failed) |
+| `journal` | Event-sourced journal for replay protection |
+| `execution_logs` | Real-time execution logs |
+| `outbox_queue` | Atomic task dispatch with lease-based claiming |
+| `timer_queue` | Durable timers (sleep, timeouts, schedules) |
+| `dead_letter_queue` | Failed tasks after max retries |
+| `namespaces` | Logical isolation for multi-tenancy |
+| `organizations` | Organization-level multi-tenancy |
+
+Key design patterns:
+
+- **Idempotency** — `idempotency_key` unique constraints prevent duplicate operations
+- **Claim-based polling** — `claimed_by` and `claim_timeout_at` fields enable safe distributed polling without database locks
+- **Shard routing** — `shard_id` column for horizontal partitioning
+- **JSONB attributes** — Flexible metadata with GIN indexes for fast queries
+
+---
+
+## Performance Tuning
+
+### Connection Pool Sizing
+
+The orchestrator defaults to 80 PostgreSQL connections (`ORCHER_PG_MAX_CONNECTIONS`, with `ORCHER_PG_MIN_CONNECTIONS` defaulting to 20). For production, tune based on your instance count:
+
+```bash
+# Per-node pool size (default 80); lower it when running many nodes on one database
+ORCHER_PG_MAX_CONNECTIONS=80
+ORCHER_PG_MIN_CONNECTIONS=20
+
+# Total connections needed = orchestrator_instances * ORCHER_PG_MAX_CONNECTIONS
+# Ensure PostgreSQL max_connections > total needed + buffer
+# With PgBouncer, each orchestrator gets multiplexed connections
+```
+
+Using PgBouncer in transaction mode is strongly recommended — it supports 1000+ concurrent clients via connection multiplexing.
+
+### Memory
+
+| Concurrent Workflows | Recommended RAM |
+|---------------------|-----------------|
+| Up to 100 | 512 MB |
+| 100 - 500 | 1 GB |
+| 500 - 1,000 | 2 GB |
+| 1,000 - 5,000 | 4 GB |
+| 5,000+ | 8 GB+ |
+
+The `HighPerfCache` keeps hot workflow state in memory. Memory usage scales with the number of active (not total) workflows.
+
+### Scaling Characteristics
+
+**Single node:** Up to ~100 concurrent workflows with direct PostgreSQL, more with PgBouncer.
+
+**Multi-node cluster:** Horizontal scaling via sharding. Each node owns a subset of shards and processes them independently. PostgreSQL becomes the bottleneck at very high throughput — mitigate with PgBouncer and read replicas.
+
+**Eager dispatch optimization:** When a task completes, the orchestrator can eagerly return the next task in the same gRPC response, saving a poll round trip for sequential workflows.
+
+---
+
+## Graceful Shutdown
+
+The orchestrator handles SIGINT/SIGTERM gracefully:
+
+1. Stops accepting new gRPC connections
+2. Cancels background processors (outbox, timer, schedule)
+3. Releases all shard leases (other nodes pick them up)
+4. Drains in-flight requests
+5. Closes database connections
+
+The default shutdown timeout is 30 seconds.
+
+---
+
+## Troubleshooting
+
+### Server Won't Start
+
+Check database connectivity:
+
+```bash
+# Test PostgreSQL connection
+psql $DATABASE_URL -c "SELECT 1"
+```
+
+Check port availability:
+
+```bash
+lsof -i :50051
+lsof -i :8080
+```
+
+### Slow Performance
+
+Check database query performance:
+
+```sql
+-- Find slow queries
+SELECT query, mean_exec_time, calls
+FROM pg_stat_statements
+ORDER BY mean_exec_time DESC
+LIMIT 10;
+```
+
+Check queue depth via the CLI:
+
+```bash
+orcher queue depth --watch
+orcher queue stats default
+```
+
+Common causes:
+- **High outbox depth** — OutboxProcessor can't keep up. Scale orchestrator instances.
+- **Timer backlog** — Many timers firing simultaneously. Increase timer processor throughput.
+- **Connection pool exhaustion** — Use PgBouncer or increase pool size.
+
+---
+
+## Next Steps
+
+- [Orchestrator Overview](/guides/operations/orchestrator) — Architecture and components
+- [Configuration](/guides/operations/orchestrator/configuration) — Environment variables and database connection
+- [Deployment](/guides/operations/orchestrator/deployment) — Starting the server in development, Docker, and systemd
+- [High Availability](/guides/operations/orchestrator/high-availability) — Multi-instance deployment and load balancing
+- [Worker Management](/guides/operations/workers) — Deploy and manage workers
+- [Queue Configuration](/guides/operations/queue) — Configure task queues and priority
+- [Storage Setup](/guides/operations/storage) — Configure PostgreSQL
+- [Observability](/guides/observability/metrics) — Set up metrics, tracing, and logging

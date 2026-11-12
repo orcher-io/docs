@@ -1,0 +1,137 @@
+---
+id: 'tracing'
+title: 'Distributed Tracing'
+description: 'Track workflow execution across services with OpenTelemetry spans, Jaeger, and OTLP exporters'
+sidebar_label: 'Tracing'
+---
+
+Orcher provides distributed tracing built on OpenTelemetry standards. The `orcher-monitoring` crate includes span creation helpers for workflows, tasks, workers, and storage operations, with context propagation across service boundaries and export to Jaeger or any OTLP-compatible backend.
+
+- **OpenTelemetry native** — Standard span creation, context propagation, and W3C trace context headers
+- **Span helpers** — `create_workflow_span`, `create_task_span`, `create_worker_span`, `create_storage_span` for consistent instrumentation
+- **Multiple exporters** — Jaeger, OTLP (gRPC, HTTP/Protobuf, HTTP/JSON), and console output
+- **Context propagation** — `inject_context` / `extract_context` for trace continuity across HTTP boundaries
+- **Feature-gated** — Enabled via the `tracing-export` Cargo feature (on by default)
+
+---
+
+## Setup
+
+### Monitoring Builder
+
+The `MonitoringBuilder` API provides integrated initialization of metrics, tracing, and health checks:
+
+```rust
+use orcher_monitoring::MonitoringBuilder;
+
+let mut monitoring = MonitoringBuilder::new()
+    .with_service_name("orchestrator")
+    .with_prometheus("0.0.0.0:8001".parse()?)
+    .with_jaeger("orchestrator", "localhost:6831")
+    .build()
+    .await?;
+
+monitoring.start().await?;
+```
+
+Presets are available for common configurations:
+
+```rust
+use orcher_monitoring::presets;
+
+// Minimal: Prometheus metrics only
+let monitoring = presets::minimal_monitoring();
+
+// Full: Prometheus + Jaeger + health checks
+let monitoring = presets::full_observability("orchestrator", "localhost:6831");
+
+// Cloud-native: OTLP for both metrics and traces
+let monitoring = presets::cloud_native_otlp("http://otel-collector:4317");
+```
+
+### Jaeger
+
+Export traces to Jaeger for visualization:
+
+```rust
+use orcher_monitoring::exporters::jaeger::JaegerConfig;
+
+let config = JaegerConfig {
+    service_name: "orchestrator".to_string(),
+    agent_endpoint: Some("localhost:6831".to_string()),     // UDP agent
+    collector_endpoint: Some("http://localhost:14268/api/traces".to_string()), // HTTP collector
+    sample_rate: 1.0,   // 1.0 = 100%, 0.1 = 10%
+    max_batch_size: 512,
+    batch_timeout: Duration::from_secs(5),
+};
+```
+
+Run Jaeger locally:
+
+```bash
+docker run -d --name jaeger \
+  -p 6831:6831/udp \
+  -p 16686:16686 \
+  -p 14268:14268 \
+  jaegertracing/all-in-one:latest
+
+# Jaeger UI at http://localhost:16686
+```
+
+### OTLP
+
+Export to any OpenTelemetry Collector:
+
+```rust
+use orcher_monitoring::exporters::otlp::OtlpConfig;
+
+let config = OtlpConfig {
+    endpoint: "http://otel-collector:4317".to_string(),
+    protocol: OtlpProtocol::Grpc,       // or HttpProtobuf, HttpJson
+    export_traces: true,
+    export_metrics: true,
+    timeout: Duration::from_secs(10),
+    max_batch_size: 512,
+    batch_timeout: Duration::from_secs(5),
+    headers: HashMap::new(),             // Custom headers (API keys, etc.)
+};
+```
+
+OpenTelemetry Collector config:
+
+```yaml
+# otel-collector-config.yaml
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  batch:
+    timeout: 10s
+    send_batch_size: 1024
+
+exporters:
+  jaeger:
+    endpoint: jaeger-collector:14250
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [jaeger]
+```
+
+---
+
+## Next Steps
+
+- [Creating Spans](/guides/observability/tracing/creating-spans) — Typed span helpers for workflows, tasks, storage, and workers
+- [Context Propagation](/guides/observability/tracing/context-propagation) — W3C trace context across service boundaries
+- [Best Practices](/guides/observability/tracing/best-practices) — Sampling, visualization, and troubleshooting
+- [Metrics](/guides/observability/metrics) — Prometheus metrics for monitoring
+- [Logging](/guides/observability/logging) — Structured logging configuration

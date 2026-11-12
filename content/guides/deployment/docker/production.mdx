@@ -1,0 +1,98 @@
+---
+id: 'docker-production'
+title: 'Production Dockerfile'
+description: 'Multi-stage Dockerfile for containerized Orcher deployments with non-root user, health checks, and full production stack setup'
+sidebar_label: 'Production'
+---
+
+The orchestrator includes a multi-stage Dockerfile for containerized deployments.
+
+## Dockerfile
+
+```dockerfile
+# Build stage
+FROM rust:1.75-slim as builder
+WORKDIR /app
+RUN apt-get update && apt-get install -y \
+    pkg-config libssl-dev protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY services/orchestrator ./services/orchestrator
+WORKDIR /app/services/orchestrator
+RUN cargo build --release
+
+# Runtime stage
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y \
+    ca-certificates libssl3 curl \
+    && rm -rf /var/lib/apt/lists/*
+RUN useradd -m -u 1000 orchestrator
+COPY --from=builder /app/target/release/orchestrator /usr/local/bin/orchestrator
+USER orchestrator
+EXPOSE 50051 8080
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8080/health/live || exit 1
+ENV LOG_LEVEL=info LOG_FORMAT=json \
+    GRPC_BIND_ADDR=0.0.0.0:50051 HTTP_BIND_ADDR=0.0.0.0:8080
+ENTRYPOINT ["orchestrator"]
+```
+
+## Build and Run
+
+```bash
+# From the repository root
+docker build -f services/orchestrator/Dockerfile -t orcher-orchestrator .
+
+docker run -d \
+  --name orchestrator \
+  --network orcher-network \
+  -p 50051:50051 \
+  -p 8001:8001 \
+  -e DATABASE_URL="postgresql://orcher:orcher@orcher-pgbouncer:5432/orcher" \
+  -e REDIS_URL="redis://orcher-redis:6379" \
+  -e LOG_FORMAT=json \
+  orcher-orchestrator
+```
+
+## Key Properties
+
+- **Non-root user** — Runs as `orchestrator` (uid 1000)
+- **Health check** — Checks `http://localhost:8080/health/live` every 30 seconds
+- **Minimal runtime** — `debian:bookworm-slim` with only `ca-certificates`, `libssl3`, and `curl`
+- **JSON logging** — Default format set to `json` for production log aggregation
+
+---
+
+## Full Production Stack
+
+Combine the backing services with containerized orchestrator:
+
+```bash
+# Start backing services
+cd docker
+docker compose up -d
+
+# Build and run orchestrator on the same network
+docker build -f services/orchestrator/Dockerfile -t orcher-orchestrator ..
+docker run -d \
+  --name orchestrator \
+  --network orcher-network \
+  -p 50051:50051 \
+  -p 8001:8001 \
+  -e DATABASE_URL="postgresql://orcher:orcher@orcher-pgbouncer:5432/orcher" \
+  -e REDIS_URL="redis://orcher-redis:6379" \
+  -e LOG_FORMAT=json \
+  orcher-orchestrator
+```
+
+Database migrations run automatically on orchestrator startup — no separate migration step is needed.
+
+---
+
+## Next Steps
+
+- [Docker Overview](/guides/deployment/docker) — Quick start and Docker Compose services
+- [Configuration](/guides/deployment/docker/configuration) — Environment variables, CLI flags, and TOML configuration
+- [Troubleshooting](/guides/deployment/docker/troubleshooting) — Health checks, volumes, and common issues
+- [Kubernetes](/guides/deployment/kubernetes) — Deploy to Kubernetes with Helm charts

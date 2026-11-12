@@ -1,0 +1,207 @@
+---
+id: 'tasks-best-practices'
+title: 'Best Practices'
+description: 'Production-ready patterns and guidelines for writing reliable, maintainable tasks in Orcher.'
+sidebar_label: 'Best Practices'
+---
+
+### 1. Keep Tasks Focused
+
+**Good:** Single responsibility
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task(name = "validate_email")]
+pub async fn validate_email(
+_ctx: TaskContext,
+email: String,
+) -> Result<bool> {
+Ok(email.contains('@'))
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Inside a @Tasks() class:
+@Task({ name: 'validateEmail' })
+async validateEmail(
+  _ctx: TaskContext,
+  email: string
+): Promise<boolean> {
+  return email.includes('@');
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import task, TaskContext
+
+@task(name="validate_email")
+async def validate_email(ctx: TaskContext, email: str) -> bool:
+return "@" in email
+```
+
+</TabPanel>
+
+</Tabs>
+
+### 2. Use Descriptive Names
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+<TabPanel id="rust" label="Rust">
+
+```rust
+// ✔ Good: Clear intent
+#[task(name = "charge_credit_card_stripe")]
+#[task(name = "reserve_inventory_item")]
+#[task(name = "send_order_confirmation_email")]
+
+// ❌ Bad: Vague names
+#[task(name = "process")]
+#[task(name = "handle_data")]
+#[task(name = "do_stuff")]
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Inside a @Tasks() class:
+
+// ✔ Good: Clear intent
+@Task({ name: 'charge_credit_card_stripe' })
+@Task({ name: 'reserve_inventory_item' })
+@Task({ name: 'send_order_confirmation_email' })
+
+// ❌ Bad: Vague names
+@Task({ name: 'process' })
+@Task({ name: 'handle_data' })
+@Task({ name: 'do_stuff' })
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+# ✔ Good: Clear intent
+@task(name="charge_credit_card_stripe")
+@task(name="reserve_inventory_item")
+@task(name="send_order_confirmation_email")
+
+# ❌ Bad: Vague names
+@task(name="process")
+@task(name="handle_data")
+@task(name="do_stuff")
+```
+
+</TabPanel>
+</Tabs>
+
+### 3. Configure Appropriate Timeouts
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+<TabPanel id="rust" label="Rust">
+
+```rust
+// ✔ Good: Match timeout to expected duration
+#[task(name = "quick_validation", timeout_mins = 1)]
+#[task(name = "batch_import", timeout_mins = 30)]
+#[task(name = "ml_training", timeout_mins = 180)]
+
+// ❌ Bad: No timeout for long operations
+#[task(name = "video_encoding")]  // Could run forever
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Inside a @Tasks() class:
+
+// ✔ Good: Match timeout to expected duration
+@Task({ name: 'quick_validation', timeout: 60000 })
+@Task({ name: 'batch_import', timeout: 1800000 })
+@Task({ name: 'ml_training', timeout: 10800000 })
+
+// ❌ Bad: No timeout for long operations
+@Task({ name: 'video_encoding' })  // Could run forever
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+# ✔ Good: Match timeout to expected duration
+@task(name="quick_validation", timeout=60.0)
+@task(name="batch_import", timeout=1800.0)
+@task(name="ml_training", timeout=10800.0)
+
+# ❌ Bad: No timeout for long operations
+@task(name="video_encoding")  # Could run forever
+```
+
+</TabPanel>
+</Tabs>
+
+### 4. Design for Idempotency
+
+Always use idempotency keys or check-before-execute patterns to ensure tasks can be safely retried.
+
+### 5. Send Heartbeats for Long Operations
+
+Send periodic heartbeats to prevent timeout and provide progress visibility.
+
+### 6. Handle Cancellation Gracefully
+
+Always check for cancellation in long-running tasks and clean up resources properly.
+
+### 7. Use Type-Safe Inputs and Outputs
+
+Define clear types for task inputs and outputs to catch errors at compile time.
+
+---
+
+### Next Steps
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/workflows" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">← Workflows</h3>
+      <p className="text-sm text-foreground-light">
+        Learn how workflows orchestrate tasks
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/journaling" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Automatic Journaling →</h3>
+      <p className="text-sm text-foreground-light">
+        Learn how Orcher automatically journals every step
+      </p>
+    </div>
+  </Link>
+</div>
+
+---
+
+### Related Guides
+
+- [Error Handling](/guides/core/error-handling) - Handle failures and retries
+- [Testing](/guides/local-development/testing-workflows) - Test workflows and tasks
+- [Best Practices](/guides/core/workflows/best-practices) - Production-ready patterns

@@ -1,0 +1,1026 @@
+---
+id: 'workflows-getting-started'
+title: 'Your First Workflow'
+description: 'Write your first workflow, understand the execution model, and learn the workflow context API.'
+sidebar_label: 'Getting Started'
+---
+
+A workflow is defined using language-specific decorators or macros and receives a **workflow context** (`ctx`) that provides all the durable operations. The context is how you tell Orcher "this is a step that should be journaled."
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+// Define a workflow with the #[workflow] macro
+#[workflow(
+    name = "greet_user",
+    version = "1.0.0",
+    description = "Greet a user by name"
+)]
+pub async fn greet_user(
+    ctx: WorkflowContext,
+    name: String,
+) -> Result<String> {
+    // Step 1: Format greeting (type-safe task reference, automatically journaled)
+    let greeting: String = ctx
+        .execute_task(format_greeting, name.clone())
+        .await?;
+
+    // Step 2: Log the greeting (automatically journaled)
+    ctx.execute_task(log_greeting, greeting.clone()).await?;
+
+    // Return result
+    Ok(greeting)
+}
+
+// Task: Format greeting
+#[task(
+    name = "format_greeting",
+    description = "Format a greeting message"
+)]
+pub async fn format_greeting(_ctx: TaskContext, name: String) -> Result<String> {
+    Ok(format!("Hello, {}!", name))
+}
+
+// Task: Log greeting
+#[task(
+    name = "log_greeting",
+    description = "Log the greeting message"
+)]
+pub async fn log_greeting(_ctx: TaskContext, message: String) -> Result<()> {
+    println!("Greeting: {}", message);
+    Ok(())
+}
+```
+
+**Start the workflow:**
+
+```rust
+use orcher::prelude::*;
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<()> {
+    let client = Client::connect("http://localhost:50051").await?;
+
+    let handle = client
+        .start_workflow("greet_user", "Alice".to_string())
+        .await?;
+
+    let result: String = handle.result().await?;
+    println!("Result: {}", result);
+
+    Ok(())
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, WorkflowContext, Tasks, Task, TaskContext, createTaskRefs } from '@orcher/sdk';
+
+// Define tasks in a handler class
+@Tasks()
+class GreetingTasks {
+  @Task({ name: 'format_greeting' })
+  async formatGreeting(ctx: TaskContext, input: { name: string }): Promise<string> {
+    return `Hello, ${input.name}!`;
+  }
+
+  @Task({ name: 'log_greeting' })
+  async logGreeting(ctx: TaskContext, input: { message: string }): Promise<void> {
+    console.log('Greeting:', input.message);
+  }
+}
+
+// Create type-safe task references
+const greetingTasks = createTaskRefs(GreetingTasks);
+
+// Define a workflow with the @Workflow decorator
+@Workflow({ name: 'greet_user', version: '1.0' })
+export class GreetUserWorkflow {
+  async run(ctx: WorkflowContext, input: { name: string }): Promise<string> {
+    // Step 1: Format greeting (automatically journaled)
+    const greeting = await ctx.executeTask(
+      greetingTasks.formatGreeting,
+      { name: input.name }
+    );
+
+    // Step 2: Log the greeting (automatically journaled)
+    await ctx.executeTask(greetingTasks.logGreeting, { message: greeting });
+
+    // Return result
+    return greeting;
+  }
+}
+```
+
+**Start the workflow:**
+
+```typescript
+import { Client } from '@orcher/sdk';
+
+const client = new Client({ serverUrl: 'http://localhost:50051' });
+await client.connect();
+
+const handle = await client.startWorkflow({
+  workflowType: 'greet_user',
+  workflowId: 'greet-alice',
+  taskQueue: 'default',
+  args: [{ name: 'Alice' }],
+});
+
+const result = await handle.result();
+console.log('Result:', result);
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext, TaskContext
+
+# Define a workflow
+@workflow(name="greet_user", version="1.0")
+async def greet_user(ctx: WorkflowContext, name: str) -> str:
+    # Step 1: Format greeting (automatically journaled)
+    greeting = await ctx.execute_task(format_greeting, name=name)
+
+    # Step 2: Log the greeting (automatically journaled)
+    await ctx.execute_task(log_greeting, message=greeting)
+
+    # Return result
+    return greeting
+
+# Task: Format greeting
+@task(name="format_greeting")
+async def format_greeting(ctx: TaskContext, name: str) -> str:
+    return f"Hello, {name}!"
+
+# Task: Log greeting
+@task(name="log_greeting")
+async def log_greeting(ctx: TaskContext, message: str) -> None:
+    print(f"Greeting: {message}")
+```
+
+**Start the workflow:**
+
+```python
+from orcher import Client, ClientConfig
+
+async with Client(ClientConfig(server_url="http://localhost:50051")) as client:
+    handle = await client.start_workflow(
+        workflow_type="greet_user",
+        workflow_id="greet-alice",
+        task_queue="default",
+        args=("Alice",),
+    )
+
+    result = await handle.result()
+    print(f"Result: {result}")
+```
+
+</TabPanel>
+
+</Tabs>
+
+In this example, `greet_user` is the workflow and `format_greeting` / `log_greeting` are tasks. The workflow orchestrates the tasks in sequence. Each `execute_task` call is a journaled step — if the workflow crashes after formatting the greeting but before logging it, the replay will skip the formatting step (using the journaled result) and only execute the logging step.
+
+---
+
+## How Workflows Work
+
+### The Execution Model
+
+When your workflow code calls `ctx.execute_task()` (or any other context method), the following happens under the hood:
+
+1. **Journal check** — The system checks whether this step has already been executed by looking up the step's sequence number in the journal. Each context call in your workflow gets a deterministic sequence number based on its position in the execution flow.
+
+2. **First execution** — If the step is not in the journal, the task is dispatched to a worker, executed, and the result is written to the journal in PostgreSQL. The workflow then receives the result and continues.
+
+3. **Replay** — If the step is already in the journal (because the workflow is being replayed after a crash), the journaled result is returned immediately without executing the task again. From your workflow code's perspective, the call looks identical — it `await`s and gets back the same result.
+
+This is the key insight: **your workflow function runs from the beginning every time**, but completed steps are fast-forwarded using journaled results. The function itself is the source of truth for the execution order; the journal is the source of truth for the results.
+
+### Journaling in Action
+
+Here's what happens when a payment workflow executes, crashes, and recovers:
+
+<ReplayTimeline
+  title="Payment Workflow"
+  firstRunSteps={[
+    { step: 1, task: 'charge_card', action: 'Stripe API', result: '"ch_123"', status: 'executed' },
+    { step: 2, task: 'reserve_inventory', action: 'DB Update', result: '"ok"', status: 'executed' },
+    { step: 3, task: 'send_confirmation', status: 'crashed' },
+  ]}
+  replaySteps={[
+    { step: 1, task: 'charge_card', result: '"ch_123"', status: 'cached' },
+    { step: 2, task: 'reserve_inventory', result: '"ok"', status: 'cached' },
+    { step: 3, task: 'send_confirmation', status: 'fresh' },
+  ]}
+/>
+
+Notice that `charge_card` is not called a second time. On replay the customer is not charged again: the charge ran during the first execution, and its journaled result (`ch_123`) is returned instead of calling the API. This is how Orcher avoids repeating completed work on replay. If a task fails _before_ its result is recorded, it will be retried — so make external calls idempotent.
+
+---
+
+## Workflow Context
+
+The `WorkflowContext` (called `ctx` by convention) is the interface between your workflow code and the Orcher runtime. Every method on the context represents a **durable operation** — one that is journaled and safe to replay. You should never perform side effects (API calls, database writes, file I/O) directly in workflow code. Instead, execute them through the context.
+
+Orcher provides two ways to execute work inside a workflow: **`execute_task`** for distributed, registered tasks and **`execute`** for inline, one-off operations. Both are journaled and replay-safe, but they differ in how and where the work runs.
+
+### execute_task — Distributed Task Execution
+
+`execute_task` is the primary way workflows interact with the outside world. It references a **registered task** — a function decorated with `@task` (Python), `#[task]` (Rust), or `@Task` (TypeScript) — and schedules it for **distributed execution** via a task queue.
+
+When you call `execute_task`:
+
+1. The workflow emits a `ScheduleTask` command and **suspends**
+2. The task is placed on a task queue and picked up by a **task worker** (which may be a different process or machine)
+3. The worker executes the task function and records the result
+4. The workflow is re-dispatched, replays to the suspension point, and receives the result
+
+This distributed model means tasks scale independently from workflows. You can run 10 workflow workers and 100 task workers, or vice versa.
+
+`execute_task` also supports rich configuration: retry policies, timeouts, and heartbeat monitoring — all defined at the task level.
+
+#### Type-Safe Task References
+
+Orcher strongly encourages **type-safe task references** across all SDKs. Instead of passing a string task name to `execute_task`, you pass a **typed reference** to the task itself. This gives you:
+
+- **Compile-time / import-time validation** — A misspelled task name is caught by the compiler (Rust) or at import time (TypeScript/Python), not at runtime in production.
+- **Input/output type inference** — The SDK knows what input a task expects and what output it returns. Pass the wrong shape and your IDE or compiler tells you immediately.
+- **IDE support** — Autocomplete, go-to-definition, and rename refactoring all work because task references are real code symbols, not opaque strings.
+- **Zero runtime overhead** — In Rust, the `#[task]` macro generates a zero-sized const that resolves to a `&'static str` at compile time. In TypeScript, `createTaskRefs()` is a type-level cast with no runtime cost. In Python, the decorated function itself carries metadata.
+
+Each SDK implements this differently, but the principle is the same: **reference the task, not its name**.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+In Rust, the `#[task]` macro generates a type-safe const with the same name as your function. You pass this const (not a string) to `execute_task`, so the compiler catches typos and enforces input/output types.
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+// Define a registered task
+#[task(name = "charge_card", timeout = 60, retry = 3)]
+pub async fn charge_card(
+    _ctx: TaskContext,
+    amount: f64,
+    card_token: String,
+) -> Result<ChargeResult> {
+    // This runs on a task worker (potentially a different machine)
+    stripe::Charge::create(&client, amount, &card_token).await
+}
+
+#[workflow(name = "process_payment", version = "1.0.0")]
+pub async fn process_payment(
+    ctx: WorkflowContext,
+    input: PaymentInput,
+) -> Result<PaymentOutput> {
+    // Type-safe task reference — compiler catches typos
+    let charge: ChargeResult = ctx
+        .execute_task(charge_card, (input.amount, input.card_token.clone()))
+        .await?;
+
+    // If workflow crashes here, charge_card won't be re-executed on replay
+
+    let inventory: InventoryResult = ctx
+        .execute_task(reserve_inventory, input.order_id.clone())
+        .await?;
+
+    Ok(PaymentOutput {
+        charge_id: charge.charge_id,
+        reserved: inventory.reserved,
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+In TypeScript, tasks are defined with `@Task` decorators on handler classes. Call `createTaskRefs(MyTasks)` to extract a typed object where each property is a `TaskReference<TInput, TOutput>` — TypeScript automatically infers the input and output types from your method signatures. When you call `ctx.executeTask(ref, input)`, both the input shape and the return type are fully type-checked.
+
+```typescript
+import { Workflow, WorkflowContext, Tasks, Task, TaskContext, createTaskRefs } from '@orcher/sdk';
+
+// Define registered tasks in a handler class
+@Tasks()
+class PaymentTasks {
+  @Task({ name: 'charge_card', timeout: 60000 })
+  async chargeCard(ctx: TaskContext, input: { amount: number; cardToken: string }): Promise<ChargeResult> {
+    // This runs on a task worker (potentially a different machine)
+    return await stripe.charges.create({ amount: input.amount, source: input.cardToken });
+  }
+
+  @Task({ name: 'reserve_inventory', timeout: 30000 })
+  async reserveInventory(ctx: TaskContext, input: { orderId: string }): Promise<InventoryResult> {
+    return await db.reserveInventory(input.orderId);
+  }
+}
+
+// Create type-safe task references
+const paymentTasks = createTaskRefs(PaymentTasks);
+
+@Workflow({ name: 'process_payment', version: '1.0' })
+class ProcessPayment {
+  async run(ctx: WorkflowContext, input: PaymentInput): Promise<PaymentOutput> {
+    // Type-safe task reference — TypeScript infers input/output types
+    const charge = await ctx.executeTask(paymentTasks.chargeCard, {
+      amount: input.amount,
+      cardToken: input.cardToken,
+    });
+
+    // If workflow crashes here, chargeCard won't be re-executed on replay
+
+    const inventory = await ctx.executeTask(paymentTasks.reserveInventory, {
+      orderId: input.orderId,
+    });
+
+    return { chargeId: charge.chargeId, reserved: inventory.reserved };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+In Python, tasks are registered with the `@task` decorator. You pass the **decorated function itself** to `execute_task` — not a string name. Orcher extracts the task name from the decorator metadata at runtime. This means IDE autocomplete, go-to-definition, and import-time validation all work. If you use type hints on your task's return type, Orcher will also automatically coerce cached results back to the correct dataclass type on replay.
+
+```python
+from orcher import workflow, task, WorkflowContext, TaskContext
+
+# Define a registered task
+@task(name="charge_card", timeout=60, retry_policy={"max_attempts": 3})
+async def charge_card(ctx: TaskContext, amount: float, card_token: str, order_id: str) -> dict:
+    # This runs on a task worker (potentially a different machine)
+    return stripe.Charge.create(amount=amount, source=card_token)
+
+@workflow(name="process_payment", version="1.0")
+async def process_payment(ctx: WorkflowContext, amount: float, card_token: str, order_id: str) -> dict:
+    # Pass the function reference — Orcher reads task name from decorator
+    charge = await ctx.execute_task(charge_card, amount=amount, card_token=card_token, order_id=order_id)
+
+    # If workflow crashes here, charge_card won't be re-executed on replay
+
+    inventory = await ctx.execute_task(reserve_inventory, order_id=order_id)
+
+    return {
+        "charge_id": charge["charge_id"],
+        "reserved": inventory["reserved"],
+    }
+```
+
+</TabPanel>
+
+</Tabs>
+
+### execute — Inline Closure Execution
+
+`execute` runs an inline closure (an anonymous function) **directly in the workflow's process** and journals the result. Unlike `execute_task`, there is no task queue, no distributed scheduling, and no separate worker. The closure executes immediately, its result is recorded, and on replay the journaled result is returned without re-executing the closure.
+
+Use `execute` when:
+- You need a **one-off operation** that doesn't warrant defining a reusable registered task
+- You want to make an **API call, database query, or computation** replay-safe without the overhead of task scheduling
+- The operation is **specific to this workflow** and won't be reused elsewhere
+
+`execute` takes two arguments: a **step name** (a string used as the journal key) and an **async closure** that returns the result. The step name must be unique within the workflow.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[workflow(name = "order_workflow", version = "1.0.0")]
+pub async fn order_workflow(
+    ctx: WorkflowContext,
+    user_id: u64,
+) -> Result<OrderSummary> {
+    // Inline closure — runs directly, no task queue
+    let user: User = ctx
+        .execute("fetch_user", move || async move {
+            // This runs in the workflow's process, not a task worker
+            let response = reqwest::get(format!("https://api.example.com/users/{}", user_id)).await?;
+            Ok(response.json().await?)
+        })
+        .await?;
+
+    // Another inline operation
+    let orders: Vec<Order> = ctx
+        .execute("fetch_orders", move || async move {
+            let response = reqwest::get(format!("https://api.example.com/users/{}/orders", user_id)).await?;
+            Ok(response.json().await?)
+        })
+        .await?;
+
+    // Pure computation — also safe to journal
+    let total: f64 = ctx
+        .execute("calculate_total", {
+            let orders = orders.clone();
+            move || async move {
+                Ok(orders.iter().map(|o| o.amount).sum())
+            }
+        })
+        .await?;
+
+    Ok(OrderSummary { user, orders, total })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, WorkflowContext } from '@orcher/sdk';
+
+@Workflow({ name: 'order_workflow', version: '1.0' })
+class OrderWorkflow {
+  async run(ctx: WorkflowContext, input: { userId: string }): Promise<OrderSummary> {
+    // Inline closure — runs directly, no task queue
+    const user = await ctx.execute('fetch_user', async () => {
+      // This runs in the workflow's process, not a task worker
+      const response = await fetch(`https://api.example.com/users/${input.userId}`);
+      return response.json();
+    });
+
+    // Another inline operation
+    const orders = await ctx.execute('fetch_orders', async () => {
+      const response = await fetch(`https://api.example.com/users/${input.userId}/orders`);
+      return response.json();
+    });
+
+    // Pure computation — also safe to journal
+    const total = await ctx.execute('calculate_total', async () => {
+      return orders.reduce((sum: number, o: any) => sum + o.amount, 0);
+    });
+
+    return { user, orders, total };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, WorkflowContext
+import httpx
+
+@workflow(name="order_workflow", version="1.0")
+async def order_workflow(ctx: WorkflowContext, user_id: str) -> dict:
+    # Inline closure — runs directly, no task queue
+    user = await ctx.execute(
+        "fetch_user",
+        lambda: httpx.AsyncClient().get(f"https://api.example.com/users/{user_id}").json()
+    )
+
+    # Another inline operation
+    orders = await ctx.execute(
+        "fetch_orders",
+        lambda: httpx.AsyncClient().get(f"https://api.example.com/users/{user_id}/orders").json()
+    )
+
+    # Pure computation — also safe to journal
+    total = await ctx.execute(
+        "calculate_total",
+        lambda: sum(o["amount"] for o in orders)
+    )
+
+    return {"user": user, "orders": orders, "total": total}
+```
+
+</TabPanel>
+
+</Tabs>
+
+### Choosing Between execute_task and execute
+
+Both methods are journaled and replay-safe. The difference is **where** and **how** the work runs:
+
+| | `execute_task` | `execute` |
+|---|---|---|
+| **Execution** | Distributed — runs on a task worker via a task queue | Inline — runs directly in the workflow's process |
+| **Task definition** | Requires a registered task (`@task` / `#[task]` / `@Task`) | No registration — pass any async closure |
+| **Type safety** | Full — typed task references enforce input/output types at compile time | Manual — you choose the step name string and closure return type |
+| **Retry policies** | Configurable (max attempts, backoff, timeouts) | None — closure exceptions propagate directly |
+| **Scaling** | Task workers scale independently from workflow workers | Scales with the workflow worker |
+| **Reusability** | Task can be called from multiple workflows | Closure is specific to this workflow |
+| **Best for** | API calls, database writes, long-running operations, reusable work | One-off queries, quick computations, workflow-specific operations |
+
+In practice, most workflows use a mix of both. Use `execute_task` for operations that need retry policies, independent scaling, or reuse across workflows. Use `execute` for one-off operations that are specific to a single workflow.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+  <TabPanel id="rust" label="Rust">
+
+```rust
+#[workflow(name = "process_order", version = "1.0.0")]
+pub async fn process_order(ctx: WorkflowContext, order_id: String) -> Result<OrderResult> {
+    // execute: one-off lookup, specific to this workflow
+    let customer: Customer = ctx
+        .execute("lookup_customer", {
+            let oid = order_id.clone();
+            move || async move { db::find_customer_by_order(&oid).await }
+        })
+        .await?;
+
+    // execute_task: reusable operation with retry policy
+    let charge: ChargeResult = ctx
+        .execute_task(charge_card, (customer.payment_method, order_id.clone()))
+        .await?;
+
+    // execute: quick computation, no need for a registered task
+    let discount: f64 = ctx
+        .execute("apply_discount", {
+            let c = customer.clone();
+            move || async move { Ok(if c.is_premium { 0.10 } else { 0.0 }) }
+        })
+        .await?;
+
+    // execute_task: external API call with retry/timeout
+    ctx.execute_task(send_confirmation_email, (customer.email, charge.charge_id))
+        .await?;
+
+    Ok(OrderResult { charge_id: charge.charge_id, discount })
+}
+```
+
+  </TabPanel>
+  <TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Workflow({ name: 'process_order', version: '1.0' })
+class ProcessOrder {
+  async run(ctx: WorkflowContext, input: { orderId: string }): Promise<OrderResult> {
+    // execute: one-off lookup, specific to this workflow
+    const customer = await ctx.execute('lookup_customer', async () => {
+      return db.findCustomerByOrder(input.orderId);
+    });
+
+    // executeTask: reusable operation with retry policy
+    const charge = await ctx.executeTask(paymentTasks.chargeCard, {
+      paymentMethod: customer.paymentMethod,
+      orderId: input.orderId,
+    });
+
+    // execute: quick computation, no need for a registered task
+    const discount = await ctx.execute('apply_discount', async () => {
+      return customer.isPremium ? 0.10 : 0.0;
+    });
+
+    // executeTask: external API call with retry/timeout
+    await ctx.executeTask(notificationTasks.sendConfirmationEmail, {
+      email: customer.email,
+      chargeId: charge.chargeId,
+    });
+
+    return { chargeId: charge.chargeId, discount };
+  }
+}
+```
+
+  </TabPanel>
+  <TabPanel id="python" label="Python">
+
+```python
+@workflow(name="process_order", version="1.0")
+async def process_order(ctx: WorkflowContext, order_id: str) -> dict:
+    # execute: one-off lookup, specific to this workflow
+    customer = await ctx.execute(
+        "lookup_customer",
+        lambda: db.find_customer_by_order(order_id)
+    )
+
+    # execute_task: reusable operation with retry policy
+    charge = await ctx.execute_task(
+        charge_card, amount=customer["balance"], order_id=order_id
+    )
+
+    # execute: quick computation, no need for a registered task
+    discount = await ctx.execute(
+        "apply_discount",
+        lambda: 0.10 if customer["is_premium"] else 0.0
+    )
+
+    # execute_task: external API call with retry/timeout
+    await ctx.execute_task(
+        send_confirmation_email, email=customer["email"], charge_id=charge["charge_id"]
+    )
+
+    return {"charge_id": charge["charge_id"], "discount": discount}
+```
+
+  </TabPanel>
+</Tabs>
+
+### Execute Child Workflows
+
+Workflows can start and wait on other workflows. This is called **workflow composition** and is how you break complex processes into smaller, reusable pieces. The parent workflow blocks until the child completes, and the child's result is journaled in the parent's journal. If the parent replays, the child's result is replayed from the journal — the child is not re-executed.
+
+Child workflows run independently — they have their own journal, their own retry behavior, and can run on different workers. If the parent crashes, the child continues running. When the parent replays and reaches the child workflow step, it waits for the already-running child to complete (or replays the result if the child already finished).
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[workflow(
+    name = "parent_workflow",
+    version = "1.0.0"
+)]
+pub async fn parent_workflow(
+    ctx: WorkflowContext,
+    order_id: String,
+) -> Result<String> {
+    // Execute child workflow and wait for result
+    let payment_result: PaymentOutput = ctx
+        .execute_child_workflow("process_payment", payment_input)
+        .await?;
+
+    let shipment_result: ShipmentOutput = ctx
+        .execute_child_workflow("arrange_shipment", shipment_input)
+        .await?;
+
+    Ok(format!("Order {} completed", order_id))
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, WorkflowContext } from '@orcher/sdk';
+
+@Workflow({ name: 'parent_workflow', version: '1.0' })
+export class ParentWorkflow {
+  async run(ctx: WorkflowContext, input: { orderId: string }): Promise<string> {
+    // Execute child workflow and wait for result
+    const paymentResult = await ctx.executeChildWorkflow<PaymentOutput>(
+      'process_payment',
+      paymentInput
+    );
+
+    const shipmentResult = await ctx.executeChildWorkflow<ShipmentOutput>(
+      'arrange_shipment',
+      shipmentInput
+    );
+
+    return `Order ${input.orderId} completed`;
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, WorkflowContext
+
+@workflow(name="parent_workflow", version="1.0")
+async def parent_workflow(ctx: WorkflowContext, order_id: str) -> str:
+    # Execute child workflow and wait for result
+    payment_result = await ctx.execute_child_workflow(
+        "process_payment",
+        workflow_id=f"payment-{order_id}",
+        args=(order_id,),
+    )
+
+    shipment_result = await ctx.execute_child_workflow(
+        "arrange_shipment",
+        workflow_id=f"shipment-{order_id}",
+        args=(order_id,),
+    )
+
+    return f"Order {order_id} completed"
+```
+
+</TabPanel>
+
+</Tabs>
+
+### Durable Timers
+
+`ctx.sleep()` pauses the workflow for a specified duration without holding any resources. Unlike `thread::sleep` or `time.sleep`, a durable timer **survives server restarts**. When you call `ctx.sleep(1 hour)`, the workflow releases its worker, and the server schedules a timer in the database. An hour later, the timer fires and the workflow is re-dispatched to a worker to continue.
+
+This makes durable timers suitable for delays of any length — minutes, hours, or days. The workflow consumes zero resources while waiting.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use std::time::Duration;
+
+#[workflow(
+    name = "scheduled_reminder",
+    version = "1.0.0"
+)]
+pub async fn scheduled_reminder(
+    ctx: WorkflowContext,
+    delay_seconds: u64,
+) -> Result<()> {
+    // Durable timer (survives restarts)
+    ctx.sleep(Duration::from_secs(delay_seconds)).await?;
+
+    // Send reminder after delay
+    ctx.execute_task(send_reminder, ()).await?;
+
+    Ok(())
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, WorkflowContext, Duration } from '@orcher/sdk';
+
+@Workflow({ name: 'scheduled_reminder', version: '1.0' })
+export class ScheduledReminder {
+  async run(ctx: WorkflowContext, input: { delaySeconds: number }): Promise<void> {
+    // Durable timer (survives restarts)
+    await ctx.sleep(Duration.fromSeconds(input.delaySeconds));
+
+    // Send reminder after delay
+    await ctx.executeTask(reminderTasks.sendReminder, {});
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from datetime import timedelta
+from orcher import workflow, WorkflowContext
+
+@workflow(name="scheduled_reminder", version="1.0")
+async def scheduled_reminder(ctx: WorkflowContext, delay_seconds: int) -> None:
+    # Durable timer (survives restarts)
+    await ctx.sleep(timedelta(seconds=delay_seconds))
+
+    # Send reminder after delay
+    await ctx.execute_task(send_reminder)
+```
+
+</TabPanel>
+
+</Tabs>
+
+### Wait for Events
+
+`ctx.wait_for_event()` pauses the workflow until an external event arrives or a timeout expires. This is how workflows implement **human-in-the-loop** patterns like approval flows, payment confirmations, or webhook callbacks.
+
+Like durable sleep, waiting for an event releases the worker. The workflow is suspended — consuming no resources — until either the event is delivered (via the `send_event` API) or the timeout is reached.
+
+Events are identified by name. When an external system calls `send_event("approval", payload)` targeting this workflow, the payload is written to the workflow's journal and the workflow is re-dispatched to a worker. On replay, the workflow fast-forwards to the `wait_for_event` call and returns the journaled payload immediately.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use std::time::Duration;
+
+#[workflow(
+    name = "approval_workflow",
+    version = "1.0.0"
+)]
+pub async fn approval_workflow(
+    ctx: WorkflowContext,
+    request_id: String,
+) -> Result<String> {
+    // Wait for approval event (max 24 hours)
+    let event: Option<ApprovalEvent> = ctx
+        .wait_for_event_with_timeout("approval", Duration::from_secs(86400))
+        .await?;
+
+    match event {
+        Some(e) if e.approved => {
+            ctx.execute_task(process_approval, request_id).await?;
+            Ok("Approved".to_string())
+        }
+        _ => Ok("Rejected".to_string()),
+    }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, WorkflowContext } from '@orcher/sdk';
+
+@Workflow({ name: 'approval_workflow', version: '1.0' })
+export class ApprovalWorkflow {
+  async run(ctx: WorkflowContext, input: { requestId: string }): Promise<string> {
+    // Wait for approval event (max 24 hours)
+    const event = await ctx.waitForEventWithTimeout<ApprovalEvent>(
+      'approval',
+      24 * 60 * 60 * 1000
+    );
+
+    if (event?.approved) {
+      await ctx.executeTask(approvalTasks.processApproval, { requestId: input.requestId });
+      return 'Approved';
+    } else {
+      return 'Rejected';
+    }
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from datetime import timedelta
+from orcher import workflow, WorkflowContext
+
+@workflow(name="approval_workflow", version="1.0")
+async def approval_workflow(ctx: WorkflowContext, request_id: str) -> str:
+    # Wait for approval event (max 24 hours)
+    event = await ctx.wait_for_event("approval", timeout=timedelta(hours=24))
+
+    if event["approved"]:
+        await ctx.execute_task(process_approval, request_id=request_id)
+        return "Approved"
+    else:
+        return "Rejected"
+```
+
+</TabPanel>
+
+</Tabs>
+
+### Send Events
+
+Workflows can send events to other workflows. This enables **workflow-to-workflow communication** — for example, a payment workflow notifying an order workflow that payment succeeded. Sent events are journaled — on replay, the event is not re-sent, preventing duplicate notifications.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+  <TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[workflow(
+    name = "order_workflow",
+    version = "1.0.0"
+)]
+pub async fn order_workflow(
+    ctx: WorkflowContext,
+    order_id: String,
+    notification_workflow_id: String,
+) -> Result<()> {
+    // Process order
+    ctx.execute_task(process_order, order_id.clone()).await?;
+
+    // Send event to another workflow when complete
+    // The target workflow can receive this via wait_for_event("order_completed")
+    ctx.send_event(
+        &notification_workflow_id,
+        "order_completed",
+        serde_json::json!({ "order_id": order_id }),
+    ).await?;
+
+    Ok(())
+}
+```
+
+  </TabPanel>
+  <TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, WorkflowContext } from '@orcher/sdk';
+
+@Workflow({ name: 'order_workflow', version: '1.0' })
+export class OrderWorkflow {
+  async run(ctx: WorkflowContext, input: { orderId: string; notifyWorkflowId: string }): Promise<void> {
+    // Process order
+    await ctx.execute('process_order', async () => {
+      await processOrder(input.orderId);
+    });
+
+    // Send event to another workflow when complete
+    // The target workflow can receive this via waitForEvent("order_completed")
+    await ctx.sendEvent(
+      input.notifyWorkflowId,
+      'order_completed',
+      { orderId: input.orderId }
+    );
+  }
+}
+```
+
+  </TabPanel>
+  <TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, WorkflowContext
+
+@workflow(name="order_workflow", version="1.0")
+async def order_workflow(ctx: WorkflowContext, order_id: str, notify_workflow_id: str) -> None:
+    # Process order
+    await ctx.execute_task(process_order, order_id=order_id)
+
+    # Send event to another workflow when complete
+    # The target workflow can receive this via wait_for_event("order_completed")
+    await ctx.send_event(
+        notify_workflow_id,
+        "order_completed",
+        {"order_id": order_id},
+    )
+```
+
+  </TabPanel>
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/workflows/determinism" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Determinism Rules</h3>
+      <p className="text-sm text-foreground-light">
+        Understand what is safe and unsafe in workflow code
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/workflows/patterns" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Common Patterns</h3>
+      <p className="text-sm text-foreground-light">
+        Sequential, parallel, conditional, and loop patterns
+      </p>
+    </div>
+  </Link>
+</div>

@@ -1,0 +1,108 @@
+---
+id: orchestrator-high-availability
+title: High Availability
+description: Run an Orcher orchestrator cluster with membership, shard ownership, and fencing, so a node failure loses or duplicates no run
+---
+
+Run multiple orchestrator nodes against a shared PostgreSQL database for fault tolerance and horizontal scale. Nodes coordinate through the database — there is no separate coordination service to operate — and **no run is lost or duplicated, even when a node fails mid-flight.**
+
+## How clustering works
+
+Clustering is **opt-in** (`ORCHER_CLUSTER_ENABLED=true`). With it off, a single node runs exactly as before. With it on, three mechanisms combine:
+
+- **Membership** — each node registers itself in a `cluster_members` table and heartbeats on a timer. A node is considered live if it has heartbeated within about three heartbeat intervals; a node that stops (crash, network partition, shutdown) falls out of the live set.
+- **Shard ownership** — the workflow ID space is divided into shards, and each shard is assigned to exactly one live node by **rendezvous hashing** (highest-random-weight) over the current membership. Because every node computes the same assignment from the same membership view, they agree on who owns what without a leader election.
+- **Fencing** — each node writes only under a monotonically increasing *generation* for the shards it holds. Writes run in a guarded transaction that commits **only if the node still owns the shard at the current generation**. A superseded owner's write is rejected, so a partitioned or paused node can never corrupt a shard another node has taken over. This is what stops two nodes from both advancing the same run.
+
+Workers are unaffected by any of this: a worker is a stateless gRPC client of the orchestrator and never talks to the database. It connects to any node (directly or through a load balancer), pulls work, and reports results. See [Scaling](/guides/learning/platform-engineers/scaling) for the worker-vs-orchestrator model.
+
+## Enabling a cluster
+
+Set these on **every** orchestrator node:
+
+```bash
+# Turn on clustering
+ORCHER_CLUSTER_ENABLED=true
+
+# A stable, unique identity per node (defaults to the gRPC bind address).
+# Use something stable across restarts — the hostname or pod name.
+ORCHER_NODE_ID=orchestrator-0
+
+# How often the node heartbeats and refreshes its membership view (default 5).
+# A node is declared dead after ~3 missed intervals.
+ORCHER_CLUSTER_HEARTBEAT_SECS=5
+
+# All nodes share one database
+DATABASE_URL=postgresql://orcher:orcher@postgres:5432/orcher
+```
+
+Every node points at the **same** `DATABASE_URL`. Nodes discover each other through the `cluster_members` table — no service registry or gossip port to configure.
+
+Mind the connection budget: each node opens up to `ORCHER_PG_MAX_CONNECTIONS` (default 80), so `nodes × ORCHER_PG_MAX_CONNECTIONS` must fit under PostgreSQL's `max_connections`. Lower the per-node pool or put PgBouncer in front — see [Monitoring → Connection Pool Sizing](/guides/operations/orchestrator/monitoring).
+
+### Partitioned persistence (optional)
+
+For write-throughput beyond a single database, spread shard state across multiple PostgreSQL instances by listing extra databases:
+
+```bash
+# Primary (also the coordination database) + one URL per additional shard database
+ORCHER_SHARD_DATABASE_URLS=postgresql://orcher@shard-1:5432/orcher,postgresql://orcher@shard-2:5432/orcher
+```
+
+A workflow's whole state (journal, queue, outbox) is co-located on one shard database, so each workflow is still a single-database transaction. When shard databases are configured, the matching layer that delivers a shard-resident task to workers is **enabled automatically** — no extra flag is needed. (On a single database, that layer stays opt-in via `ORCHER_MATCHING_ENABLED`.)
+
+## Failover behaviour
+
+When a node dies, its heartbeat goes stale, the surviving nodes drop it from the live set, and rendezvous hashing reassigns its shards to survivors — which bump the fencing generation and take over. Workflows the dead node had in flight are re-driven by the new owner from the durable journal, so they run to completion **once**: no lost work, no duplicate runs.
+
+This is verified end-to-end: in a 2-node cluster with partitioned persistence across shard databases, killing a node mid-run (including the node holding the primary/coordination database) leaves every workflow completed once — none stranded, none duplicated.
+
+> **Scope:** failover on node **loss** (crash, kill, scale-down) is supported and tested. Graceful rebalancing when a **new** node **joins** — migrating live shards to it without a brief re-drive — is on the roadmap; today a joining node picks up new work and takes over on the next ownership refresh.
+
+## Load balancer configuration (Nginx)
+
+Any node can serve any client or worker request, and every node serves the REST API as well as gRPC, so a load balancer is just for distributing connections. To scale the REST API, add orchestrator replicas behind the load balancer:
+
+```nginx
+upstream orcher_grpc {
+    least_conn;
+    server orchestrator1:50051 max_fails=3 fail_timeout=30s;
+    server orchestrator2:50051 max_fails=3 fail_timeout=30s;
+    server orchestrator3:50051 max_fails=3 fail_timeout=30s;
+}
+
+upstream orcher_rest {
+    least_conn;
+    server orchestrator1:8080 max_fails=3 fail_timeout=30s;
+    server orchestrator2:8080 max_fails=3 fail_timeout=30s;
+    server orchestrator3:8080 max_fails=3 fail_timeout=30s;
+}
+
+server {
+    listen 50051 http2;
+    location / {
+        grpc_pass grpc://orcher_grpc;
+        grpc_connect_timeout 10s;
+        grpc_read_timeout 300s;
+    }
+}
+
+server {
+    listen 8080;
+    location / {
+        proxy_pass http://orcher_rest;
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 300s;
+    }
+}
+```
+
+---
+
+## Next Steps
+
+- [Scaling](/guides/learning/platform-engineers/scaling) — Worker-vs-orchestrator model, database tuning, connection pooling
+- [Orchestrator Overview](/guides/operations/orchestrator) — Architecture and components
+- [Configuration](/guides/operations/orchestrator/configuration) — Environment variables and database connection
+- [Deployment](/guides/operations/orchestrator/deployment) — Starting the server in development, Docker, and systemd
+- [Monitoring](/guides/operations/orchestrator/monitoring) — Health checks, performance tuning, and troubleshooting

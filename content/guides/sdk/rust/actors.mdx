@@ -1,0 +1,76 @@
+---
+id: rust-actors
+title: Actors
+description: Define keyed actors with durable state in the Rust SDK — exclusive and shared operations, state, and calling actors from a client
+sidebar_label: 'Actors'
+---
+
+An actor is a stateful object addressed by a key. Each key, such as a user id or a cart id, is its own instance with its own state, which the server stores. Workers run the actor's operations: an exclusive operation runs alone for its key, so it can read and write state without races.
+
+---
+
+## Defining an Actor
+
+<$CodeSample path="rust/sdk-actors/src/lib.rs" region="define" />
+
+- `#[actor(name = "...")]` marks the type; `name` defaults to the struct name. It is the actor type clients address.
+- `#[operations]` turns each method marked `#[operation(exclusive)]` or `#[operation(shared)]` into an operation, and generates a typed client for them. Methods without `#[operation]` are kept as ordinary methods.
+- An operation is `async`, takes `ActorContext` (exclusive) or `SharedActorContext` (shared) first, any number of serializable arguments after it, and returns `orcher_sdk::Result<T>`.
+- A worker built in the same binary registers the actor with the server when it is built, and runs its operations.
+
+---
+
+## Operation Modes
+
+| Mode | Context | Behavior |
+|------|---------|----------|
+| `#[operation(exclusive)]` | `ActorContext` | Runs alone for its key: no other operation on the key overlaps it. May read and write state. |
+| `#[operation(shared)]` | `SharedActorContext` | Read-only. May run alongside other shared operations on the same key. The server rejects state writes from it. |
+
+---
+
+## State
+
+`ctx.state()` returns the instance's state store. Values are JSON, by string key:
+
+| Method | Description |
+|--------|-------------|
+| `get::<T>(key)` | The value, or `None` |
+| `set(key, &value)` | Store a value (exclusive operations only) |
+| `delete(key)` | Remove a value; returns whether it existed |
+| `exists(key)` | Whether a value is stored |
+| `list(prefix)` | Keys, optionally with a prefix |
+| `get_many::<T>(&keys)` | Several values at once |
+| `clear_all()` | Remove every value of this instance |
+
+`ctx.key()` and `ctx.actor_name()` identify the instance.
+
+---
+
+## Calling Actors
+
+From any process with a [client](/guides/sdk/rust/client):
+
+<$CodeSample path="rust/sdk-actors/src/lib.rs" region="client" />
+
+`client.actor::<ShoppingCart>(key)` returns the generated client for that instance, with one async method per operation. It makes no request until you call one. Without the type, call an operation by name:
+
+<$CodeSample path="rust/sdk-actors/src/lib.rs" region="untyped" />
+
+`client.send_actor(...)` takes the same arguments and returns once the server has accepted the call, without waiting for the operation's result.
+
+Workflows have no actor calls of their own. To use an actor from a workflow, call it from a task.
+
+---
+
+## Testing
+
+`orcher_sdk::actor::testing::create_test_context` builds a context with in-memory state, and `#[operations]` keeps each operation's body as `<name>_impl`, so an operation can be unit-tested without a server ([Testing](/guides/sdk/rust/testing#actors)).
+
+---
+
+## Next Steps
+
+- [Client](/guides/sdk/rust/client): connecting to the server
+- [Worker](/guides/sdk/rust/worker): actor pollers and concurrency
+- [Testing](/guides/sdk/rust/testing): testing actor operations

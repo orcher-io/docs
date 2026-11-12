@@ -1,0 +1,74 @@
+---
+id: python
+title: Python SDK
+description: Write durable workflows as plain async Python functions with decorators and type hints
+sidebar_label: 'Python SDK'
+---
+
+Write workflows and tasks as plain `async` Python functions. The engine journals each step, and a run that is interrupted resumes on any worker from the last step it completed.
+
+---
+
+## Installation
+
+```bash
+# pip
+pip install orcher-sdk
+
+# poetry
+poetry add orcher-sdk
+
+# uv
+uv add orcher-sdk
+```
+
+The package is `orcher-sdk` and it imports as `orcher`. The package named `orcher` on PyPI is the command-line tool, not the SDK.
+
+### Requirements
+
+- Python 3.11 or later (CPython).
+- An Orcher engine to connect to. The [quickstart](/guides/getting-started/quickstart) starts one on your machine.
+- pip installs a prebuilt wheel on macOS (arm64 and x86_64) and Linux (x86_64 and aarch64, glibc or musl). Anywhere else it builds the SDK's native core from source, which needs a Rust toolchain.
+
+The SDK is pre-1.0 (this guide covers `orcher-sdk` 0.4): its API may change between minor releases, and each breaking change is listed in the [changelog](https://github.com/orcher-io/sdk-py/blob/main/CHANGELOG.md).
+
+---
+
+## Quick start
+
+### 1. Define tasks
+
+A task is an `async` function decorated with `@task`. Tasks are where side effects go: calls to other services, database writes, emails. The engine retries a failed task according to its retry policy.
+
+<$CodeSample path="python/sdk_overview/tasks.py" region="tasks" />
+
+### 2. Define a workflow
+
+A workflow is an `async` function decorated with `@workflow`. It decides which tasks run and in what order. Its code is replayed from the journal every time it resumes, so it must be deterministic: do I/O in tasks, not in the workflow.
+
+<$CodeSample path="python/sdk_overview/workflows.py" region="workflow" />
+
+### 3. Run a worker
+
+A worker connects to the engine, registers every workflow and task whose module has been imported, and runs them.
+
+<$CodeSample path="python/sdk_overview/worker.py" region="worker" />
+
+If the engine requires an API key, set `ORCHER_API_KEY` in the worker's environment; the builder reads it.
+
+### 4. Start a workflow
+
+<$CodeSample path="python/sdk_overview/start.py" region="client" />
+
+---
+
+## Next steps
+
+- [Workflows](/guides/sdk/python/workflows): the `WorkflowContext` API, determinism and replay
+- [Tasks](/guides/sdk/python/tasks): retries, heartbeats, cancellation and payload limits
+- [Client](/guides/sdk/python/client): start, query and manage workflows
+- [Worker](/guides/sdk/python/worker): configuration, authentication and shutdown
+- [Actors](/guides/sdk/python/actors): keyed objects with durable state
+- [Sessions](/guides/sdk/python/sessions): run several tasks on one worker
+- [Testing](/guides/sdk/python/testing): run workflows in memory with mocked tasks
+- [Patterns](/guides/sdk/python/patterns): compensation, fan-out, approvals and batches

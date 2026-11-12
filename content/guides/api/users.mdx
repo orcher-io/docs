@@ -1,0 +1,163 @@
+---
+id: 'api-users'
+title: 'User Endpoints'
+description: 'Create, manage, and configure user accounts via the Orcher REST API'
+sidebar_label: 'Users'
+---
+
+## User Management
+
+### Create User
+
+```bash
+POST /api/v1/users
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "email": "newuser@example.com",
+  "name": "Jane Smith",
+  "password": "secure-password",
+  "roles": ["developer"]
+}
+```
+
+**Response:**
+
+```json
+{
+  "user_id": "usr_456",
+  "email": "newuser@example.com",
+  "name": "Jane Smith",
+  "roles": ["developer"],
+  "created_at": "2024-01-07T12:00:00Z"
+}
+```
+
+### List Users
+
+```bash
+GET /api/v1/users?limit=50&offset=0
+Authorization: Bearer <token>
+```
+
+**Response:**
+
+```json
+{
+  "users": [
+    {
+      "user_id": "usr_123",
+      "email": "user@example.com",
+      "name": "John Doe",
+      "roles": ["admin"],
+      "created_at": "2024-01-01T00:00:00Z"
+    }
+  ],
+  "total": 15,
+  "limit": 50,
+  "offset": 0
+}
+```
+
+### Get User
+
+```bash
+GET /api/v1/users/:user_id
+Authorization: Bearer <token>
+```
+
+### Update User
+
+```bash
+PUT /api/v1/users/:user_id
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "name": "John Updated",
+  "roles": ["admin", "developer"]
+}
+```
+
+### Delete User
+
+```bash
+DELETE /api/v1/users/:user_id
+Authorization: Bearer <token>
+```
+
+### Change Password
+
+```bash
+POST /api/v1/users/:user_id/password
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "currentPassword": "old-password",
+  "newPassword": "new-secure-password"
+}
+```
+
+### Reset Password
+
+```bash
+POST /api/v1/users/:user_id/password/reset
+Authorization: Bearer <token>
+```
+
+### Lock User Account
+
+```bash
+POST /api/v1/users/:user_id/lock
+Authorization: Bearer <token>
+```
+
+### Assign Roles
+
+```bash
+POST /api/v1/users/:user_id/roles
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "roles": ["admin", "developer"]
+}
+```
+
+### Get User Activity
+
+```bash
+GET /api/v1/users/:user_id/activity
+Authorization: Bearer <token>
+```
+
+### Get User Preferences
+
+```bash
+GET /api/v1/users/:user_id/preferences
+Authorization: Bearer <token>
+```
+
+### Update User Preferences
+
+```bash
+PUT /api/v1/users/:user_id/preferences
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "theme": "dark",
+  "notifications": true,
+  "timezone": "America/New_York"
+}
+```
+
+---
+
+## Next Steps
+
+- [Organizations](/guides/api/organizations) — Organization and team management
+- [Authentication](/guides/api/authentication) — JWT, OAuth 2.0, and Device Flow
+- [Errors & Limits](/guides/api/errors-and-limits) — Error handling and rate limiting

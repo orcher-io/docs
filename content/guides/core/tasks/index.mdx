@@ -1,0 +1,97 @@
+---
+id: 'tasks'
+title: 'Tasks'
+description: 'Learn how to define, configure, and execute durable tasks in Orcher. Understand retry policies, timeouts, idempotency, and task context APIs.'
+sidebar_label: 'Tasks'
+---
+
+A **task** is a function that performs a specific operation within a workflow — calling an external API, writing to a database, or sending an email. Think of tasks as the **workers** that do the actual work, while workflows are the **coordinators** that orchestrate them. Tasks are automatically journaled, making them durable and idempotent.
+
+When you wrap an operation in a task, you get:
+
+- **Durability** - Results are saved to the journal; if your server crashes, results are replayed from the journal instead of re-executing
+- **Automatic Retry** - Network failures, timeouts, and transient errors are retried automatically with configurable backoff strategies
+- **Idempotency** - Tasks are designed to be safe to retry; running them multiple times produces the same result
+- **Observability** - Track progress with heartbeats, monitor execution time, and view detailed logs
+- **Type Safety** - Full compile-time type checking for inputs and outputs
+
+### Key Characteristics
+
+**Atomic Operations:**
+Each task represents a single, well-defined operation. A task should do one thing and do it well.
+
+```typescript
+// ✓ Good: Focused task
+async function chargeCard(amount: number): Promise<string>
+
+// ✗ Bad: Task doing too much
+async function processOrderAndEmailAndUpdateInventory(order: Order): Promise<void>
+```
+
+**External Integration:**
+Tasks wrap external operations that can fail:
+- API calls (Stripe, SendGrid, Twilio)
+- Database operations (INSERT, UPDATE, SELECT)
+- File I/O (reading/writing files)
+- Queue operations (publishing messages)
+
+**Automatic Registration:**
+Tasks are registered automatically when you use the `#[task]` macro (Rust), `@Task()` decorator or `task()` function (TypeScript), or `@task` decorator (Python). No manual registration needed. You can also group tasks using the `#[tasks]` macro (Rust), `@Tasks()` decorator (TypeScript), or `@tasks` decorator (Python) on a class for shared configuration, organization, and dependency injection.
+
+**Context-Aware:**
+Every task receives a `TaskContext` that provides:
+- Workflow ID and execution metadata
+- Heartbeat capabilities for long-running operations
+- Cancellation signals
+- Attempt number for retry logic
+
+---
+
+### Explore Tasks
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/tasks/getting-started" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Getting Started</h3>
+      <p className="text-sm text-foreground-light">
+        Understand task execution APIs and write your first task
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/tasks/configuration" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Configuration</h3>
+      <p className="text-sm text-foreground-light">
+        Task macro attributes, retry policies, timeouts, and task context
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/tasks/idempotency" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Idempotency</h3>
+      <p className="text-sm text-foreground-light">
+        Idempotency patterns and error handling strategies
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/tasks/testing" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Testing</h3>
+      <p className="text-sm text-foreground-light">
+        Testing tasks and common task patterns
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/tasks/best-practices" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Best Practices</h3>
+      <p className="text-sm text-foreground-light">
+        Production-ready patterns and guidelines
+      </p>
+    </div>
+  </Link>
+</div>

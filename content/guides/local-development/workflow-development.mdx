@@ -1,0 +1,1313 @@
+---
+title: 'Workflow Development'
+description: 'Write durable workflows with automatic journaling using the Orcher SDK. Learn workflow patterns, task execution, and advanced features.'
+sidebar_label: 'Workflow Development'
+---
+
+Learn how to develop workflows with Orcher's SDK. Workflows are the core abstraction in Orcher - they define the orchestration logic that coordinates tasks, manages state, and handles failures automatically.
+
+## Choose Your SDK
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+**Prerequisites:**
+• Rust 1.70 or later
+• Orcher SDK: `orcher = "2.0"`
+• Local Orcher server running
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+TypeScript SDK is under active development. Check back soon!
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+Python SDK is under active development. Check back soon!
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+Go SDK is under active development. Check back soon!
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## What is a Workflow?
+
+A **workflow** is a durable function that orchestrates multiple steps (tasks) with automatic journaling. If a workflow crashes, it resumes exactly where it left off without re-executing completed steps.
+
+**Key characteristics:**
+
+• **Durable** - Survives crashes and restarts
+• **Deterministic** - Same inputs produce same outputs
+• **Journaled** - Every step is automatically recorded
+• **Typed** - Full compile-time type safety
+• **Composable** - Can call other workflows as children
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+
+#[workflow(
+    name = "payment_workflow",
+    version = "1.0.0",
+    description = "Process payment with durable execution"
+)]
+async fn payment_workflow(
+    ctx: WorkflowContext,
+    input: PaymentInput,
+) -> orcher::Result<PaymentOutput> {
+    // Step 1: Charge card (automatically journaled)
+    let charge: ChargeResult = ctx
+        .execute_task("charge_card", (input.amount, input.card_token.clone()))
+        .await?;
+    
+    // Step 2: Reserve inventory (automatically journaled)
+    let inventory: InventoryResult = ctx
+        .execute_task("reserve_inventory", input.order_id.clone())
+        .await?;
+    
+    // Step 3: Send confirmation (automatically journaled)
+    let notification: NotificationResult = ctx
+        .execute_task(
+            "send_confirmation_email",
+            (input.customer_email.clone(), charge.charge_id.clone()),
+        )
+        .await?;
+    
+    Ok(PaymentOutput::new(
+        input.order_id,
+        charge.charge_id,
+        inventory.reserved,
+        notification.sent,
+        "completed".to_string(),
+    ))
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Creating Your First Workflow
+
+### 1. Define the Workflow
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+Create a workflow using the `#[workflow]` attribute macro:
+
+```rust
+use orcher::prelude::*;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GreetingInput {
+    pub name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GreetingOutput {
+    pub message: String,
+}
+
+#[workflow(
+    name = "greet_workflow",
+    version = "1.0.0",
+    description = "Simple greeting workflow"
+)]
+async fn greet_workflow(
+    ctx: WorkflowContext,
+    input: GreetingInput,
+) -> orcher::Result<GreetingOutput> {
+    let message = format!("Hello, {}!", input.name);
+    
+    Ok(GreetingOutput { message })
+}
+```
+
+**Workflow Attributes:**
+
+• `name` - Unique workflow identifier (defaults to function name)
+• `version` - Semantic version for tracking changes
+• `description` - Human-readable description for docs
+• `namespace` - Optional namespace for organization
+• `timeout` - Maximum execution time (e.g., `timeout = "1h"`)
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+</TabPanel>
+
+</Tabs>
+
+### 2. Register the Workflow
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+Register your workflow with a worker:
+
+```rust
+use orcher::prelude::*;
+
+#[tokio::main]
+async fn main() -> orcher::Result<()> {
+    // Create worker with automatic handler registration
+    let worker = WorkerBuilder::new()
+        .task_queue("my-task-queue")
+        .server_url("http://localhost:50051")
+        .build()
+        .await?;
+    
+    // Workflows and tasks are automatically registered via #[workflow] and #[task] macros
+    
+    // Start processing
+    worker.run().await
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+</TabPanel>
+
+</Tabs>
+
+### 3. Execute the Workflow
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+Execute workflows using the client API:
+
+```rust
+use orcher::prelude::*;
+
+let client = Client::connect("http://localhost:50051").await?;
+
+let options = StartWorkflowOptions {
+    task_queue: "my-task-queue".to_string(),
+    ..Default::default()
+};
+
+let handle = client
+    .start_workflow_with_options("greet_workflow", input, options)
+    .await?;
+
+// Wait for result
+let output: GreetingOutput = handle.result().await?;
+println!("Result: {}", output.message); // "Hello, Alice!"
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Workflow Context API
+
+The `WorkflowContext` provides methods for durable operations. All operations through the context are automatically journaled.
+
+### Execute Tasks
+
+Orcher provides two ways to execute durable steps that are automatically journaled and replay-protected:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+#### Method 1: `ctx.execute()` - Inline Closures
+
+Use for one-off operations specific to a single workflow:
+
+```rust
+#[workflow]
+async fn order_workflow(ctx: WorkflowContext, order: Order) -> orcher::Result<Receipt> {
+    // Inline closure - code lives in the workflow
+    let payment = ctx
+        .execute("charge_card", || async move {
+            // One-off logic here
+            let client = StripeClient::new();
+            client.charge(order.amount, order.card_token.clone()).await
+        })
+        .await?;
+    
+    // Another inline operation
+    let inventory = ctx
+        .execute("reserve_inventory", || async move {
+            let db = Database::connect().await?;
+            db.reserve_items(order.items.clone()).await
+        })
+        .await?;
+    
+    Ok(Receipt { payment, inventory })
+}
+```
+
+**Advantages:**
+• Quick to write - no separate task definition needed
+• Good for workflow-specific logic
+• Keeps related code together
+• Perfect for prototyping
+
+**When to use:**
+• One-off operations not reused elsewhere
+• Workflow-specific business logic
+• Simple external API calls
+• Rapid prototyping
+
+#### Method 2: `ctx.execute_task()` - Registered Tasks
+
+Use for reusable operations shared across workflows:
+
+```rust
+// Define task once (in tasks/ module)
+#[task(
+    name = "charge_card",
+    description = "Charge credit card via Stripe",
+    retry = 3
+)]
+async fn charge_card(ctx: TaskContext, input: (f64, String)) -> Result<ChargeResult> {
+    let (amount, card_token) = input;
+    let client = StripeClient::new();
+    client.charge(amount, card_token).await
+}
+
+// Use in multiple workflows
+#[workflow]
+async fn order_workflow(ctx: WorkflowContext, order: Order) -> orcher::Result<Receipt> {
+    // Call registered task by name
+    let payment = ctx
+        .execute_task("charge_card", (order.amount, order.card_token.clone()))
+        .await?;
+    
+    // Another registered task
+    let inventory = ctx
+        .execute_task("reserve_inventory", order.items.clone())
+        .await?;
+    
+    Ok(Receipt { payment, inventory })
+}
+
+#[workflow]
+async fn subscription_workflow(ctx: WorkflowContext, sub: Subscription) -> orcher::Result<()> {
+    // Same task, different workflow!
+    let payment = ctx
+        .execute_task("charge_card", (sub.amount, sub.card_token.clone()))
+        .await?;
+    
+    Ok(())
+}
+```
+
+**Advantages:**
+• Reusable across multiple workflows
+• Centralized retry and timeout configuration
+• Easier to test in isolation
+• Better separation of concerns
+• Can be versioned independently
+
+**When to use:**
+• Shared operations across workflows
+• Complex logic that needs testing
+• Operations with specific retry policies
+• Third-party integrations
+• Team-shared functionality
+
+#### Comparison Example
+
+```rust
+// Inline - repeated code
+#[workflow]
+async fn workflow_a(ctx: WorkflowContext, input: Input) -> orcher::Result<Output> {
+    let email = ctx.execute("send_email", || async move {
+        EmailClient::new().send(input.to, input.subject, input.body).await
+    }).await?;
+    Ok(Output { email })
+}
+
+#[workflow]
+async fn workflow_b(ctx: WorkflowContext, input: Input) -> orcher::Result<Output> {
+    // Same code duplicated!
+    let email = ctx.execute("send_email", || async move {
+        EmailClient::new().send(input.to, input.subject, input.body).await
+    }).await?;
+    Ok(Output { email })
+}
+
+// Registered task - reused
+#[task(name = "send_email", retry = 3)]
+async fn send_email(ctx: TaskContext, input: EmailRequest) -> Result<EmailResult> {
+    EmailClient::new().send(input.to, input.subject, input.body).await
+}
+
+#[workflow]
+async fn workflow_a(ctx: WorkflowContext, input: Input) -> orcher::Result<Output> {
+    let email = ctx.execute_task("send_email", input.email_request).await?;
+    Ok(Output { email })
+}
+
+#[workflow]
+async fn workflow_b(ctx: WorkflowContext, input: Input) -> orcher::Result<Output> {
+    let email = ctx.execute_task("send_email", input.email_request).await?;
+    Ok(Output { email })
+}
+```
+
+#### Mixing Both Approaches
+
+You can freely mix both approaches in the same workflow:
+
+```rust
+#[workflow]
+async fn hybrid_workflow(ctx: WorkflowContext, order: Order) -> orcher::Result<Receipt> {
+    // Use registered task for common operations
+    let payment = ctx
+        .execute_task("charge_card", (order.amount, order.card_token))
+        .await?;
+    
+    // Use inline for one-off logic
+    let fraud_check = ctx
+        .execute("check_fraud_score", || async move {
+            // Custom logic specific to this workflow
+            let score = fraud_service::analyze(order.clone()).await?;
+            if score > 0.8 {
+                return Err(anyhow::anyhow!("High fraud risk"));
+            }
+            Ok(score)
+        })
+        .await?;
+    
+    // Use registered task again
+    let inventory = ctx
+        .execute_task("reserve_inventory", order.items)
+        .await?;
+    
+    Ok(Receipt { payment, fraud_check, inventory })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+</TabPanel>
+
+</Tabs>
+
+### Timers and Delays
+
+Add durable delays to your workflows:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use std::time::Duration;
+
+#[workflow]
+async fn reminder_workflow(ctx: WorkflowContext, input: ReminderInput) -> orcher::Result<()> {
+    // Wait 1 hour (survives crashes!)
+    ctx.sleep(Duration::from_secs(3600)).await?;
+    
+    // Send reminder
+    ctx.execute_task("send_reminder", (input.email, input.message)).await?;
+    
+    Ok(())
+}
+```
+
+**Key points:**
+
+• Timers are durable - they survive worker restarts
+• The workflow resumes exactly when the timer expires
+• Multiple timers can run in parallel
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+</TabPanel>
+
+</Tabs>
+
+### Event Gates
+
+Wait for external events (human-in-the-loop, external system notifications):
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[workflow]
+async fn approval_workflow(
+    ctx: WorkflowContext,
+    request: ApprovalRequest,
+) -> orcher::Result<ApprovalResult> {
+    // Request approval
+    ctx.execute_task("notify_manager", request.manager_email.clone()).await?;
+    
+    // Wait for the approval event with a 24h deadline.
+    // Returns Ok(None) if no event arrives before the timeout.
+    let approval = ctx
+        .wait_for_event_with_timeout::<Approval>("manager_approval", Duration::from_secs(86400))
+        .await?;
+    
+    // Process approval if it arrived before the deadline
+    match approval {
+        Some(approval) if approval.approved => {
+            ctx.execute_task("process_request", request.clone()).await?;
+            Ok(ApprovalResult { approved: true })
+        }
+        _ => Ok(ApprovalResult { approved: false }),
+    }
+}
+```
+
+**Sending events from the client:**
+
+```rust
+// From another service or UI — events are delivered through a workflow handle
+let handle = client.get_workflow_handle(workflow_id).await?;
+handle.send_event("manager_approval", Approval {
+    approved: true,
+    comment: "Looks good!".to_string(),
+}).await?;
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+</TabPanel>
+
+</Tabs>
+
+### Child Workflows
+
+Compose workflows by calling other workflows:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[workflow]
+async fn parent_workflow(
+    ctx: WorkflowContext,
+    order: Order,
+) -> orcher::Result<OrderResult> {
+    // Execute child workflows in parallel
+    let (payment, inventory, shipping) = tokio::join!(
+        ctx.execute_child_workflow("payment_workflow", order.payment_info.clone()),
+        ctx.execute_child_workflow("inventory_workflow", order.items.clone()),
+        ctx.execute_child_workflow("shipping_workflow", order.address.clone()),
+    );
+    
+    Ok(OrderResult {
+        payment: payment?,
+        inventory: inventory?,
+        shipping: shipping?,
+    })
+}
+```
+
+**Benefits:**
+
+• Isolate concerns (each workflow handles one domain)
+• Reuse workflows across different parents
+• Parallel execution for better performance
+• Independent failure handling
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Task Execution Patterns
+
+### Registered Tasks
+
+Create reusable tasks that can be shared across workflows:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+**Define the task:**
+
+```rust
+#[task(
+    name = "send_email",
+    description = "Send email via email service",
+    retry = 3
+)]
+async fn send_email(ctx: TaskContext, input: EmailRequest) -> Result<EmailResult> {
+    let client = EmailClient::new();
+    
+    client.send(
+        &input.to,
+        &input.subject,
+        &input.body,
+    ).await?;
+    
+    Ok(EmailResult {
+        message_id: generate_id(),
+        sent_at: Utc::now(),
+    })
+}
+```
+
+**Tasks are automatically registered via the `#[task]` macro using inventory.**
+
+**Use in workflows:**
+
+```rust
+#[workflow]
+async fn notification_workflow(
+    ctx: WorkflowContext,
+    user: User,
+) -> orcher::Result<()> {
+    ctx.execute_task("send_email", EmailRequest {
+        to: user.email,
+        subject: "Welcome!".to_string(),
+        body: "Welcome to our platform!".to_string(),
+    }).await?;
+    
+    Ok(())
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+</TabPanel>
+
+</Tabs>
+
+### Inline Closures
+
+For one-off operations, use inline closures:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[workflow]
+async fn data_processing_workflow(
+    ctx: WorkflowContext,
+    data_id: String,
+) -> orcher::Result<ProcessedData> {
+    // Inline closure for one-off operation
+    let raw_data = ctx
+        .execute("fetch_data", || async move {
+            let url = format!("https://api.example.com/data/{}", data_id);
+            reqwest::get(&url).await?.json().await
+        })
+        .await?;
+    
+    // Another inline operation
+    let processed = ctx
+        .execute("transform_data", || async move {
+            transform_logic(&raw_data).await
+        })
+        .await?;
+    
+    Ok(processed)
+}
+```
+
+**Use `ctx.execute()` (inline closures) when:**
+
+• The logic is specific to this workflow
+• You don't need to reuse it elsewhere
+• It's a simple operation (< 10 lines)
+• Quick one-off external API calls
+
+**Use `ctx.execute_task()` (registered tasks) when:**
+
+• The logic is shared across workflows
+• You need centralized retry configuration
+• The operation is complex
+• You want better testability and separation of concerns
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Error Handling
+
+### Automatic Retries
+
+Configure retry behavior for tasks:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task(
+    name = "unreliable_api_call",
+    description = "Call unreliable external API",
+    retry = 5
+)]
+async fn unreliable_api_call(ctx: TaskContext, input: Request) -> Result<Response> {
+    // This will retry up to 5 times
+    external_api::call(input).await
+}
+```
+
+**Retry configuration:**
+
+The `retry = N` shorthand caps the number of attempts. For full control, attach a
+`RetryPolicy` with `max_attempts`, `initial_interval`, `max_interval`, and
+`backoff_coefficient`. There is no separate strategy enum — the delay grows
+exponentially per `backoff_coefficient` (use `1.0` for a fixed delay).
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+</TabPanel>
+
+</Tabs>
+
+### Compensation (Saga Pattern)
+
+Handle failures by undoing previous steps:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[workflow]
+async fn booking_workflow(
+    ctx: WorkflowContext,
+    booking: BookingRequest,
+) -> orcher::Result<BookingResult> {
+    // Step 1: Reserve hotel
+    let hotel = ctx
+        .execute_task("reserve_hotel", booking.hotel_id.clone())
+        .await?;
+    
+    // Step 2: Reserve flight
+    let flight_result = ctx
+        .execute_task("reserve_flight", booking.flight_id.clone())
+        .await;
+    
+    // If flight fails, compensate by canceling hotel
+    if let Err(e) = flight_result {
+        ctx.execute_task("cancel_hotel", hotel.reservation_id.clone())
+            .await?;
+        
+        return Err(e);
+    }
+    
+    let flight = flight_result?;
+    
+    Ok(BookingResult { hotel, flight })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## State Management
+
+### Workflow State
+
+Persist state across workflow executions:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[derive(Serialize, Deserialize, Default)]
+struct BatchState {
+    processed: usize,
+    total: usize,
+    failed: Vec<String>,
+}
+
+#[workflow]
+async fn batch_processing_workflow(
+    ctx: WorkflowContext,
+    items: Vec<Item>,
+) -> orcher::Result<BatchResult> {
+    let mut state = BatchState::default();
+    state.total = items.len();
+    
+    for item in items {
+        match ctx.execute_task("process_item", item.clone()).await {
+            Ok(_) => state.processed += 1,
+            Err(_) => state.failed.push(item.id),
+        }
+        
+        // State is automatically persisted by the context
+    }
+    
+    Ok(BatchResult {
+        processed: state.processed,
+        failed: state.failed,
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Queries
+
+Query workflow state without side effects:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+**In the workflow:**
+
+```rust
+#[workflow]
+async fn long_running_workflow(
+    ctx: WorkflowContext,
+    input: Input,
+) -> orcher::Result<Output> {
+    // Workflow logic with internal state tracking
+    let mut completed = 0;
+    let total = input.items.len();
+    
+    for item in input.items {
+        ctx.execute_task("process_item", item).await?;
+        completed += 1;
+    }
+    
+    Ok(Output { completed, total })
+}
+```
+
+**From the client:**
+
+```rust
+let client = Client::connect("http://localhost:50051").await?;
+
+// Get workflow status
+let handle = client.get_workflow_handle(workflow_id).await?;
+let status = handle.describe().await?;
+
+println!("Workflow status: {:?}", status);
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Best Practices
+
+### 1. Keep Workflows Deterministic
+
+**Don't:**
+
+```rust
+// Non-deterministic - uses system time directly
+let timestamp = SystemTime::now();
+
+// Non-deterministic - generates random values
+let random_id = uuid::Uuid::new_v4();
+
+// Non-deterministic - depends on external state
+let user = database.get_user(id).await?;
+```
+
+**Do:**
+
+```rust
+// Use workflow context for deterministic time
+let timestamp = ctx.time().now();
+
+// Use workflow context for deterministic randomness
+let random_id = ctx.rand().uuid();
+
+// Wrap external calls in ctx.execute() or ctx.execute_task()
+let user = ctx.execute("get_user", || async {
+    database.get_user(id).await
+}).await?;
+```
+
+### 2. Design for Idempotency
+
+Ensure tasks can be safely retried:
+
+```rust
+#[task]
+async fn process_payment(ctx: TaskContext, payment: PaymentRequest) -> Result<PaymentResult> {
+    // Use idempotency key
+    let idempotency_key = format!("payment_{}", payment.order_id);
+    
+    stripe::charge_with_idempotency_key(
+        payment.amount,
+        payment.card,
+        &idempotency_key,
+    ).await
+}
+```
+
+### 3. Use Descriptive Step Names
+
+```rust
+// Bad
+ctx.execute("step1", || async { ... }).await?;
+ctx.execute("step2", || async { ... }).await?;
+
+// Good
+ctx.execute("charge_customer_card", || async { ... }).await?;
+ctx.execute("reserve_inventory_items", || async { ... }).await?;
+```
+
+### 4. Handle Failures Gracefully
+
+```rust
+#[workflow]
+async fn resilient_workflow(ctx: WorkflowContext, input: Input) -> orcher::Result<Output> {
+    // Try primary service
+    let result = ctx.execute("primary_service", || async {
+        primary::process(input.clone()).await
+    }).await;
+    
+    // Fallback to secondary service
+    let result = match result {
+        Ok(r) => r,
+        Err(_) => {
+            ctx.execute("secondary_service", || async {
+                secondary::process(input.clone()).await
+            }).await?
+        }
+    };
+    
+    Ok(Output::from(result))
+}
+```
+
+### 5. Version Your Workflows
+
+```rust
+// Version 1.0.0
+#[workflow(version = "1.0.0")]
+async fn order_workflow_v1(ctx: WorkflowContext, order: Order) -> Result<Receipt> {
+    // Original implementation
+}
+
+// Version 2.0.0 - Breaking changes
+#[workflow(version = "2.0.0")]
+async fn order_workflow_v2(ctx: WorkflowContext, order: OrderV2) -> Result<ReceiptV2> {
+    // New implementation with breaking changes
+}
+```
+
+---
+
+## Examples
+
+The [quickstart repository](https://github.com/orcher-io/quickstart) has a complete, runnable workflow in [Python](https://github.com/orcher-io/quickstart/tree/main/python), [TypeScript](https://github.com/orcher-io/quickstart/tree/main/typescript) and [Rust](https://github.com/orcher-io/quickstart/tree/main/rust).
+
+---
+
+## Next Steps
+
+<div className="grid lg:grid-cols-12 gap-6 not-prose">
+  {[
+    {
+      title: 'Testing Workflows',
+      href: '/guides/local-development/testing-workflows',
+      description: 'Unit test, integration test, and simulate crashes for your workflows.',
+    },
+    {
+      title: 'Debugging Workflows',
+      href: '/guides/local-development/debugging-workflows',
+      description: 'Use the Admin UI and logging tools to debug workflow issues.',
+    },
+    {
+      title: 'Configuration',
+      href: '/guides/local-development/configuration',
+      description: 'Configure your workers and environment settings.',
+    },
+  ].map((item) => {
+    return (
+      <Link href={`${item.href}`} key={item.title} passHref className={'col-span-4'}>
+        <GlassPanel
+          title={item.title}
+          span="col-span-6"
+          background={false}
+        >
+          {item.description}
+        </GlassPanel>
+      </Link>
+    )
+  })}
+</div>
+
+---
+
+## Learn More
+
+• [Workflow Patterns](/guides/patterns) - Advanced workflow patterns and best practices
+• [API Reference](/guides/sdk/rust/workflows) - Complete workflow API documentation
+• [Quickstart Repository](https://github.com/orcher-io/quickstart) - Runnable code samples

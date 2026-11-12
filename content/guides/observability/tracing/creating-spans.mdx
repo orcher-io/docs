@@ -1,0 +1,86 @@
+---
+id: 'creating-spans'
+title: 'Creating Spans'
+description: 'Use typed span helpers for workflows, tasks, storage operations, and workers'
+sidebar_label: 'Creating Spans'
+---
+
+The `orcher-monitoring` crate provides typed span helpers for each component:
+
+## Workflow Spans
+
+```rust
+use orcher_monitoring::tracing::create_workflow_span;
+
+// Track workflow execution
+let span = create_workflow_span("start", &workflow_id, Some("order_fulfillment"));
+let _guard = span.enter();
+
+tracing::info!(
+    workflow_id = %workflow_id,
+    order_count = input.orders.len(),
+    "Starting order fulfillment"
+);
+
+// Track individual steps
+{
+    let step_span = create_workflow_span("step", &workflow_id, Some("validate_orders"));
+    let _step_guard = step_span.enter();
+
+    let validation = ctx.execute_task(validate_orders, input.clone()).await?;
+    tracing::info!("Orders validated");
+}
+
+{
+    let step_span = create_workflow_span("step", &workflow_id, Some("process_payment"));
+    let _step_guard = step_span.enter();
+
+    let payment = ctx.execute_task(charge_payment, input.amount).await?;
+    tracing::info!("Payment processed");
+}
+```
+
+## Task Spans
+
+```rust
+use orcher_monitoring::tracing::create_task_span;
+
+let span = create_task_span("execute", &task_id, Some("charge_payment"));
+let _guard = span.enter();
+
+tracing::info!(amount = %amount, "Processing payment");
+
+let result = payment_gateway.charge(amount).await?;
+
+tracing::info!(transaction_id = %result.id, "Payment completed");
+```
+
+## Storage Spans
+
+```rust
+use orcher_monitoring::tracing::create_storage_span;
+
+let span = create_storage_span("read", "workflow_executions", Some(1));
+let _guard = span.enter();
+
+let execution = repo.find_by_id(execution_id).await?;
+```
+
+## Worker Spans
+
+```rust
+use orcher_monitoring::tracing::create_worker_span;
+
+let span = create_worker_span("process", &worker_id, Some(&node_id));
+let _guard = span.enter();
+
+tracing::info!(worker_id = %worker_id, "Worker starting poll loop");
+```
+
+---
+
+## Next Steps
+
+- [Context Propagation](/guides/observability/tracing/context-propagation) — Propagate trace context across service boundaries
+- [Best Practices](/guides/observability/tracing/best-practices) — Sampling, visualization, and troubleshooting
+- [Tracing Overview](/guides/observability/tracing) — Setup and exporter configuration

@@ -1,0 +1,374 @@
+---
+id: 'data-processing-batch'
+title: 'Batch Processing'
+description: 'Break large datasets into manageable chunks with automatic checkpointing at every task boundary'
+sidebar_label: 'Batch Processing'
+---
+
+The most common data pipeline pattern: break a large dataset into manageable chunks and process each batch as a separate task. Every batch completion is journaled, so crashes only require reprocessing the current in-flight batch — not the entire dataset.
+
+Use this pattern when a dataset is too large to process in one step, when you want progress to survive crashes and deployments, or when partial failures should not force a full re-run. If throughput matters more than ordering, combine it with [Parallel ETL](/guides/use-cases/data-processing/parallel-etl) to run batches concurrently.
+
+## How it works
+
+The workflow is a plain loop. Each iteration extracts, transforms, and loads one batch — and because each of those steps runs through `execute_task`, each step's result is journaled the moment it completes. There is no explicit checkpointing code: the journal *is* the checkpoint.
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">One Batch Cycle</div>
+  </div>
+  {[
+    { label: 'fetch_batch', detail: 'Extract records at offset — result journaled', icon: '1' },
+    { label: 'transform_batch', detail: 'Clean, normalize, enrich — result journaled', icon: '2' },
+    { label: 'load_batch', detail: 'Idempotent upsert — result journaled', icon: '3' },
+  ].map((step, i, arr) => (
+    <div key={i}>
+      <div className="px-4 py-2 flex items-center gap-3">
+        <span className="w-5 h-5 flex items-center justify-center text-[10px] font-mono text-foreground-muted border border-default shrink-0">{step.icon}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{step.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{step.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">↻ repeat for batches 001 … N — every completed step is a checkpoint</span>
+  </div>
+</div>
+
+## Example: a checkpointed ETL pipeline
+
+The pipeline below copies `total_records` from a source table to a destination table in fixed-size batches. Note what it does *not* contain: no checkpoint bookkeeping, no resume logic, no state table — the loop index and all intermediate results live in the journal.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BatchConfig {
+    source_table: String,
+    dest_table: String,
+    batch_size: usize,
+    total_records: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BatchResult {
+    records_processed: usize,
+    batches_completed: usize,
+    failed_batches: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RecordBatch {
+    records: Vec<serde_json::Value>,
+    batch_index: usize,
+}
+
+#[task]
+async fn fetch_batch(source: String, offset: usize, limit: usize) -> Result<RecordBatch> {
+    // Query source database for a batch of records
+    let records = db::query(&source, offset, limit).await?;
+    Ok(RecordBatch { records, batch_index: offset / limit })
+}
+
+#[task]
+async fn transform_batch(batch: RecordBatch) -> Result<RecordBatch> {
+    // Apply transformations: clean, normalize, enrich
+    let transformed = batch.records.into_iter()
+        .map(|r| apply_transforms(r))
+        .collect();
+    Ok(RecordBatch { records: transformed, batch_index: batch.batch_index })
+}
+
+#[task]
+async fn load_batch(dest: String, batch: RecordBatch) -> Result<usize> {
+    // Upsert into destination — idempotent for safe retries
+    let count = db::upsert_batch(&dest, &batch.records).await?;
+    Ok(count)
+}
+
+#[workflow(name = "batch_etl_pipeline", version = "1.0.0")]
+pub async fn batch_etl_pipeline(
+    ctx: WorkflowContext,
+    config: BatchConfig,
+) -> Result<BatchResult> {
+    let num_batches = (config.total_records + config.batch_size - 1) / config.batch_size;
+    let mut records_processed = 0;
+    let mut failed_batches = Vec::new();
+
+    for batch_idx in 0..num_batches {
+        let offset = batch_idx * config.batch_size;
+
+        // Extract
+        let batch = ctx.execute_task(fetch_batch, (
+            config.source_table.clone(), offset, config.batch_size
+        )).await?;
+
+        // Transform
+        let transformed = ctx.execute_task(transform_batch, batch).await?;
+
+        // Load (idempotent upsert)
+        match ctx.execute_task(load_batch, (
+            config.dest_table.clone(), transformed
+        )).await {
+            Ok(count) => records_processed += count,
+            Err(e) => {
+                println!("Batch {} failed: {}", batch_idx, e);
+                failed_batches.push(batch_idx);
+            }
+        }
+
+        // Each loop iteration is automatically checkpointed
+    }
+
+    Ok(BatchResult {
+        records_processed,
+        batches_completed: num_batches - failed_batches.len(),
+        failed_batches,
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, WorkflowContext, createTaskRefs } from '@orcher/sdk';
+
+interface BatchConfig {
+  sourceTable: string;
+  destTable: string;
+  batchSize: number;
+  totalRecords: number;
+}
+
+interface BatchResult {
+  recordsProcessed: number;
+  batchesCompleted: number;
+  failedBatches: number[];
+}
+
+interface RecordBatch {
+  records: Record<string, unknown>[];
+  batchIndex: number;
+}
+
+@Tasks()
+class ETLTasks {
+  @Task()
+  async fetchBatch(source: string, offset: number, limit: number): Promise<RecordBatch> {
+    // Query source database for a batch of records
+    const records = await db.query(source, offset, limit);
+    return { records, batchIndex: Math.floor(offset / limit) };
+  }
+
+  @Task()
+  async transformBatch(batch: RecordBatch): Promise<RecordBatch> {
+    // Apply transformations: clean, normalize, enrich
+    const transformed = batch.records.map((r) => applyTransforms(r));
+    return { records: transformed, batchIndex: batch.batchIndex };
+  }
+
+  @Task()
+  async loadBatch(dest: string, batch: RecordBatch): Promise<number> {
+    // Upsert into destination — idempotent for safe retries
+    return await db.upsertBatch(dest, batch.records);
+  }
+}
+
+const tasks = createTaskRefs(ETLTasks);
+
+@Workflow({ name: 'batch_etl_pipeline', version: '1.0.0' })
+class BatchETLPipeline {
+  async run(ctx: WorkflowContext, config: BatchConfig): Promise<BatchResult> {
+    const numBatches = Math.ceil(config.totalRecords / config.batchSize);
+    let recordsProcessed = 0;
+    const failedBatches: number[] = [];
+
+    for (let batchIdx = 0; batchIdx < numBatches; batchIdx++) {
+      const offset = batchIdx * config.batchSize;
+
+      // Extract
+      const batch = await ctx.executeTask(
+        tasks.fetchBatch, config.sourceTable, offset, config.batchSize
+      );
+
+      // Transform
+      const transformed = await ctx.executeTask(tasks.transformBatch, batch);
+
+      // Load (idempotent upsert)
+      try {
+        const count = await ctx.executeTask(
+          tasks.loadBatch, config.destTable, transformed
+        );
+        recordsProcessed += count;
+      } catch (e) {
+        console.log(`Batch ${batchIdx} failed: ${e}`);
+        failedBatches.push(batchIdx);
+      }
+
+      // Each loop iteration is automatically checkpointed
+    }
+
+    return {
+      recordsProcessed,
+      batchesCompleted: numBatches - failedBatches.length,
+      failedBatches,
+    };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext
+from dataclasses import dataclass, field
+
+@dataclass
+class BatchConfig:
+    source_table: str
+    dest_table: str
+    batch_size: int
+    total_records: int
+
+@dataclass
+class BatchResult:
+    records_processed: int
+    batches_completed: int
+    failed_batches: list[int]
+
+@dataclass
+class RecordBatch:
+    records: list[dict]
+    batch_index: int
+
+@task
+async def fetch_batch(source: str, offset: int, limit: int) -> RecordBatch:
+    """Query source database for a batch of records."""
+    records = await db.query(source, offset, limit)
+    return RecordBatch(records=records, batch_index=offset // limit)
+
+@task
+async def transform_batch(batch: RecordBatch) -> RecordBatch:
+    """Apply transformations: clean, normalize, enrich."""
+    transformed = [apply_transforms(r) for r in batch.records]
+    return RecordBatch(records=transformed, batch_index=batch.batch_index)
+
+@task
+async def load_batch(dest: str, batch: RecordBatch) -> int:
+    """Upsert into destination — idempotent for safe retries."""
+    return await db.upsert_batch(dest, batch.records)
+
+@workflow(name="batch_etl_pipeline", version="1.0.0")
+async def batch_etl_pipeline(ctx: WorkflowContext, config: BatchConfig) -> BatchResult:
+    num_batches = (config.total_records + config.batch_size - 1) // config.batch_size
+    records_processed = 0
+    failed_batches = []
+
+    for batch_idx in range(num_batches):
+        offset = batch_idx * config.batch_size
+
+        # Extract
+        batch = await ctx.execute_task(
+            fetch_batch, config.source_table, offset, config.batch_size
+        )
+
+        # Transform
+        transformed = await ctx.execute_task(transform_batch, batch)
+
+        # Load (idempotent upsert)
+        try:
+            count = await ctx.execute_task(
+                load_batch, config.dest_table, transformed
+            )
+            records_processed += count
+        except Exception as e:
+            print(f"Batch {batch_idx} failed: {e}")
+            failed_batches.append(batch_idx)
+
+        # Each loop iteration is automatically checkpointed
+
+    return BatchResult(
+        records_processed=records_processed,
+        batches_completed=num_batches - len(failed_batches),
+        failed_batches=failed_batches,
+    )
+```
+
+</TabPanel>
+
+</Tabs>
+
+## Crash recovery, step by step
+
+Suppose a worker dies while loading batch 042. Here is exactly what happens when the workflow is re-dispatched:
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Recovery of Batch 042</div>
+  </div>
+  {[
+    { label: 'fetch_batch(042)', detail: 'Completed — journaled', icon: '✓', state: 'done' },
+    { label: 'transform_batch(042)', detail: 'Completed — journaled', icon: '✓', state: 'done' },
+    { label: 'load_batch(042)', detail: 'Worker dies — no journal entry', icon: '✗', state: 'crash' },
+    { label: 'replay', detail: 'fetch & transform return journaled results — not re-executed', icon: '↻', state: 'resume' },
+    { label: 'load_batch(042)', detail: 'Re-executed — journaled on success', icon: '✓', state: 'done' },
+  ].map((step, i, arr) => (
+    <div key={i}>
+      <div className={`px-4 py-2 flex items-center gap-3 ${step.state === 'crash' ? 'bg-red-500/5' : ''} ${step.state === 'resume' ? 'bg-surface-75' : ''}`}>
+        <span className={`w-5 h-5 flex items-center justify-center text-[10px] shrink-0 ${step.state === 'crash' ? 'text-red-400' : 'text-foreground-muted'}`}>{step.icon}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{step.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{step.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Only the step without a journal entry re-executes. Batches 001–041 replay the same way — instantly.</span>
+  </div>
+</div>
+
+Replay walks the workflow function from the top, but every `execute_task` call that already has a journal entry returns its recorded result without running the task again. The loop fast-forwards through batches 001–041 and the completed steps of batch 042 in milliseconds, then resumes real work at the failed `load_batch` call.
+
+This is also why the load step must be **idempotent**: if the worker died *after* the upsert reached the database but *before* the journal entry was written, the retry will run the upsert again. An idempotent write (upsert by key) makes that harmless.
+
+## Design notes
+
+- **Batch size is a checkpoint-granularity dial.** Smaller batches mean finer checkpoints but more journal overhead; larger batches lose more work on failure. See [Choose the Right Batch Size](/guides/use-cases/data-processing/best-practices#choose-the-right-batch-size) for concrete numbers.
+- **Collect failures, don't abort.** The example records failed batch indexes and keeps going, so one bad batch doesn't sink a million-record run. The returned `failed_batches` list is your input for a targeted reprocessing pass. If any failure should stop the pipeline, propagate the error instead of catching it. See [Handle Partial Failures Gracefully](/guides/use-cases/data-processing/best-practices#handle-partial-failures-gracefully).
+- **Keep task payloads lean.** Task inputs and results flow through the journal. Passing offsets and table names (as this example does with `fetch_batch`) keeps journal entries small; avoid threading multi-megabyte blobs through task results when a reference will do.
+
+---
+
+## Next Steps
+
+- Next pattern: [Parallel ETL](/guides/use-cases/data-processing/parallel-etl)
+- Back to [Data Pipelines & ETL overview](/guides/use-cases/data-processing)

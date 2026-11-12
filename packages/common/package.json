@@ -1,0 +1,22 @@
+{
+  "name": "common",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./index.tsx",
+  "types": "./index.tsx",
+  "license": "MIT",
+  "dependencies": {
+    "lodash": "^4.17.21",
+    "react-use": "^17.5.0"
+  },
+  "devDependencies": {
+    "@types/lodash": "4.17.5"
+  },
+  "peerDependencies": {
+    "next": "*",
+    "next-themes": "*",
+    "react": "*",
+    "react-dom": "*"
+  }
+}

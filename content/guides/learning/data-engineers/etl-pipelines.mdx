@@ -1,0 +1,641 @@
+---
+id: data-engineers-etl-pipelines
+title: "ETL Pipelines & Checkpointing"
+description: "Build your first ETL pipeline with automatic checkpointing and crash recovery"
+sidebar_label: 'ETL Pipelines'
+---
+
+You already know the shape of an ETL job: pull data from a source, clean it, write it to a destination. And you know the part that actually hurts — **what happens when it dies at row 847,392 of a million?** Everything in this section is about that question, so let's start there.
+
+## The problem you're used to solving
+
+Restartable pipelines are a solved problem, and you've solved it before. The catch is *how much machinery* it took:
+
+- **Re-run the whole job.** Simple, and fine at small scale — but re-reading a million rows and re-hitting every API to recover from a failure at 90% is expensive and slow.
+- **A manual state table.** You track `last_processed_offset` in Postgres yourself, read it on startup, update it as you go. Now you own a second source of truth that can drift from the actual work.
+- **Scheduler or Spark checkpoints.** A scheduler that passes intermediate results between steps, or Spark's checkpoint directories. Real checkpointing — but it's infrastructure you run, tune, and debug.
+
+All three are answers to one question: *where did I get to, and how do I not redo it?* Orcher's answer is that you don't implement the answer at all — the runtime already knows, because it journals every step.
+
+## Your First ETL Pipeline
+
+We'll build a pipeline that imports a CSV of customers into a database, in batches, with crash recovery — piece by piece. Each piece is a **task**: a unit of work Orcher journals when it completes. Read it in whichever language you'll use; the tabs stay in sync as you go, and the [complete file](#the-complete-pipeline) is at the end to copy.
+
+### Step 1 — Count the work
+
+First, how many rows are we importing? Counting is its own task, so the total lands in the journal once. On a restart, the pipeline doesn't re-read the file to recount — it reads the number back from where it left off.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="typescript" queryGroup="language">
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+interface CsvImportInput {
+  filePath: string;
+  batchSize: number;
+}
+
+// A @Task is a unit of work Orcher journals on completion.
+@Task()
+async countRows(ctx: TaskContext, filePath: string): Promise<number> {
+  const content = await fs.readFile(filePath, 'utf-8');
+  return content.split('\n').length - 1; // exclude header
+}
+```
+
+</TabPanel>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[derive(Debug, Serialize, Deserialize)]
+struct CsvImportInput {
+    file_path: String,
+    batch_size: usize,
+}
+
+// A #[task] is a unit of work Orcher journals on completion.
+#[task]
+async fn count_rows(ctx: TaskContext, file_path: String) -> Result<usize> {
+    let content = tokio::fs::read_to_string(&file_path).await?;
+    Ok(content.lines().count() - 1) // exclude header
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@dataclass
+class CsvImportInput:
+    file_path: str
+    batch_size: int
+
+# A @task is a unit of work Orcher journals on completion.
+@task(name="count_rows")
+async def count_rows(ctx: TaskContext, file_path: str) -> int:
+    with open(file_path) as f:
+        return sum(1 for _ in f) - 1  # exclude header
+```
+
+</TabPanel>
+</Tabs>
+
+### Step 2 — Extract and transform one batch
+
+Now the per-batch work. `extract_batch` pulls a slice using offset/limit pagination — a familiar cursor over the source — and `transform_batch` cleans it: drop rows without a valid email, normalize the rest. Keep transforms **pure** (same input → same output): a deterministic transform replays safely, a random or clock-dependent one does not.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="typescript" queryGroup="language">
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Task()
+async extractBatch(ctx: TaskContext, input: { filePath: string; offset: number; limit: number }): Promise<Record<string, string>[]> {
+  return await csvParser.readBatch(input.filePath, input.offset, input.limit);
+}
+
+@Task()
+async transformBatch(ctx: TaskContext, rows: Record<string, string>[]): Promise<CleanedRow[]> {
+  return rows
+    .filter(row => row.email && row.email.includes('@'))
+    .map(row => ({
+      email: row.email.toLowerCase().trim(),
+      name: row.name?.trim() ?? '',
+      amount: parseFloat(row.amount) || 0,
+      createdAt: new Date(row.created_at).toISOString(),
+    }));
+}
+```
+
+</TabPanel>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task]
+async fn extract_batch(ctx: TaskContext, input: (String, usize, usize)) -> Result<Vec<RawRow>> {
+    let (file_path, offset, limit) = input;
+    csv_parser::read_batch(&file_path, offset, limit).await
+}
+
+#[task]
+async fn transform_batch(ctx: TaskContext, rows: Vec<RawRow>) -> Result<Vec<CleanedRow>> {
+    Ok(rows.into_iter()
+        .filter(|r| r.email.contains('@'))
+        .map(|r| CleanedRow {
+            email: r.email.to_lowercase().trim().to_string(),
+            name: r.name.trim().to_string(),
+            amount: r.amount.parse::<f64>().unwrap_or(0.0),
+            created_at: chrono::DateTime::parse_from_rfc3339(&r.created_at)
+                .unwrap_or_default()
+                .with_timezone(&chrono::Utc),
+        })
+        .collect())
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@task(name="extract_batch")
+async def extract_batch(ctx: TaskContext, input: dict) -> list[dict]:
+    return await csv_parser.read_batch(
+        input["file_path"], input["offset"], input["limit"]
+    )
+
+@task(name="transform_batch")
+async def transform_batch(ctx: TaskContext, rows: list[dict]) -> list[dict]:
+    return [
+        {
+            "email": r["email"].lower().strip(),
+            "name": (r.get("name") or "").strip(),
+            "amount": float(r.get("amount") or 0),
+            "created_at": parse_datetime(r["created_at"]).isoformat(),
+        }
+        for r in rows
+        if r.get("email") and "@" in r["email"]
+    ]
+```
+
+</TabPanel>
+</Tabs>
+
+### Step 3 — Load without duplicates
+
+This is the step that makes durability *safe*. A task can be retried after a failure — so if `load_batch` writes rows and then the worker dies before the result is journaled, the retry runs the write **again**. A plain `INSERT` would double-load that batch. An **UPSERT** (`INSERT ... ON CONFLICT DO UPDATE`) makes re-running the same batch a no-op: the rows already there are updated in place, not duplicated. This is the single most important habit in durable data work — writes must be idempotent.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="typescript" queryGroup="language">
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Task()
+async loadBatch(ctx: TaskContext, rows: CleanedRow[]): Promise<number> {
+  // UPSERT ensures idempotency on retry
+  const result = await db.query(`
+    INSERT INTO customers (email, name, amount, created_at)
+    SELECT * FROM UNNEST($1::text[], $2::text[], $3::numeric[], $4::timestamptz[])
+    ON CONFLICT (email) DO UPDATE SET
+      name = EXCLUDED.name,
+      amount = EXCLUDED.amount,
+      created_at = EXCLUDED.created_at
+  `, [rows.map(r => r.email), rows.map(r => r.name), rows.map(r => r.amount), rows.map(r => r.createdAt)]);
+  return result.rowCount;
+}
+```
+
+</TabPanel>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task]
+async fn load_batch(ctx: TaskContext, rows: Vec<CleanedRow>) -> Result<usize> {
+    // UPSERT ensures idempotency on retry
+    let pool = get_db_pool().await?;
+    let count = db::upsert_customers(&pool, &rows).await?;
+    Ok(count)
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@task(name="load_batch")
+async def load_batch(ctx: TaskContext, rows: list[dict]) -> int:
+    # UPSERT ensures idempotency on retry
+    return await db.upsert_customers(rows)
+```
+
+</TabPanel>
+</Tabs>
+
+### Step 4 — Orchestrate the batches
+
+The workflow ties the tasks together: count once, then loop over batches running extract → transform → load. Every `execute_task` call is a journaled checkpoint, so the loop index is effectively durable state — there's no offset table because the journal *is* the offset. Crash at batch 500 of 1,000, and recovery replays the 499 finished batches instantly and resumes at 500.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="typescript" queryGroup="language">
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Workflow({ name: 'csv_import', version: '1.0.0' })
+class CsvImport {
+  async run(ctx: WorkflowContext, input: CsvImportInput): Promise<number> {
+    const totalRows = await ctx.executeTask(tasks.countRows, input.filePath);
+    const numBatches = Math.ceil(totalRows / input.batchSize);
+    let totalLoaded = 0;
+
+    for (let i = 0; i < numBatches; i++) {
+      // Each of these 3 steps is journaled — crash recovery resumes here
+      const rows = await ctx.executeTask(tasks.extractBatch, {
+        filePath: input.filePath,
+        offset: i * input.batchSize,
+        limit: input.batchSize,
+      });
+      const cleaned = await ctx.executeTask(tasks.transformBatch, rows);
+      const loaded = await ctx.executeTask(tasks.loadBatch, cleaned);
+      totalLoaded += loaded;
+    }
+
+    return totalLoaded;
+  }
+}
+```
+
+</TabPanel>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[workflow(name = "csv_import", version = "1.0.0")]
+async fn csv_import(ctx: WorkflowContext, input: CsvImportInput) -> Result<usize> {
+    let total_rows = ctx.execute_task(count_rows, input.file_path.clone()).await?;
+    let num_batches = (total_rows + input.batch_size - 1) / input.batch_size;
+    let mut total_loaded = 0;
+
+    for i in 0..num_batches {
+        // Each of these 3 steps is journaled — crash recovery resumes here
+        let rows = ctx.execute_task(extract_batch, (
+            input.file_path.clone(), i * input.batch_size, input.batch_size,
+        )).await?;
+        let cleaned = ctx.execute_task(transform_batch, rows).await?;
+        let loaded = ctx.execute_task(load_batch, cleaned).await?;
+        total_loaded += loaded;
+    }
+
+    Ok(total_loaded)
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@workflow(name="csv_import", version="1.0.0")
+async def csv_import(ctx: WorkflowContext, input: CsvImportInput) -> int:
+    total_rows = await ctx.execute_task(count_rows, file_path=input.file_path)
+    num_batches = (total_rows + input.batch_size - 1) // input.batch_size
+    total_loaded = 0
+
+    for i in range(num_batches):
+        # Each of these 3 steps is journaled — crash recovery resumes here
+        rows = await ctx.execute_task(extract_batch, input={
+            "file_path": input.file_path,
+            "offset": i * input.batch_size,
+            "limit": input.batch_size,
+        })
+        cleaned = await ctx.execute_task(transform_batch, rows=rows)
+        loaded = await ctx.execute_task(load_batch, rows=cleaned)
+        total_loaded += loaded
+
+    return total_loaded
+```
+
+</TabPanel>
+</Tabs>
+
+**Key principle**: every `execute_task` call is journaled. On crash recovery, completed steps return cached results instantly — no re-execution, no duplicate API calls, no duplicate database inserts. You wrote the pipeline; Orcher supplied the durability.
+
+### The complete pipeline
+
+Here's everything above assembled into one file.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="typescript" queryGroup="language">
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import {
+  Workflow,
+  Tasks,
+  Task,
+  TaskContext,
+  WorkflowContext,
+  createTaskRefs,
+} from '@orcher/sdk';
+
+interface CsvImportInput {
+  filePath: string;
+  batchSize: number;
+}
+
+@Tasks()
+class EtlTasks {
+  @Task()
+  async countRows(ctx: TaskContext, filePath: string): Promise<number> {
+    const content = await fs.readFile(filePath, 'utf-8');
+    return content.split('\n').length - 1; // exclude header
+  }
+
+  @Task()
+  async extractBatch(ctx: TaskContext, input: { filePath: string; offset: number; limit: number }): Promise<Record<string, string>[]> {
+    return await csvParser.readBatch(input.filePath, input.offset, input.limit);
+  }
+
+  @Task()
+  async transformBatch(ctx: TaskContext, rows: Record<string, string>[]): Promise<CleanedRow[]> {
+    return rows
+      .filter(row => row.email && row.email.includes('@'))
+      .map(row => ({
+        email: row.email.toLowerCase().trim(),
+        name: row.name?.trim() ?? '',
+        amount: parseFloat(row.amount) || 0,
+        createdAt: new Date(row.created_at).toISOString(),
+      }));
+  }
+
+  @Task()
+  async loadBatch(ctx: TaskContext, rows: CleanedRow[]): Promise<number> {
+    // UPSERT ensures idempotency on retry
+    const result = await db.query(`
+      INSERT INTO customers (email, name, amount, created_at)
+      SELECT * FROM UNNEST($1::text[], $2::text[], $3::numeric[], $4::timestamptz[])
+      ON CONFLICT (email) DO UPDATE SET
+        name = EXCLUDED.name,
+        amount = EXCLUDED.amount,
+        created_at = EXCLUDED.created_at
+    `, [rows.map(r => r.email), rows.map(r => r.name), rows.map(r => r.amount), rows.map(r => r.createdAt)]);
+    return result.rowCount;
+  }
+}
+
+const tasks = createTaskRefs(EtlTasks);
+
+@Workflow({ name: 'csv_import', version: '1.0.0' })
+class CsvImport {
+  async run(ctx: WorkflowContext, input: CsvImportInput): Promise<number> {
+    const totalRows = await ctx.executeTask(tasks.countRows, input.filePath);
+    const numBatches = Math.ceil(totalRows / input.batchSize);
+    let totalLoaded = 0;
+
+    for (let i = 0; i < numBatches; i++) {
+      const rows = await ctx.executeTask(tasks.extractBatch, {
+        filePath: input.filePath,
+        offset: i * input.batchSize,
+        limit: input.batchSize,
+      });
+      const cleaned = await ctx.executeTask(tasks.transformBatch, rows);
+      const loaded = await ctx.executeTask(tasks.loadBatch, cleaned);
+      totalLoaded += loaded;
+    }
+
+    return totalLoaded;
+  }
+}
+```
+
+</TabPanel>
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CsvImportInput {
+    file_path: String,
+    batch_size: usize,
+}
+
+#[task]
+async fn count_rows(ctx: TaskContext, file_path: String) -> Result<usize> {
+    let content = tokio::fs::read_to_string(&file_path).await?;
+    Ok(content.lines().count() - 1) // exclude header
+}
+
+#[task]
+async fn extract_batch(ctx: TaskContext, input: (String, usize, usize)) -> Result<Vec<RawRow>> {
+    let (file_path, offset, limit) = input;
+    csv_parser::read_batch(&file_path, offset, limit).await
+}
+
+#[task]
+async fn transform_batch(ctx: TaskContext, rows: Vec<RawRow>) -> Result<Vec<CleanedRow>> {
+    Ok(rows.into_iter()
+        .filter(|r| r.email.contains('@'))
+        .map(|r| CleanedRow {
+            email: r.email.to_lowercase().trim().to_string(),
+            name: r.name.trim().to_string(),
+            amount: r.amount.parse::<f64>().unwrap_or(0.0),
+            created_at: chrono::DateTime::parse_from_rfc3339(&r.created_at)
+                .unwrap_or_default()
+                .with_timezone(&chrono::Utc),
+        })
+        .collect())
+}
+
+#[task]
+async fn load_batch(ctx: TaskContext, rows: Vec<CleanedRow>) -> Result<usize> {
+    // UPSERT ensures idempotency on retry
+    let pool = get_db_pool().await?;
+    let count = db::upsert_customers(&pool, &rows).await?;
+    Ok(count)
+}
+
+#[workflow(name = "csv_import", version = "1.0.0")]
+async fn csv_import(ctx: WorkflowContext, input: CsvImportInput) -> Result<usize> {
+    let total_rows = ctx.execute_task(count_rows, input.file_path.clone()).await?;
+    let num_batches = (total_rows + input.batch_size - 1) / input.batch_size;
+    let mut total_loaded = 0;
+
+    for i in 0..num_batches {
+        let rows = ctx.execute_task(extract_batch, (
+            input.file_path.clone(), i * input.batch_size, input.batch_size,
+        )).await?;
+        let cleaned = ctx.execute_task(transform_batch, rows).await?;
+        let loaded = ctx.execute_task(load_batch, cleaned).await?;
+        total_loaded += loaded;
+    }
+
+    Ok(total_loaded)
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext, TaskContext
+from dataclasses import dataclass
+
+@dataclass
+class CsvImportInput:
+    file_path: str
+    batch_size: int
+
+@task(name="count_rows")
+async def count_rows(ctx: TaskContext, file_path: str) -> int:
+    with open(file_path) as f:
+        return sum(1 for _ in f) - 1  # exclude header
+
+@task(name="extract_batch")
+async def extract_batch(ctx: TaskContext, input: dict) -> list[dict]:
+    return await csv_parser.read_batch(
+        input["file_path"], input["offset"], input["limit"]
+    )
+
+@task(name="transform_batch")
+async def transform_batch(ctx: TaskContext, rows: list[dict]) -> list[dict]:
+    return [
+        {
+            "email": r["email"].lower().strip(),
+            "name": (r.get("name") or "").strip(),
+            "amount": float(r.get("amount") or 0),
+            "created_at": parse_datetime(r["created_at"]).isoformat(),
+        }
+        for r in rows
+        if r.get("email") and "@" in r["email"]
+    ]
+
+@task(name="load_batch")
+async def load_batch(ctx: TaskContext, rows: list[dict]) -> int:
+    # UPSERT ensures idempotency on retry
+    return await db.upsert_customers(rows)
+
+@workflow(name="csv_import", version="1.0.0")
+async def csv_import(ctx: WorkflowContext, input: CsvImportInput) -> int:
+    total_rows = await ctx.execute_task(count_rows, file_path=input.file_path)
+    num_batches = (total_rows + input.batch_size - 1) // input.batch_size
+    total_loaded = 0
+
+    for i in range(num_batches):
+        rows = await ctx.execute_task(extract_batch, input={
+            "file_path": input.file_path,
+            "offset": i * input.batch_size,
+            "limit": input.batch_size,
+        })
+        cleaned = await ctx.execute_task(transform_batch, rows=rows)
+        loaded = await ctx.execute_task(load_batch, rows=cleaned)
+        total_loaded += loaded
+
+    return total_loaded
+```
+
+</TabPanel>
+</Tabs>
+
+---
+
+## Automatic Checkpointing
+
+Traditional pipelines require manual checkpoint management. Orcher journals every task result automatically, so your checkpoint is always the last completed task. Picture a four-stage pipeline that crashes after validation — here's exactly what runs, and what doesn't, on recovery:
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Crash After Step 2, Then Recover</div>
+  </div>
+  {[
+    { label: 'extract', detail: 'Step 1 done — result in journal', icon: '✓', state: 'done' },
+    { label: 'validate', detail: 'Step 2 done — result in journal', icon: '✓', state: 'done' },
+    { label: 'server crashes', detail: 'before enrich starts', icon: '✗', state: 'crash' },
+    { label: 'replay', detail: 'extract + validate return journaled results — not re-run', icon: '↻', state: 'resume' },
+    { label: 'enrich', detail: 'Step 3 executes fresh — the pipeline continues here', icon: '▶', state: 'done' },
+    { label: 'load', detail: 'Step 4 runs normally', icon: '▶', state: 'done' },
+  ].map((row, i, arr) => (
+    <div key={i}>
+      <div className={`px-4 py-2 flex items-center gap-3 ${row.state === 'crash' ? 'bg-red-500/5' : ''} ${row.state === 'resume' ? 'bg-surface-75' : ''}`}>
+        <span className={`w-5 h-5 flex items-center justify-center text-[10px] shrink-0 ${row.state === 'crash' ? 'text-red-400' : 'text-foreground-muted'}`}>{row.icon}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{row.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{row.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Your checkpoint is always the last completed task — you never write one.</span>
+  </div>
+</div>
+
+The mental shift is worth stating plainly, because it's the one that carries through the rest of this path:
+
+| What you'd reach for | What Orcher does instead |
+| --- | --- |
+| Spark checkpoint directory, a scheduler's intermediate results, or a hand-rolled `job_state` table | Every `execute_task` result is journaled automatically |
+| Read state on startup, decide where to resume | Replay returns completed steps from the journal; execution continues at the first unfinished one |
+| Dedup or "already processed?" guards so a retry doesn't double-write | Completed tasks are never re-executed — the guard is the journal |
+
+You still design the *pipeline*; Orcher owns the *bookkeeping*. That trade — you keep the logic, the runtime keeps the durability — is the through-line of everything below.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="typescript"
+  queryGroup="language"
+>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Workflow({ name: 'multi_stage_pipeline', version: '1.0.0' })
+class MultiStagePipeline {
+  async run(ctx: WorkflowContext, source: string): Promise<PipelineResult> {
+    // Step 1: Extract (journaled)
+    const raw = await ctx.executeTask(tasks.extract, source);
+
+    // Step 2: Validate (journaled)
+    const valid = await ctx.executeTask(tasks.validate, raw);
+
+    // Step 3: Enrich (journaled)
+    const enriched = await ctx.executeTask(tasks.enrich, valid);
+
+    // Step 4: Load (journaled)
+    const result = await ctx.executeTask(tasks.load, enriched);
+
+    // If crash happens after step 2 but before step 3:
+    // → Steps 1-2 return cached results instantly (no re-execution)
+    // → Step 3 executes fresh and continues from there
+
+    return result;
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[workflow(name = "multi_stage_pipeline", version = "1.0.0")]
+async fn multi_stage_pipeline(
+    ctx: WorkflowContext,
+    source: String,
+) -> Result<PipelineResult> {
+    let raw = ctx.execute_task(extract, source).await?;          // journaled
+    let valid = ctx.execute_task(validate, raw).await?;           // journaled
+    let enriched = ctx.execute_task(enrich, valid).await?;        // journaled
+    let result = ctx.execute_task(load, enriched).await?;         // journaled
+
+    // Crash after step 2 → steps 1-2 replay from journal, step 3 runs fresh
+    Ok(result)
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+@workflow(name="multi_stage_pipeline", version="1.0.0")
+async def multi_stage_pipeline(ctx: WorkflowContext, source: str) -> PipelineResult:
+    raw = await ctx.execute_task(extract, input=source)          # journaled
+    valid = await ctx.execute_task(validate, input=raw)           # journaled
+    enriched = await ctx.execute_task(enrich, input=valid)        # journaled
+    result = await ctx.execute_task(load, input=enriched)         # journaled
+
+    # Crash after step 2 → steps 1-2 replay from journal, step 3 runs fresh
+    return result
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Next Steps
+
+- [Batch & Incremental Processing](/guides/learning/data-engineers/batch-processing)
+- [Back to Overview](/guides/learning/data-engineers)

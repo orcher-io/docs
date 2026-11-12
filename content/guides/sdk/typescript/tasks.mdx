@@ -1,0 +1,186 @@
+---
+id: typescript-tasks
+title: Tasks
+description: Define tasks with the TypeScript SDK — functional and class-based tasks, dependency injection, timeouts, retry policies, heartbeats and cancellation
+sidebar_label: 'Tasks'
+---
+
+Tasks do the work that touches the outside world: API calls, database writes, file operations.
+A workflow schedules a task, any worker polling the queue runs it, and its result is journaled.
+A failed attempt is retried according to the task's retry policy.
+
+There are two ways to define tasks, and both give the same kind of `TaskReference` for
+`ctx.executeTask()`:
+
+- **Functional**: `task({ name, execute })`, for tasks with no shared dependencies.
+- **Class-based**: `@Tasks()` on a class and `@Task()` on its methods, when tasks need injected
+  services.
+
+---
+
+## Functional Tasks
+
+<$CodeSample path="typescript/src/tasks/functional.ts" region="basic" />
+
+`task()` returns a typed reference: `sendEmail` is a
+`TaskReference<{ to: string; subject: string }, boolean>`. The function receives a `TaskContext`
+first and the task's input second.
+
+| `task()` option | Description |
+|-----------------|-------------|
+| `name` | (required) The task's name, unique in the process |
+| `execute` | (required) `async (ctx, input) => result` |
+| `timeout` | How long one attempt may run, in milliseconds. 5 minutes when no timeout is set here or on the call. |
+| `heartbeatTimeout` | How long an attempt may go without a heartbeat, in milliseconds |
+| `retryPolicy` | How failed attempts are retried; see below |
+
+---
+
+## Class-Based Tasks
+
+<$CodeSample path="typescript/src/tasks/classes.ts" region="class" />
+
+- **The method name is the task name.** Don't pass `name:` to `@Task()`: it would register the
+  task under that name, while `createTaskRefs()` types the reference by method name, so the
+  reference you call and the task the worker registered would no longer line up.
+- **Use `createTaskRefs(Class)` for references.** `@Task()` attaches each reference to the class,
+  but TypeScript cannot see what a decorator adds; `createTaskRefs()` returns the same references
+  with their input and result types.
+- **Task methods take `(ctx, input)`.** The worker always passes the `TaskContext` first.
+- **Names are global within the process.** Two classes with a `charge` method register two tasks
+  named `charge`, and the second replaces the first (with a warning). Give methods names that are
+  unique across the process.
+
+`@Task()` takes `timeout` and `retryPolicy`, with the same meaning as for `task()`. To set a
+heartbeat timeout for a class-based task, pass `heartbeatTimeout` on the call (see
+[per-call options](/guides/sdk/typescript/workflows#per-call-options)).
+
+### Dependency Injection
+
+The worker's container builds a new instance of the task class for every task it runs. Constructor parameters are resolved by their type, which requires `emitDecoratorMetadata`,
+and each must be a class marked `@Injectable()`. A service is shared by the whole worker
+(`scope: 'singleton'`, the default) unless declared otherwise:
+
+<$CodeSample path="typescript/src/tasks/classes.ts" region="scope" />
+
+| Scope | Instances |
+|-------|-----------|
+| `'singleton'` (default) | One per worker |
+| `'transient'` | A new one wherever it is injected |
+
+Workflows get no injection: they must be deterministic, so services belong in tasks.
+
+### When to Use Which
+
+| Use case | Choose |
+|----------|--------|
+| A stateless task (send an email, call an API) | `task({ ... })` |
+| Tasks that share a client, pool or configuration | `@Tasks()` with `@Injectable()` services |
+| Several related operations on one service | `@Tasks()` class |
+
+---
+
+## Retry Policy
+
+When an attempt throws, the engine schedules another after a backoff, until the policy runs out
+of attempts. Then the task fails, and `ctx.executeTask()` throws in the workflow.
+
+<$CodeSample path="typescript/src/tasks/functional.ts" region="options" />
+
+| Field | Default (when a policy is given) | Description |
+|-------|----------------------------------|-------------|
+| `maxAttempts` | `3` | Attempts in total, the first included |
+| `initialInterval` | `1000` | Milliseconds before the first retry |
+| `backoffCoefficient` | `2` | Each wait is the previous one times this |
+| `maxInterval` | `60000` | The longest wait between attempts, in milliseconds |
+| `nonRetryableErrorTypes` | `[]` | Error types that fail the task at once |
+
+The engine works in whole seconds, so intervals below a second are rounded down. A task with no
+`retryPolicy` uses the engine's default policy. `ctx.attempt()` in the task counts attempts from 1.
+
+### Errors That Should Not Be Retried
+
+An error's type is its `name`, or its class name when `name` is left as `'Error'`. List the
+types that retrying cannot fix in `nonRetryableErrorTypes`:
+
+<$CodeSample path="typescript/src/tasks/functional.ts" region="non-retryable-error" />
+
+Or mark one error as final, whatever the policy says, by setting `nonRetryable: true` on it:
+
+<$CodeSample path="typescript/src/tasks/functional.ts" region="mark-final" />
+
+### Idempotency
+
+Tasks run at least once: an attempt can do its work and then fail to report it, and run again.
+Results are journaled once, but side effects need an idempotency key that is the same on every
+attempt. Build it from the business identity of the work, as `chargeCard` above does with the
+order id, and pass it to the service you call.
+
+<Admonition type="caution">
+
+In `@orcher/sdk` 0.5.4, `ctx.taskId()` and `ctx.runId()` return `'unknown'` inside a task run by a
+worker. Don't build idempotency keys from them.
+
+</Admonition>
+
+---
+
+## Heartbeats
+
+The worker heartbeats every task it runs, on its own, for as long as the task runs. A long task
+needs no heartbeat code to stay alive, and if its worker dies the heartbeats stop, the attempt
+times out after its heartbeat timeout, and the engine runs it again.
+
+`ctx.heartbeat()` and `ctx.heartbeatWithDetails(details)` are optional. Call them to record how
+far the task has got, and to learn that it was canceled: both throw a `TaskError` with code
+`TASK_CANCELED` once it has been.
+
+<$CodeSample path="typescript/src/tasks/heartbeats.ts" region="progress" />
+
+`ctx.heartbeatTimeout()` returns the heartbeat timeout the attempt is judged by, in milliseconds.
+
+---
+
+## Cancellation
+
+When the workflow is canceled or terminated, the engine answers the worker's next heartbeat with
+a request to stop, and the task's cancellation token is set. `ctx.isCancelled()` then returns
+true. Check it between units of work:
+
+<$CodeSample path="typescript/src/tasks/heartbeats.ts" region="cancel-poll" />
+
+Or wait on the cancellation token, for example to abort a request in flight:
+
+<$CodeSample path="typescript/src/tasks/heartbeats.ts" region="cancel-abort" />
+
+---
+
+## Task Metadata and Logging
+
+<$CodeSample path="typescript/src/tasks/heartbeats.ts" region="metadata" />
+
+---
+
+## TaskContext Reference
+
+| Method | Description |
+|--------|-------------|
+| `ctx.attempt()` | The attempt number, from 1 |
+| `ctx.isRetry()` | Whether this is not the first attempt |
+| `ctx.workflowId()` | The workflow that scheduled the task |
+| `ctx.taskType()` | The task's registered name |
+| `ctx.heartbeatTimeout()` | The heartbeat timeout in milliseconds, or `undefined` |
+| `ctx.heartbeat()` | Record a heartbeat; throws once the task is canceled |
+| `ctx.heartbeatWithDetails(details)` | The same, with JSON-serializable progress details |
+| `ctx.isCancelled()` | Whether the engine has asked the attempt to stop |
+| `ctx.cancellationToken()` | A token with `isCancelled` and `waitForCancellation()` |
+| `ctx.logger()` | A logger that prefixes each line with the task's metadata |
+| `ctx.taskId()` / `ctx.runId()` | Return `'unknown'` in 0.5.4; see [idempotency](#idempotency) |
+
+---
+
+## Next Steps
+
+- [Workflows](/guides/sdk/typescript/workflows): calling tasks, per-call options, failures
+- [Worker](/guides/sdk/typescript/worker): worker configuration
+- [Testing](/guides/sdk/typescript/testing): mocking tasks in tests

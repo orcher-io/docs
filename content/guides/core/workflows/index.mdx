@@ -1,0 +1,110 @@
+---
+id: 'workflows'
+title: 'Workflows'
+description: 'Learn the fundamentals of workflows in Orcher. Understand durable execution, automatic journaling, deterministic replay, and workflow patterns.'
+sidebar_label: 'Workflows'
+---
+
+Workflows are the core abstraction in Orcher. A **workflow** is a function that orchestrates a sequence of steps, where each step's result is automatically recorded in a persistent journal. If the workflow is interrupted for any reason — a server crash, a deployment, a network failure — it resumes from the last completed step rather than starting over. The journal ensures that no step is ever executed twice.
+
+In a traditional application, if your server crashes halfway through processing an order — after charging the customer's card but before sending the confirmation email — you're left in an inconsistent state. You have to build retry logic, state tracking, and recovery mechanisms yourself. Workflows eliminate this entire class of problems.
+
+Think of it like a bookmark in a book. Every time you finish a page (a step), the system places a bookmark. If you're interrupted, you pick up exactly where the bookmark is — you don't re-read pages you've already finished.
+
+### Key Characteristics
+
+- **Durable** — A workflow survives process crashes, server restarts, and network failures. When the workflow resumes, it replays its journal to restore its position, then continues from the next unfinished step. Your code doesn't need to handle recovery — the framework does it for you.
+
+- **Deterministic** — Workflow code must produce the same sequence of steps every time it runs with the same inputs. This is because the replay mechanism re-executes your workflow function from the beginning, using journaled results for completed steps. If your code took a different path on replay (e.g., because of a random number), it would try to apply the wrong journaled result to the wrong step. See the [Determinism](/guides/core/workflows/determinism) section for the full set of rules.
+
+- **Automatically Journaled** — Every call to `execute_task`, `sleep`, `wait_for_event`, and other context methods is recorded in PostgreSQL. You don't write any journaling code yourself — it happens transparently whenever you use the workflow context.
+
+- **Composable** — Workflows can start and wait on other workflows, creating parent-child relationships. A parent workflow that starts a child workflow gets back the child's result, and the parent-child relationship is itself journaled. This lets you break complex processes into reusable pieces.
+
+- **Resumable** — When a workflow calls `sleep` or `wait_for_event`, it releases its worker. The workflow isn't holding a thread or a connection while waiting — it's fully suspended. When the timer fires or the event arrives, the server re-dispatches the workflow to any available worker, which replays the journal and continues.
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Workflow Lifecycle</div>
+  </div>
+  {[
+    { label: 'Queued', detail: 'Waiting for a worker', icon: '○' },
+    { label: 'Running', detail: 'Executing steps on a worker', icon: '►' },
+    { label: 'Suspended', detail: 'Waiting on sleep / event — zero resources', icon: '⏸' },
+    { label: 'Running', detail: 'Timer fired or event arrived — resumed', icon: '►' },
+    { label: 'Completed', detail: 'All steps finished — result stored', icon: '✓' },
+  ].map((state, i, arr) => (
+    <div key={i}>
+      <div className={`px-4 py-2 flex items-center gap-3 ${state.label === 'Suspended' ? 'bg-surface-75' : ''}`}>
+        <span className="w-5 h-5 flex items-center justify-center text-[10px] text-foreground-muted shrink-0">{state.icon}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium text-foreground">{state.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{state.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-red-500/5 flex items-center gap-3">
+    <span className="w-5 h-5 flex items-center justify-center text-[10px] text-red-400 shrink-0">✗</span>
+    <div className="flex-1">
+      <span className="text-xs font-medium text-foreground">Failed</span>
+      <span className="text-[10px] text-foreground-muted ml-2">Max retries exceeded — error stored</span>
+    </div>
+  </div>
+</div>
+
+---
+
+### Explore Workflows
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/workflows/getting-started" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Getting Started</h3>
+      <p className="text-sm text-foreground-light">
+        Write your first workflow, understand the execution model, and learn the workflow context API.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/workflows/determinism" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Determinism Rules</h3>
+      <p className="text-sm text-foreground-light">
+        Understand what is safe and unsafe in workflow code, and why determinism matters for replay.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/workflows/patterns" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Patterns</h3>
+      <p className="text-sm text-foreground-light">
+        Sequential, parallel, conditional, loop, and error handling patterns for workflows.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/workflows/lifecycle" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Lifecycle</h3>
+      <p className="text-sm text-foreground-light">
+        Workflow versioning, lifecycle states, and querying workflows from external code.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/workflows/best-practices" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Best Practices</h3>
+      <p className="text-sm text-foreground-light">
+        Guidelines for writing maintainable, reliable, and performant workflows.
+      </p>
+    </div>
+  </Link>
+</div>

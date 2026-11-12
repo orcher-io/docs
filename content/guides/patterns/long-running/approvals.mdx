@@ -1,0 +1,416 @@
+---
+id: 'long-running-approvals'
+title: 'Human-in-the-Loop Approvals'
+sidebar_label: 'Approvals'
+---
+
+## Human-in-the-Loop Approvals
+
+Many business processes require a human to make a decision before the workflow can proceed. Orcher's `wait_for_event_with_timeout` lets you pause the workflow until a signal arrives (e.g., an approval or rejection), with an automatic timeout that triggers escalation or a default action if no one responds in time.
+
+<div className="not-prose my-8 max-w-md mx-auto">
+  <div className="flex flex-col items-center">
+    <div className="border bg-surface-75 px-5 py-2 text-center">
+      <div className="text-xs font-medium text-foreground">Submit Request</div>
+    </div>
+    <div className="w-px h-4 bg-border-strong" />
+    <div className="border bg-background px-5 py-2 text-center">
+      <div className="text-xs font-medium text-foreground">Notify Approver</div>
+    </div>
+    <div className="w-px h-4 bg-border-strong" />
+    {/* Wait box */}
+    <div className="border border-dashed bg-surface-75 px-5 py-3 text-center w-full">
+      <div className="text-xs font-medium text-foreground">wait_for_event("approval")</div>
+      <div className="text-[10px] text-foreground-muted mt-1">timeout: 48 hours · zero resources</div>
+    </div>
+    {/* Three-way branch */}
+    <div className="w-px h-4 bg-border-strong" />
+    <div className="relative w-full">
+      <div className="absolute top-0 h-px bg-border-strong" style={{ left: 'calc(16.6% - 0.30rem)', right: 'calc(16.6% - 0.30rem)' }} />
+      <div className="grid grid-cols-3 gap-3">
+        <div className="flex flex-col items-center">
+          <div className="w-px h-4 bg-border-strong" />
+          <div className="text-[10px] font-mono text-foreground-muted mb-1">approved</div>
+          <div className="border bg-background w-full py-2 px-2 text-center flex flex-col justify-center min-h-[3.5rem]">
+            <div className="text-[10px] font-medium text-foreground">Process</div>
+            <div className="text-[10px] text-foreground-muted mt-0.5">Execute action</div>
+          </div>
+        </div>
+        <div className="flex flex-col items-center">
+          <div className="w-px h-4 bg-border-strong" />
+          <div className="text-[10px] font-mono text-red-400 mb-1">rejected</div>
+          <div className="border border-red-400/30 bg-red-500/5 w-full py-2 px-2 text-center flex flex-col justify-center min-h-[3.5rem]">
+            <div className="text-[10px] font-medium text-foreground">Cancel</div>
+            <div className="text-[10px] text-foreground-muted mt-0.5">Notify requester</div>
+          </div>
+        </div>
+        <div className="flex flex-col items-center">
+          <div className="w-px h-4 bg-border-strong" />
+          <div className="text-[10px] font-mono text-foreground-muted mb-1">timeout</div>
+          <div className="border border-dashed w-full py-2 px-2 text-center flex flex-col justify-center min-h-[3.5rem]">
+            <div className="text-[10px] font-medium text-foreground">Escalate</div>
+            <div className="text-[10px] text-foreground-muted mt-0.5">Notify manager</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use std::time::Duration;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ApprovalRequest {
+    request_id: String,
+    requester: String,
+    amount: f64,
+    description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ApprovalResult {
+    request_id: String,
+    approved: bool,
+    approver: Option<String>,
+    decision_time: String,
+    escalated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ApprovalDecision {
+    approved: bool,
+    approver: String,
+    comments: String,
+}
+
+#[task]
+async fn notify_approver(request: ApprovalRequest) -> Result<()> {
+    // Send notification to the approver
+    Ok(())
+}
+
+#[task]
+async fn escalate_to_manager(request: ApprovalRequest) -> Result<()> {
+    // Escalate to manager
+    Ok(())
+}
+
+// Approval workflow with timeout and escalation
+#[workflow(name = "approval_workflow", version = "1.0.0")]
+pub async fn approval_workflow(
+    ctx: WorkflowContext,
+    request: ApprovalRequest,
+) -> Result<ApprovalResult> {
+    println!("Approval request: {} - ${}", request.request_id, request.amount);
+
+    // Send notification to approver
+    ctx.execute_task(notify_approver, request.clone()).await?;
+
+    // Wait for approval with 48-hour timeout
+    let decision: Option<ApprovalDecision> = ctx
+        .wait_for_event_with_timeout(
+            "approval_decision",
+            Duration::from_secs(172800) // 48 hours
+        )
+        .await?;
+
+    match decision {
+        Some(decision) => {
+            println!("Decision received from {}: {}",
+                decision.approver,
+                if decision.approved { "APPROVED" } else { "REJECTED" }
+            );
+
+            Ok(ApprovalResult {
+                request_id: request.request_id,
+                approved: decision.approved,
+                approver: Some(decision.approver),
+                decision_time: chrono::Utc::now().to_rfc3339(),
+                escalated: false,
+            })
+        }
+        None => {
+            println!("Approval timeout - escalating to manager");
+
+            // Escalate to manager
+            ctx.execute_task(escalate_to_manager, request.clone()).await?;
+
+            // Wait for manager decision (24 hours)
+            let manager_decision: Option<ApprovalDecision> = ctx
+                .wait_for_event_with_timeout(
+                    "manager_decision",
+                    Duration::from_secs(86400)
+                )
+                .await?;
+
+            match manager_decision {
+                Some(decision) => Ok(ApprovalResult {
+                    request_id: request.request_id,
+                    approved: decision.approved,
+                    approver: Some(decision.approver),
+                    decision_time: chrono::Utc::now().to_rfc3339(),
+                    escalated: true,
+                }),
+                None => {
+                    // Auto-reject after escalation timeout
+                    println!("Manager timeout - auto-rejecting");
+                    Ok(ApprovalResult {
+                        request_id: request.request_id,
+                        approved: false,
+                        approver: None,
+                        decision_time: chrono::Utc::now().to_rfc3339(),
+                        escalated: true,
+                    })
+                }
+            }
+        }
+    }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, WorkflowContext, createTaskRefs, Duration } from '@orcher/sdk';
+
+interface ApprovalRequest {
+  requestId: string;
+  requester: string;
+  amount: number;
+  description: string;
+}
+
+interface ApprovalResult {
+  requestId: string;
+  approved: boolean;
+  approver?: string;
+  decisionTime: string;
+  escalated: boolean;
+}
+
+interface ApprovalDecision {
+  approved: boolean;
+  approver: string;
+  comments: string;
+}
+
+@Tasks()
+class ApprovalTasks {
+  @Task()
+  async notifyApprover(request: ApprovalRequest): Promise<void> {
+    // Send notification to the approver
+  }
+
+  @Task()
+  async escalateToManager(request: ApprovalRequest): Promise<void> {
+    // Escalate to manager
+  }
+}
+
+const tasks = createTaskRefs(ApprovalTasks);
+
+// Approval workflow with timeout and escalation
+@Workflow({ name: 'approval_workflow', version: '1.0.0' })
+class ApprovalWorkflow {
+  async run(ctx: WorkflowContext, request: ApprovalRequest): Promise<ApprovalResult> {
+    console.log(`Approval request: ${request.requestId} - $${request.amount}`);
+
+    // Send notification to approver
+    await ctx.executeTask(tasks.notifyApprover, request);
+
+    // Wait for approval with 48-hour timeout
+    const decision = await ctx.waitForEventWithTimeout<ApprovalDecision>(
+      'approval_decision',
+      Duration.fromHours(48)
+    );
+
+    if (decision) {
+      console.log(
+        `Decision received from ${decision.approver}: ${decision.approved ? 'APPROVED' : 'REJECTED'}`
+      );
+
+      return {
+        requestId: request.requestId,
+        approved: decision.approved,
+        approver: decision.approver,
+        decisionTime: new Date().toISOString(),
+        escalated: false,
+      };
+    }
+
+    console.log('Approval timeout - escalating to manager');
+
+    // Escalate to manager
+    await ctx.executeTask(tasks.escalateToManager, request);
+
+    // Wait for manager decision (24 hours)
+    const managerDecision = await ctx.waitForEventWithTimeout<ApprovalDecision>(
+      'manager_decision',
+      Duration.fromHours(24)
+    );
+
+    if (managerDecision) {
+      return {
+        requestId: request.requestId,
+        approved: managerDecision.approved,
+        approver: managerDecision.approver,
+        decisionTime: new Date().toISOString(),
+        escalated: true,
+      };
+    }
+
+    // Auto-reject after escalation timeout
+    console.log('Manager timeout - auto-rejecting');
+    return {
+      requestId: request.requestId,
+      approved: false,
+      decisionTime: new Date().toISOString(),
+      escalated: true,
+    };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext
+from dataclasses import dataclass
+from typing import Optional
+from datetime import datetime, timedelta
+
+@dataclass
+class ApprovalRequest:
+    request_id: str
+    requester: str
+    amount: float
+    description: str
+
+@dataclass
+class ApprovalResult:
+    request_id: str
+    approved: bool
+    approver: Optional[str]
+    decision_time: str
+    escalated: bool
+
+@dataclass
+class ApprovalDecision:
+    approved: bool
+    approver: str
+    comments: str
+
+@task
+async def notify_approver(request: ApprovalRequest) -> None:
+    """Send notification to the approver."""
+    pass
+
+@task
+async def escalate_to_manager(request: ApprovalRequest) -> None:
+    """Escalate to manager."""
+    pass
+
+# Approval workflow with timeout and escalation
+@workflow(name="approval_workflow", version="1.0.0")
+async def approval_workflow(ctx: WorkflowContext, request: ApprovalRequest) -> ApprovalResult:
+    print(f"Approval request: {request.request_id} - ${request.amount}")
+
+    # Send notification to approver
+    await ctx.execute_task(notify_approver, request)
+
+    # Wait for approval with 48-hour timeout.
+    # wait_for_event_with_timeout raises TimeoutError when the deadline passes.
+    try:
+        decision: ApprovalDecision = await ctx.wait_for_event_with_timeout(
+            "approval_decision",
+            timedelta(hours=48),
+        )
+        print(f"Decision received from {decision.approver}: "
+              f"{'APPROVED' if decision.approved else 'REJECTED'}")
+
+        return ApprovalResult(
+            request_id=request.request_id,
+            approved=decision.approved,
+            approver=decision.approver,
+            decision_time=datetime.utcnow().isoformat(),
+            escalated=False,
+        )
+    except TimeoutError:
+        pass
+
+    print("Approval timeout - escalating to manager")
+
+    # Escalate to manager
+    await ctx.execute_task(escalate_to_manager, request)
+
+    # Wait for manager decision (24 hours)
+    try:
+        manager_decision: ApprovalDecision = await ctx.wait_for_event_with_timeout(
+            "manager_decision",
+            timedelta(hours=24),
+        )
+        return ApprovalResult(
+            request_id=request.request_id,
+            approved=manager_decision.approved,
+            approver=manager_decision.approver,
+            decision_time=datetime.utcnow().isoformat(),
+            escalated=True,
+        )
+    except TimeoutError:
+        pass
+
+    # Auto-reject after escalation timeout
+    print("Manager timeout - auto-rejecting")
+    return ApprovalResult(
+        request_id=request.request_id,
+        approved=False,
+        approver=None,
+        decision_time=datetime.utcnow().isoformat(),
+        escalated=True,
+    )
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/patterns/long-running" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Overview & Durable Timers</h3>
+      <p className="text-sm text-scale-1100">
+        Introduction to long-running processes and durable timers.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/long-running/trial-management" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Trial Period Management</h3>
+      <p className="text-sm text-scale-1100">
+        Manage SaaS trial periods with milestone reminders.
+      </p>
+    </div>
+  </Link>
+</div>

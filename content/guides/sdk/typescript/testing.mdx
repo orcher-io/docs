@@ -1,0 +1,114 @@
+---
+id: typescript-testing
+title: Testing
+description: Test workflows with the TypeScript SDK — run them in memory with mocked tasks, assert on calls, and move a test clock instead of waiting
+sidebar_label: 'Testing'
+---
+
+`@orcher/sdk/testing` runs a workflow's code in memory, with no engine and no worker. Tasks are
+replaced by mocks you configure by task name, and durable timers wait on a test clock that you
+move forward. It works with any test runner; the samples use Node's built-in `node:test`.
+
+---
+
+## The Workflow Under Test
+
+<$CodeSample path="typescript/src/testing/order.ts" region="workflow" />
+
+---
+
+## Test Environment
+
+`TestWorkflowEnvironment.create()` is async. `executeWorkflow()` takes the reference that
+`workflow({ ... })` returns, or a run function, and the workflow's input. Release the
+environment with `cleanup()`.
+
+<$CodeSample path="typescript/src/testing/order.test.ts" region="setup" />
+
+To test a `@Workflow` class, wrap its `run()` method in a run function:
+
+<$CodeSample path="typescript/src/testing/class-workflow.ts" region="class" />
+
+---
+
+## Mocking Tasks
+
+Every task the workflow calls needs a mock: a call to a task without one fails with an error
+naming it. `env.mockTask(name)` returns a builder:
+
+| Builder method | The mock |
+|----------------|----------|
+| `.returns(value)` | Returns `value` every time |
+| `.returnsSequence([a, b, error])` | Returns each value in turn; an `Error` in the list is thrown |
+| `.throws(error)` | Throws every time |
+| `.withFn(fn)` | Calls `fn(input)` and returns what it returns |
+| `.resolvesAfter(value, ms)` / `.rejectsAfter(error, ms)` | Settles after `ms` of test-clock time |
+| `.spy(fn?)` | Calls `fn` if given, otherwise returns `undefined` |
+
+<$CodeSample path="typescript/src/testing/order.test.ts" region="failure" />
+
+Tasks are not retried in the test environment: a mock that throws fails the call at once, and
+the workflow's `catch` sees the mock's own error.
+
+---
+
+## Controlling Time
+
+`ctx.sleep()` waits on the test clock. Start the workflow, move the clock with
+`env.advanceTime(ms)`, then await the result:
+
+<$CodeSample path="typescript/src/testing/order.test.ts" region="happy-path" />
+
+`ctx.time` reads the same clock. `getCurrentTime()`, `setCurrentTime(date)` and
+`advanceTimeTo(date)` read and set it directly.
+
+---
+
+## Asserting on Calls
+
+| Method | Description |
+|--------|-------------|
+| `env.assertTaskCalled(name, count?)` | Throws unless the task was called (exactly `count` times, if given) |
+| `env.assertTaskCalledWith(name, input)` | Throws unless some call had this input |
+| `env.getTaskCallCount(name)` | The number of calls |
+| `env.getMockTask(name)` | An inspector: `callCount`, `calls`, `wasCalled`, `wasCalledWith(input)` |
+
+<$CodeSample path="typescript/src/testing/order.test.ts" region="inspect" />
+
+---
+
+## What the Test Environment Covers
+
+The environment runs the workflow against a stand-in for `WorkflowContext` that implements:
+
+- `executeTask`, through the mocks
+- `sleep` and `ctx.time`, on the test clock
+- `waitForEvent`, `registerQueryHandler`, `setState`, `workflowId()`, `taskQueue()`
+- `getState`, which returns a `Promise` here, unlike the real context
+- `ctx.random.uuid()` and `ctx.random.random()`
+
+It does not implement `execute`, `sleepWithId`, `waitForEventWithTimeout`, `startChildWorkflow`,
+`createSession`, `ctx.random.choose`/`randomRange`/`shuffle`, or the other metadata methods, and
+`restartFresh` throws. It has no way for a test to send an event, and running child workflows
+needs a registration step the environment does not expose. Test workflows that use these against
+a real engine, or move the logic they guard into functions you can test directly.
+
+The environment also does not replay, so it does not check determinism. Since tasks never
+suspend in it, a missing `isWorkflowSuspension()` check is not caught either: review `catch`
+blocks in workflows with that in mind.
+
+---
+
+## Testing Task Logic
+
+A task's `TaskContext` comes from the worker, so test the logic in a task rather than the task
+function itself: keep it in plain functions that take ordinary arguments, and call those from
+the task and from your tests.
+
+---
+
+## Next Steps
+
+- [Workflows](/guides/sdk/typescript/workflows): workflow APIs to test
+- [Tasks](/guides/sdk/typescript/tasks): task design
+- [Patterns](/guides/sdk/typescript/patterns): patterns worth testing

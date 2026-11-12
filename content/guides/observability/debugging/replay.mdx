@@ -1,0 +1,81 @@
+---
+id: 'debugging-replay'
+title: 'Understanding Replay'
+description: 'Learn how deterministic replay works in Orcher and how to debug replay issues'
+sidebar_label: 'Understanding Replay'
+---
+
+Orcher uses **deterministic replay** for crash recovery. Understanding replay is essential for debugging, because it explains why some steps don't re-execute after a failure.
+
+## How It Works
+
+```
+Normal Execution:
+  Step 1: validate_order → Result A (journaled)
+  Step 2: process_payment → Result B (journaled)
+  Step 3: ship_order → Result C (journaled)
+  ✓ Workflow completes
+
+Crash During Step 3:
+  Server crashes or worker restarts
+
+Recovery (Replay):
+  Step 1: validate_order → Read Result A from journal (NOT re-executed)
+  Step 2: process_payment → Read Result B from journal (NOT re-executed)
+  Step 3: ship_order → Resume execution from crash point
+  ✓ Workflow completes without duplicate side effects
+```
+
+Key points:
+
+- Completed steps are **never re-executed** — results are read from the PostgreSQL journal
+- Only the incomplete step is **resumed**
+- No side effects are duplicated (payments aren't charged twice)
+- The journal is the source of truth for what happened
+
+## Debugging Replay Issues
+
+Use the journal view to understand what was replayed:
+
+```bash
+# View the journal for an execution
+orcher logs workflow/my-workflow --journal
+
+# Or use workflow history
+orcher workflow history <execution-id>
+```
+
+If a workflow behaves differently on replay, check:
+
+1. **Non-deterministic code in workflows** — Workflows must be deterministic. Don't use `rand()`, `SystemTime::now()`, or external API calls directly in workflow code. Use tasks for side effects.
+2. **Missing journal entries** — If the journal is incomplete, the step will re-execute. Check for database issues.
+3. **Task idempotency** — Tasks that call external APIs should use idempotency keys to prevent duplicate operations on replay.
+
+## Writing Replay-Safe Tasks
+
+Tasks that interact with external systems should be idempotent:
+
+```rust
+#[task]
+async fn charge_payment(ctx: TaskCtx, payment: PaymentRequest) -> Result<ChargeResult> {
+    // Use a deterministic idempotency key
+    let idempotency_key = format!("{}:{}", ctx.execution_id, ctx.task_id);
+
+    // Check for existing charge (handles replay)
+    if let Some(existing) = find_charge_by_key(&idempotency_key).await? {
+        tracing::info!("Returning cached result (replay detected)");
+        return Ok(existing);
+    }
+
+    // Proceed with new charge
+    gateway::charge(&payment, &idempotency_key).await
+}
+```
+
+---
+
+## Next Steps
+
+- [Debugging Overview](/guides/observability/debugging) — Inspecting executions with describe, list, and get commands
+- [Viewing Logs](/guides/observability/debugging/logs) — Text logs, journal entries, task execution details, and workflow history
+- [Scenarios & Management](/guides/observability/debugging/scenarios) — Managing running workflows, common debugging scenarios, and CLI reference

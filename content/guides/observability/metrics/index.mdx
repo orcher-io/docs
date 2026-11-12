@@ -1,0 +1,55 @@
+---
+id: 'metrics'
+title: 'Metrics'
+description: 'Monitor Orcher with Prometheus metrics for workflows, tasks, queues, and storage'
+sidebar_label: 'Metrics'
+---
+
+The orchestrator exposes Prometheus-compatible metrics on a dedicated HTTP endpoint. These cover workflow execution, task performance, queue depth, database pool health, journal cache efficiency, polling latency, retry rates, and dead letter queue depth.
+
+- **Prometheus-native** — Standard `/metrics` endpoint with all metrics following Prometheus naming conventions
+- **Dedicated metrics port** — Metrics are served on port 8001, separate from the gRPC (50051) and HTTP (8080) APIs
+- **Comprehensive coverage** — 100+ metrics across workflows, tasks, queues, storage, polling, retries, and DLQ
+- **Zero-config** — Sensible defaults with environment variable overrides
+
+---
+
+## Metrics Endpoint
+
+The orchestrator serves metrics at:
+
+```
+http://<host>:8001/metrics
+```
+
+A health endpoint is also available:
+
+```
+http://<host>:8001/health
+```
+
+### Configuration
+
+```bash
+# Enable metrics (enabled by default)
+ORCHER_METRICS_ENABLED=true
+
+# Metrics bind address
+ORCHER_METRICS_ADDRESS="0.0.0.0:8001"
+
+# Log level and format
+LOG_LEVEL=info
+LOG_FORMAT=json    # json or pretty
+```
+
+---
+
+## Next Steps
+
+- [Metric Reference](/guides/observability/metrics/reference) — Full list of all exposed metrics
+- [Prometheus Setup](/guides/observability/metrics/prometheus) — Scrape configuration and useful PromQL queries
+- [Alerting](/guides/observability/metrics/alerting) — Recommended alert rules
+- [Logging](/guides/observability/logging) — Structured logging configuration
+- [Tracing](/guides/observability/tracing) — Distributed tracing with OpenTelemetry
+- [Debugging](/guides/observability/debugging) — Debugging workflow execution
+- [Storage](/guides/operations/storage) — PostgreSQL and Redis configuration

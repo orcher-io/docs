@@ -1,0 +1,397 @@
+---
+id: 'saga-best-practices'
+title: 'Best Practices & Pitfalls'
+sidebar_label: 'Best Practices'
+---
+
+## Best Practices
+
+### 1. Make Compensation Idempotent
+
+Compensation actions may be retried if they fail or if the workflow replays. Always check the current state of the resource before performing the compensation. If the resource has already been compensated (e.g., a payment is already refunded), return success without performing the action again.
+
+```rust
+// Good - Idempotent compensation
+#[task(name = "refund_payment")]
+pub async fn refund_payment(
+    ctx: TaskContext,
+    payment_id: String,
+) -> Result<()> {
+    // Check if already refunded
+    let payment_status = get_payment_status(&payment_id).await?;
+
+    if payment_status == "refunded" {
+        println!("Payment {} already refunded, skipping", payment_id);
+        return Ok(());
+    }
+
+    // Issue refund
+    payment_gateway::refund(payment_id).await?;
+    Ok(())
+}
+
+// Bad - Not idempotent (could double-refund)
+#[task(name = "refund_payment_bad")]
+pub async fn refund_payment_bad(
+    ctx: TaskContext,
+    payment_id: String,
+) -> Result<()> {
+    // Blindly refunds without checking current state
+    payment_gateway::refund(payment_id).await?;
+    Ok(())
+}
+```
+
+### 2. Compensate in Reverse Order
+
+Always undo operations in the opposite order they were executed. This is important because later steps may depend on the state created by earlier steps. For example, canceling a shipment before refunding the payment ensures the payment refund doesn't trigger a conflicting re-shipment.
+
+```rust
+// Good - Reverse order compensation
+async fn compensate_saga(ctx: &WorkflowContext, state: &SagaState) -> Result<()> {
+    // Last operation first
+    if state.shipment_created {
+        cancel_shipment(ctx, &state.shipment_id).await?;
+    }
+
+    // Then payment
+    if state.payment_captured {
+        refund_payment(ctx, &state.payment_id).await?;
+    }
+
+    // First operation last
+    if state.inventory_reserved {
+        release_inventory(ctx, &state.inventory_id).await?;
+    }
+
+    Ok(())
+}
+```
+
+### 3. Store Compensation Data
+
+Every saga step must store the IDs and metadata needed for its compensation action. Without these identifiers, compensation becomes impossible. Store resource IDs, amounts (for partial refunds), and timestamps (for audit trails) immediately after each step succeeds.
+
+```rust
+// Good - Stores all data needed for compensation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SagaState {
+    payment_id: Option<String>,
+    inventory_id: Option<String>,
+    shipment_id: Option<String>,
+    // Store amounts for partial refunds
+    payment_amount: Option<f64>,
+    // Store timestamps for audit
+    payment_captured_at: Option<DateTime<Utc>>,
+}
+
+// Bad - Missing compensation data
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SagaStateBad {
+    payment_captured: bool,
+    inventory_reserved: bool,
+    // No IDs stored - can't compensate!
+}
+```
+
+### 4. Handle Compensation Failures
+
+Compensation itself can fail — a refund API might be temporarily down, or a cancellation service might time out. When this happens, don't stop compensating the remaining steps. Instead, attempt all compensations, collect any failures, and alert the operations team for manual resolution. This ensures partial compensation doesn't leave the system in a worse state.
+
+```rust
+// Good - Handles compensation failures without stopping
+async fn compensate_saga_robust(
+    ctx: &WorkflowContext,
+    state: &SagaState,
+) -> Result<()> {
+    let mut failures = Vec::new();
+
+    if state.payment_captured {
+        if let Err(e) = refund_payment(ctx, &state.payment_id).await {
+            println!("Refund failed: {}", e);
+            failures.push(("payment", e));
+            // Continue with other compensations
+        }
+    }
+
+    if state.inventory_reserved {
+        if let Err(e) = release_inventory(ctx, &state.inventory_id).await {
+            println!("Inventory release failed: {}", e);
+            failures.push(("inventory", e));
+        }
+    }
+
+    // If any compensation failed, alert operations team
+    if !failures.is_empty() {
+        ctx.execute_task(alert_ops_team, failures).await?;
+    }
+
+    Ok(())
+}
+```
+
+### 5. Use Semantic Compensation
+
+Prefer semantic undo (marking a resource as "cancelled" with a timestamp) over physical undo (deleting the record). Semantic compensation preserves the audit trail and makes it possible to analyze what happened, replay events, or manually recover. Physical deletion loses this history permanently.
+
+```rust
+// Good - Semantic compensation (preserves audit trail)
+#[task(name = "cancel_reservation")]
+pub async fn cancel_reservation(
+    ctx: TaskContext,
+    reservation_id: String,
+) -> Result<()> {
+    database::update(
+        "reservations",
+        &reservation_id,
+        json!({ "status": "cancelled", "cancelled_at": Utc::now() })
+    ).await?;
+    Ok(())
+}
+
+// Less good - Physical undo (loses audit trail)
+#[task(name = "delete_reservation")]
+pub async fn delete_reservation(
+    ctx: TaskContext,
+    reservation_id: String,
+) -> Result<()> {
+    database::delete("reservations", &reservation_id).await?;
+    Ok(())
+}
+```
+
+### 6. Set Appropriate Timeouts
+
+When waiting for external systems in an event-driven saga, always set a timeout. Without one, the workflow could hang indefinitely if the external service never responds. When a timeout fires, treat it as a step failure and trigger compensation for all previously completed steps.
+
+```rust
+// Good - Timeouts for each step
+let payment_event = ctx
+    .wait_for_event_with_timeout("payment_result", Duration::from_secs(300))
+    .await?;
+
+match payment_event {
+    Some(event) => handle_event(event).await?,
+    None => {
+        // Timeout - compensate and fail gracefully
+        compensate_saga(&ctx, &state).await?;
+        return Err(Error::PaymentTimeout);
+    }
+}
+```
+
+---
+
+## Saga vs Two-Phase Commit
+
+Understanding when to use a saga versus a traditional two-phase commit helps you choose the right consistency model for your use case. Sagas trade immediate consistency for higher availability and throughput, making them the better choice for microservices architectures and long-running transactions.
+
+| Aspect | Saga Pattern | Two-Phase Commit |
+|--------|--------------|------------------|
+| **Locking** | No distributed locks | Requires locks on all participants |
+| **Availability** | High - services independent | Low - all must be available |
+| **Consistency** | Eventual consistency | Immediate consistency |
+| **Performance** | High throughput | Lower throughput |
+| **Complexity** | Moderate (compensation logic) | High (coordinator + protocol) |
+| **Use Case** | Microservices, long transactions | Traditional databases, short transactions |
+
+---
+
+## Common Pitfalls
+
+Below are the most frequent mistakes developers make when implementing sagas. Each pitfall can lead to data inconsistency, stuck workflows, or double-charged customers.
+
+### Non-Idempotent Operations
+
+Without idempotency keys, retrying a step can cause duplicate side effects like charging a customer twice.
+
+```rust
+// Bad - Can charge customer multiple times on retry
+async fn charge_customer(amount: f64) -> Result<String> {
+    stripe::charge(amount).await
+}
+
+// Good - Idempotent with unique key
+async fn charge_customer(amount: f64, idempotency_key: String) -> Result<String> {
+    stripe::charge_with_key(amount, idempotency_key).await
+}
+```
+
+### Lost Compensation Data
+
+If you forget to store the result ID from a step, you won't be able to compensate it later.
+
+```rust
+// Bad - Can't compensate without IDs
+let payment_result = charge_payment(amount).await?;
+// Forgot to store payment_result.id!
+
+// Good - Store compensation data immediately
+let payment_id = charge_payment(amount).await?;
+state.payment_id = Some(payment_id);
+```
+
+### Partial Compensation
+
+If the first compensation step fails and throws an error, subsequent compensation steps never run — leaving the system in a partially compensated state.
+
+```rust
+// Bad - Stops compensating on first error
+if state.payment_captured {
+    refund_payment(&state.payment_id).await?; // Throws error
+}
+if state.inventory_reserved {
+    release_inventory(&state.inventory_id).await?; // Never runs!
+}
+
+// Good - Try all compensations regardless of failures
+let mut errors = Vec::new();
+if state.payment_captured {
+    if let Err(e) = refund_payment(&state.payment_id).await {
+        errors.push(e);
+    }
+}
+if state.inventory_reserved {
+    if let Err(e) = release_inventory(&state.inventory_id).await {
+        errors.push(e);
+    }
+}
+```
+
+---
+
+## Performance Considerations
+
+### Saga Overhead
+
+Each saga step adds latency due to task execution, state persistence, and journal recording. The total time depends on your saga type:
+
+- **Sequential saga** — Total time = sum of all step durations
+- **Parallel saga** — Total time = duration of the slowest step
+- **Compensation** — Adds additional time on the failure path
+
+**Rule of thumb:** Use sagas for operations that take >100ms per step. For faster operations, consider optimistic locking or single-transaction approaches.
+
+### State Storage
+
+Saga state is persisted after each step for durability. Keep state small by storing references (IDs) rather than full objects:
+
+```rust
+// Good - Store references (~100 bytes)
+struct SagaState {
+    order_id: String,
+    payment_id: String,
+    inventory_id: String,
+}
+
+// Bad - Store full objects (~65KB)
+struct SagaStateBad {
+    order: Order,             // Full object (10KB)
+    payment_details: Payment, // Full object (5KB)
+    inventory: Vec<Item>,     // Array of objects (50KB)
+}
+```
+
+---
+
+## Real-World Use Cases
+
+### E-commerce Order Processing
+
+<div className="not-prose my-8 max-w-xl mx-auto">
+  <div className="grid grid-cols-2 gap-px bg-border-default border">
+    <div className="bg-surface-75 p-3">
+      <div className="text-[10px] font-mono uppercase tracking-wide text-foreground-muted mb-2">Order Saga · forward</div>
+      <div className="space-y-1.5">
+        <div className="text-xs text-foreground">Reserve inventory</div>
+        <div className="text-xs text-foreground">Charge payment card</div>
+        <div className="text-xs text-foreground">Create shipment label</div>
+        <div className="text-xs text-foreground">Update order status</div>
+        <div className="text-xs text-foreground">Send confirmation email</div>
+      </div>
+    </div>
+    <div className="bg-red-500/5 p-3">
+      <div className="text-[10px] font-mono uppercase tracking-wide text-red-400 mb-2">Compensation · on failure</div>
+      <div className="space-y-1.5">
+        <div className="text-xs text-red-400/90">Cancel shipment</div>
+        <div className="text-xs text-red-400/90">Refund payment</div>
+        <div className="text-xs text-red-400/90">Release inventory</div>
+      </div>
+    </div>
+  </div>
+  <p className="text-xs text-foreground-muted text-center mt-2">If any step fails, only the already-committed steps compensate, in reverse order.</p>
+</div>
+
+### Travel Booking System
+
+<div className="not-prose my-8 max-w-xl mx-auto">
+  <div className="grid grid-cols-2 gap-px bg-border-default border">
+    <div className="bg-surface-75 p-3">
+      <div className="text-[10px] font-mono uppercase tracking-wide text-foreground-muted mb-2">Travel Booking · forward</div>
+      <div className="space-y-1.5">
+        <div className="text-xs text-foreground">Reserve flight seats</div>
+        <div className="text-xs text-foreground">Reserve hotel room</div>
+        <div className="text-xs text-foreground">Book rental car</div>
+        <div className="text-xs text-foreground">Process payment</div>
+      </div>
+    </div>
+    <div className="bg-red-500/5 p-3">
+      <div className="text-[10px] font-mono uppercase tracking-wide text-red-400 mb-2">Compensation · on failure</div>
+      <div className="space-y-1.5">
+        <div className="text-xs text-red-400/90">Release rental car</div>
+        <div className="text-xs text-red-400/90">Cancel hotel reservation</div>
+        <div className="text-xs text-red-400/90">Cancel flight seats</div>
+      </div>
+    </div>
+  </div>
+  <p className="text-xs text-foreground-muted text-center mt-2">Compensation mirrors the forward path in reverse, releasing each reserved resource.</p>
+</div>
+
+### Financial Transaction Processing
+
+<div className="not-prose my-8 max-w-xl mx-auto">
+  <div className="grid grid-cols-2 gap-px bg-border-default border">
+    <div className="bg-surface-75 p-3">
+      <div className="text-[10px] font-mono uppercase tracking-wide text-foreground-muted mb-2">Money Transfer · forward</div>
+      <div className="space-y-1.5">
+        <div className="text-xs text-foreground">Debit source account</div>
+        <div className="text-xs text-foreground">Credit destination account</div>
+        <div className="text-xs text-foreground">Record transaction</div>
+        <div className="text-xs text-foreground">Send notifications</div>
+      </div>
+    </div>
+    <div className="bg-red-500/5 p-3">
+      <div className="text-[10px] font-mono uppercase tracking-wide text-red-400 mb-2">Compensation · on failure</div>
+      <div className="space-y-1.5">
+        <div className="text-xs text-red-400/90">Reverse credit</div>
+        <div className="text-xs text-red-400/90">Reverse debit</div>
+        <div className="text-xs text-red-400/90">Log failure</div>
+      </div>
+    </div>
+  </div>
+  <p className="text-xs text-foreground-muted text-center mt-2">Reversing entries undo the transfer while preserving a durable audit trail.</p>
+</div>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/patterns/parent-child" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Parent-Child Orchestration</h3>
+      <p className="text-sm text-foreground-light">
+        Combine sagas with child workflows for complex multi-level orchestration
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/error-handling" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Error Handling</h3>
+      <p className="text-sm text-foreground-light">
+        Learn about retry policies, circuit breakers, and resilience patterns
+      </p>
+    </div>
+  </Link>
+</div>

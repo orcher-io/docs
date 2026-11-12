@@ -1,0 +1,101 @@
+---
+id: rust-worker
+title: Worker Configuration
+description: Configure and run the Rust SDK worker — namespace, API key, TLS, concurrency, versioning, graceful shutdown and scaling
+sidebar_label: 'Worker'
+---
+
+A `Worker` connects to the Orcher server over gRPC, polls one task queue in one namespace for workflow activations and tasks, runs the handlers linked into the binary, and reports their results. It also registers itself with the server, so it shows up in the list of workers, and serves [actor](/guides/sdk/rust/actors) operations when actors are defined.
+
+---
+
+## Creating and Running a Worker
+
+<$CodeSample path="rust/sdk-worker/src/main.rs" region="main" />
+
+`Worker::builder()` collects every `#[workflow]`, `#[task]` and `#[actor]` linked into the binary. `build()` checks the configuration and, when actors are defined, registers them with the server; nothing else contacts the server until `run()`.
+
+---
+
+## Configuration
+
+| Builder method | Default | Description |
+|----------------|---------|-------------|
+| `server_url(url)` | `http://localhost:50051` | Server gRPC address, with its scheme |
+| `namespace(name)` | `default` | The namespace whose work this worker runs |
+| `task_queue(name)` | `default` | The task queue it polls |
+| `api_key(key)` | None | Sent as `authorization: Bearer <key>` on every call |
+| `organization_id(id)` | None | Sent as `x-organization-id`; only for an API key that doesn't belong to an organization itself |
+| `tls(ClientTlsConfig)` | None (follows the URL scheme) | A private CA, a client certificate for mutual TLS, or another server name ([below](#tls-and-mutual-tls)) |
+| `version_id(id)` | `ORCHER_VERSION_ID` | The code release this worker runs ([below](#versioning-releases)) |
+| `identity(name)` | `orcher-rust-<uuid>` | Name shown for the worker on the server |
+| `max_concurrent_workflows(n)` | 100 | Workflow activations run at once |
+| `max_concurrent_tasks(n)` | 200 | Tasks run at once |
+| `workflow_poller_count(n)` / `task_poller_count(n)` | 4 / 4 | Long-poll requests held open at once |
+| `actor_poller_count(n)` / `max_concurrent_actor_operations(n)` | 4 / 100 | The same for actor operations |
+| `max_sessions(n)` | 10 | [Sessions](/guides/sdk/rust/sessions) this worker accepts at once |
+| `heartbeat_interval(duration)` | 10 s | How often the worker re-announces itself to the server |
+| `poll_interval(duration)` | 100 ms | Pause between polls |
+| `with_gzip_compression()` / `with_encryption(&key)` | None | Decode payloads the [client](/guides/sdk/rust/client#payload-encoding) encoded |
+| `interceptor(hook)` | None | Run code around every workflow and task execution |
+
+<$CodeSample path="rust/sdk-worker/src/main.rs" region="tuning" />
+
+The SDK reads two environment variables: `ORCHER_VERSION_ID`, the default for `version_id`, and `ORCHER_MAX_MESSAGE_BYTES`, the largest gRPC message the worker sends or receives (32 MiB by default). Read anything else, such as the server URL or an API key, yourself, as `main` above does with `ORCHER_API_KEY`.
+
+### Namespaces and authentication
+
+A worker serves exactly one namespace, set with `namespace(...)`; workflows started in other namespaces never reach it. Start workflows in the same namespace, with `ClientConfig::with_namespace` or `StartWorkflowOptions::with_namespace` ([Client](/guides/sdk/rust/client)). There is no namespace setting on `#[workflow]`.
+
+When the server requires API keys, give the worker one with `api_key(...)`. It is sent on polls, results, heartbeats and the worker's registration alike.
+
+### TLS and mutual TLS
+
+TLS follows the URL scheme. An `https://` URL connects over TLS and verifies the server against the system trust store, with no other setting. An `http://` URL connects in plaintext, even with TLS settings (the SDK logs a warning), so use `https://` whenever the server expects TLS.
+
+`tls(...)` takes the same `ClientTlsConfig` as the [client](/guides/sdk/rust/client#tls-and-mutual-tls) and applies it to every connection the worker opens: polls, results, heartbeats, registration and actor calls. Give a CA only for a private or self-signed authority, and a client certificate and key for mutual TLS:
+
+<$CodeSample path="rust/sdk-worker/src/bin/tls.rs" region="mtls" />
+
+`build()` returns `WorkerError::InvalidConfiguration` for a client certificate without its key, or PEM that doesn't parse, so bad settings fail at startup rather than on the first poll. When a handshake fails, the error names the cause, such as a certificate the worker doesn't trust or a client certificate the server requires.
+
+TLS and mutual TLS need `orcher-sdk` 0.7.1 or later. In 0.7.0 and earlier the worker had no TLS setting and couldn't connect to an `https://` URL.
+
+### Versioning releases
+
+`version_id` labels the code release a worker runs, for example a git SHA or an image tag. The server records it on each workflow execution the first time a worker claims it. The label is opaque: never parsed or ordered. It defaults to the `ORCHER_VERSION_ID` environment variable, and leaving both unset changes nothing. This replaces the `version` attribute on `#[workflow]`, which has no effect.
+
+---
+
+## Graceful Shutdown
+
+`worker.run()` runs until `worker.shutdown()` is called or a part of the worker stops. It doesn't watch for signals itself, so share the worker through an `Arc` and call `shutdown()` from a signal handler, as `main` above does. On shutdown the worker:
+
+1. stops polling for new work;
+2. delivers the results it already holds, waiting up to 10 seconds for this;
+3. deregisters itself from the server, waiting up to 5 seconds, so it stops being listed as connected;
+4. returns from `run()`.
+
+A worker killed without a graceful shutdown doesn't deregister; the server drops its registration once its heartbeats stop. Tasks it was running are retried on another worker once their heartbeats stop ([Heartbeats](/guides/sdk/rust/tasks#heartbeats)).
+
+---
+
+## Scaling
+
+Run more processes of the same worker, with the same namespace and task queue, to run more work at once. Each workflow activation and each task attempt goes to one of them. Raise `max_concurrent_*` when a single process has spare CPU and memory, and add processes when it doesn't.
+
+To keep some work apart, for example GPU tasks, run it from workflows started on their own task queue and run a separate worker for that queue. Tasks always run on the queue of the workflow that schedules them.
+
+---
+
+## Health
+
+`worker.get_stats()` returns counts of executed, succeeded and failed workflows and tasks. `worker.get_health()` turns them into `Healthy`, `Degraded` or `Unhealthy` from the error rate and the time since the last success, for a health endpoint of your own.
+
+---
+
+## Next Steps
+
+- [Workflows](/guides/sdk/rust/workflows): the workflow context
+- [Tasks](/guides/sdk/rust/tasks): retries, heartbeats and cancellation
+- [Workers](/guides/operations/workers): running workers in operation

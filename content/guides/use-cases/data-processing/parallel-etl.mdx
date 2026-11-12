@@ -1,0 +1,398 @@
+---
+id: 'data-processing-parallel'
+title: 'Parallel ETL (Fan-Out / Fan-In)'
+description: 'Process data in parallel with fan-out/fan-in patterns for maximum throughput'
+sidebar_label: 'Parallel ETL'
+---
+
+When you need to process multiple data sources concurrently — or split a single large dataset across parallel workers — use child workflows to fan out work and aggregate results. Each child runs independently with its own journal, so a failure in one source doesn't block the others.
+
+Where [Batch Processing](/guides/use-cases/data-processing/batch-processing) runs one sequential loop with per-step checkpoints, this pattern trades ordering for throughput: every unit of work becomes its own workflow, running wherever a worker is free. Reach for it when each unit is a multi-step pipeline of its own — extract, transform, and load per source — rather than a uniform chunk of rows.
+
+## How it works
+
+The parent workflow does no data work at all. It starts one child workflow per source, then waits for their results. Each child is a full workflow with its own journal, its own retries, and its own lifecycle — the parent only orchestrates.
+
+<div className="not-prose my-8 max-w-lg mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Parent / Child Fan-Out</div>
+  </div>
+  <div className="px-4 py-3 flex flex-col items-center gap-1">
+    <div className="border px-4 py-1.5 text-center">
+      <div className="text-xs font-medium font-mono text-foreground">multi_source_etl</div>
+      <div className="text-[9px] text-foreground-muted">parent — starts children, aggregates</div>
+    </div>
+    <div className="text-[10px] text-foreground-muted leading-none py-0.5">▼ start_child_workflow × N</div>
+    <div className="grid grid-cols-3 gap-2 w-full">
+      {['Source A', 'Source B', 'Source C'].map((s) => (
+        <div key={s} className="border border-dashed px-2 py-2 text-center">
+          <div className="text-[10px] font-medium font-mono text-foreground">process_source</div>
+          <div className="text-[9px] text-foreground-muted">{s}</div>
+          <div className="text-[9px] text-foreground-muted mt-1">extract → transform → load</div>
+          <div className="text-[9px] text-foreground-muted">own journal</div>
+        </div>
+      ))}
+    </div>
+    <div className="text-[10px] text-foreground-muted leading-none py-0.5">▼ handle.result() × N</div>
+    <div className="border px-4 py-1.5 text-center">
+      <div className="text-xs font-medium text-foreground">AggregatedResult</div>
+      <div className="text-[9px] text-foreground-muted">totals + failed sources</div>
+    </div>
+  </div>
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Children run concurrently on any available workers — the parent holds no thread while waiting.</span>
+  </div>
+</div>
+
+The order of operations in the parent matters: it starts **all** children first, collecting their handles, and only then awaits results. Awaiting each child inside the start loop would serialize the whole pipeline — you'd have parallel infrastructure running one source at a time.
+
+## Example: multi-source aggregation
+
+The pipeline below pulls from N independent data sources into one warehouse. Each source runs the full extract → transform → load sequence as a child workflow; the parent gathers per-source results and reports which sources failed.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DataSource {
+    name: String,
+    connection_url: String,
+    query: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SourceResult {
+    source_name: String,
+    records_loaded: usize,
+    duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AggregatedResult {
+    total_records: usize,
+    sources_completed: usize,
+    sources_failed: Vec<String>,
+}
+
+#[task]
+async fn extract_from_source(source: DataSource) -> Result<Vec<serde_json::Value>> {
+    // Connect to the source and extract data
+    let records = external::fetch_data(&source.connection_url, &source.query).await?;
+    Ok(records)
+}
+
+#[task]
+async fn transform_records(records: Vec<serde_json::Value>) -> Result<Vec<serde_json::Value>> {
+    // Normalize, deduplicate, enrich records
+    let transformed = records.into_iter()
+        .filter(|r| validate_record(r))
+        .map(|r| normalize_record(r))
+        .collect();
+    Ok(transformed)
+}
+
+#[task]
+async fn load_to_warehouse(table: String, records: Vec<serde_json::Value>) -> Result<usize> {
+    let count = warehouse::bulk_upsert(&table, &records).await?;
+    Ok(count)
+}
+
+// Child workflow: processes a single data source end-to-end
+#[workflow(name = "process_source", version = "1.0.0")]
+pub async fn process_source(
+    ctx: WorkflowContext,
+    source: DataSource,
+) -> Result<SourceResult> {
+    let start = std::time::Instant::now();
+
+    let raw = ctx.execute_task(extract_from_source, source.clone()).await?;
+    let transformed = ctx.execute_task(transform_records, raw).await?;
+    let count = ctx.execute_task(
+        load_to_warehouse, ("analytics".to_string(), transformed)
+    ).await?;
+
+    Ok(SourceResult {
+        source_name: source.name,
+        records_loaded: count,
+        duration_ms: start.elapsed().as_millis() as u64,
+    })
+}
+
+// Parent workflow: fans out across all sources, then aggregates
+#[workflow(name = "multi_source_etl", version = "1.0.0")]
+pub async fn multi_source_etl(
+    ctx: WorkflowContext,
+    sources: Vec<DataSource>,
+) -> Result<AggregatedResult> {
+    // Fan out: start a child workflow per source
+    let mut handles = Vec::new();
+    for source in &sources {
+        let handle = ctx.start_child_workflow(
+            process_source, source.clone()
+        ).await?;
+        handles.push((source.name.clone(), handle));
+    }
+
+    // Fan in: collect results
+    let mut total_records = 0;
+    let mut sources_failed = Vec::new();
+
+    for (name, handle) in handles {
+        match handle.result().await {
+            Ok(result) => total_records += result.records_loaded,
+            Err(e) => {
+                println!("Source {} failed: {}", name, e);
+                sources_failed.push(name);
+            }
+        }
+    }
+
+    Ok(AggregatedResult {
+        total_records,
+        sources_completed: sources.len() - sources_failed.len(),
+        sources_failed,
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, WorkflowContext, createTaskRefs } from '@orcher/sdk';
+
+interface DataSource {
+  name: string;
+  connectionUrl: string;
+  query: string;
+}
+
+interface SourceResult {
+  sourceName: string;
+  recordsLoaded: number;
+  durationMs: number;
+}
+
+interface AggregatedResult {
+  totalRecords: number;
+  sourcesCompleted: number;
+  sourcesFailed: string[];
+}
+
+@Tasks()
+class ETLTasks {
+  @Task()
+  async extractFromSource(source: DataSource): Promise<Record<string, unknown>[]> {
+    return await external.fetchData(source.connectionUrl, source.query);
+  }
+
+  @Task()
+  async transformRecords(records: Record<string, unknown>[]): Promise<Record<string, unknown>[]> {
+    return records.filter(validateRecord).map(normalizeRecord);
+  }
+
+  @Task()
+  async loadToWarehouse(table: string, records: Record<string, unknown>[]): Promise<number> {
+    return await warehouse.bulkUpsert(table, records);
+  }
+}
+
+const tasks = createTaskRefs(ETLTasks);
+
+// Child workflow: processes a single data source end-to-end
+@Workflow({ name: 'process_source', version: '1.0.0' })
+class ProcessSourceWorkflow {
+  async run(ctx: WorkflowContext, source: DataSource): Promise<SourceResult> {
+    const start = Date.now();
+
+    const raw = await ctx.executeTask(tasks.extractFromSource, source);
+    const transformed = await ctx.executeTask(tasks.transformRecords, raw);
+    const count = await ctx.executeTask(tasks.loadToWarehouse, 'analytics', transformed);
+
+    return {
+      sourceName: source.name,
+      recordsLoaded: count,
+      durationMs: Date.now() - start,
+    };
+  }
+}
+
+// Parent workflow: fans out across all sources, then aggregates
+@Workflow({ name: 'multi_source_etl', version: '1.0.0' })
+class MultiSourceETL {
+  async run(ctx: WorkflowContext, sources: DataSource[]): Promise<AggregatedResult> {
+    // Fan out: start a child workflow per source
+    const handles = await Promise.all(
+      sources.map((source) => ctx.startChildWorkflow(ProcessSourceWorkflow, source))
+    );
+
+    // Fan in: collect results
+    let totalRecords = 0;
+    const sourcesFailed: string[] = [];
+
+    for (let i = 0; i < handles.length; i++) {
+      try {
+        const result = await handles[i].result();
+        totalRecords += result.recordsLoaded;
+      } catch (e) {
+        console.log(`Source ${sources[i].name} failed: ${e}`);
+        sourcesFailed.push(sources[i].name);
+      }
+    }
+
+    return {
+      totalRecords,
+      sourcesCompleted: sources.length - sourcesFailed.length,
+      sourcesFailed,
+    };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext
+from dataclasses import dataclass, field
+import time
+
+@dataclass
+class DataSource:
+    name: str
+    connection_url: str
+    query: str
+
+@dataclass
+class SourceResult:
+    source_name: str
+    records_loaded: int
+    duration_ms: int
+
+@dataclass
+class AggregatedResult:
+    total_records: int
+    sources_completed: int
+    sources_failed: list[str]
+
+@task
+async def extract_from_source(source: DataSource) -> list[dict]:
+    return await external.fetch_data(source.connection_url, source.query)
+
+@task
+async def transform_records(records: list[dict]) -> list[dict]:
+    return [normalize_record(r) for r in records if validate_record(r)]
+
+@task
+async def load_to_warehouse(table: str, records: list[dict]) -> int:
+    return await warehouse.bulk_upsert(table, records)
+
+# Child workflow: processes a single data source end-to-end
+@workflow(name="process_source", version="1.0.0")
+async def process_source(ctx: WorkflowContext, source: DataSource) -> SourceResult:
+    start = time.monotonic()
+
+    raw = await ctx.execute_task(extract_from_source, source)
+    transformed = await ctx.execute_task(transform_records, raw)
+    count = await ctx.execute_task(load_to_warehouse, "analytics", transformed)
+
+    return SourceResult(
+        source_name=source.name,
+        records_loaded=count,
+        duration_ms=int((time.monotonic() - start) * 1000),
+    )
+
+# Parent workflow: fans out across all sources, then aggregates
+@workflow(name="multi_source_etl", version="1.0.0")
+async def multi_source_etl(ctx: WorkflowContext, sources: list[DataSource]) -> AggregatedResult:
+    # Fan out: start a child workflow per source
+    handles = []
+    for source in sources:
+        handle = await ctx.start_child_workflow(process_source, source)
+        handles.append((source.name, handle))
+
+    # Fan in: collect results
+    total_records = 0
+    sources_failed = []
+
+    for name, handle in handles:
+        try:
+            result = await handle.result()
+            total_records += result.records_loaded
+        except Exception as e:
+            print(f"Source {name} failed: {e}")
+            sources_failed.append(name)
+
+    return AggregatedResult(
+        total_records=total_records,
+        sources_completed=len(sources) - len(sources_failed),
+        sources_failed=sources_failed,
+    )
+```
+
+</TabPanel>
+
+</Tabs>
+
+## Failure isolation
+
+Because every source is its own workflow, a failure is contained to the child where it happened. The other children never notice — and the parent still produces a complete result.
+
+<div className="not-prose my-8 max-w-lg mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">One Source Fails</div>
+  </div>
+  {[
+    { label: 'process_source(A)', detail: '48,201 records loaded', icon: '✓', state: 'done' },
+    { label: 'process_source(B)', detail: 'Extract failed — retries exhausted', icon: '✗', state: 'crash' },
+    { label: 'process_source(C)', detail: '112,864 records loaded', icon: '✓', state: 'done' },
+    { label: 'multi_source_etl', detail: 'Aggregates A + C, records B in sources_failed', icon: '=', state: 'resume' },
+  ].map((row, i, arr) => (
+    <div key={i}>
+      <div className={`px-4 py-2 flex items-center gap-3 ${row.state === 'crash' ? 'bg-red-500/5' : ''} ${row.state === 'resume' ? 'bg-surface-75' : ''}`}>
+        <span className={`w-5 h-5 flex items-center justify-center text-[10px] shrink-0 ${row.state === 'crash' ? 'text-red-400' : 'text-foreground-muted'}`}>{row.icon}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{row.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{row.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">B's failure never touches A or C. The failed-sources list is your input for a targeted re-run.</span>
+  </div>
+</div>
+
+Crashes are just as contained. If a **child** crashes mid-pipeline, it replays its own journal and resumes at its own next step — exactly as described in [crash recovery for batch processing](/guides/use-cases/data-processing/batch-processing#crash-recovery-step-by-step). If the **parent** crashes, its `start_child_workflow` calls are journaled like any other step: on replay it reattaches to the same children instead of starting duplicates, and children that were already running were never interrupted at all.
+
+## Design notes
+
+- **Start first, await second.** Collecting all handles before awaiting any result is what makes the fan-out parallel. This is the single most common mistake with this pattern — an `await` inside the start loop silently serializes it.
+- **Child workflows vs. parallel tasks.** Use plain tasks when units are uniform, single-step chunks (see [Batch Processing](/guides/use-cases/data-processing/batch-processing)). Use child workflows when each unit is a multi-step pipeline that deserves its own journal, retries, and failure boundary — like the per-source E-T-L here. See [Use Child Workflows for Source Isolation](/guides/use-cases/data-processing/best-practices#use-child-workflows-for-source-isolation).
+- **Fan-out width is bounded by workers, not the parent.** Starting many children is cheap — each is a queued workflow, not a held thread. They execute as worker capacity allows, and the suspended parent consumes nothing while it waits.
+
+---
+
+## Next Steps
+
+- Next pattern: [Scheduled Sync](/guides/use-cases/data-processing/scheduled-sync)
+- Previous: [Batch Processing](/guides/use-cases/data-processing/batch-processing)
+- Back to [Data Pipelines & ETL overview](/guides/use-cases/data-processing)

@@ -1,0 +1,97 @@
+---
+id: scaling
+title: Scaling Workers
+description: Statelessness, recovery, horizontal scaling strategies, and performance tuning for Orcher workers
+---
+
+## Statelessness and Recovery
+
+Workers hold no workflow state in memory. All state — journal entries, execution status, task results — lives in the orchestrator's PostgreSQL database. This has important implications:
+
+- **Any worker can resume any workflow** — If a worker crashes mid-execution, the orchestrator's reclaimer releases the claim after a timeout (60s dev, 300s production). Another worker picks up the workflow and replays completed steps from the journal without re-executing them.
+- **Workers can handle more workflows than they have memory for** — A blocked workflow (waiting for an event, timer, or child workflow) consumes no worker resources. The worker only needs memory for actively executing workflows.
+- **Rolling deployments are safe** — Old workers finish in-flight work and shut down. New workers pick up new work immediately. No state migration needed.
+
+---
+
+## Scaling
+
+### Horizontal Scaling
+
+Add more Worker instances to increase throughput. Each instance polls independently:
+
+```bash
+# Run multiple instances
+./target/release/order-worker &
+./target/release/order-worker &
+./target/release/order-worker &
+```
+
+Or scale with container orchestration:
+
+```yaml
+# Docker Compose
+services:
+  order-worker:
+    build: .
+    deploy:
+      replicas: 4
+    environment:
+      ORCHER_SERVER_URL: http://orchestrator:50051
+```
+
+```yaml
+# Kubernetes
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-worker
+spec:
+  replicas: 4
+  template:
+    spec:
+      containers:
+      - name: worker
+        image: your-registry/order-worker:latest
+        env:
+        - name: ORCHER_SERVER_URL
+          value: "http://orcher-orchestrator:50051"
+        - name: ORCHER_TASK_QUEUE
+          value: "orders"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "2000m"
+```
+
+### When to Scale
+
+**Scale up when:**
+- Queue depth is consistently growing (`orcher_queue_depth` metric)
+- Task latency exceeds your SLA (`orcher_task_duration_seconds`)
+- CPU usage is above 70% across workers
+
+**Scale down when:**
+- Queue depth is consistently zero
+- CPU usage is below 30% for several minutes
+- Most pollers return empty (no work available)
+
+### Performance Tuning
+
+| Scenario | Adjustment |
+|----------|-----------|
+| High task latency | Increase `max_concurrent_tasks` (I/O-bound tasks can go much higher) |
+| Pollers competing for work | Reduce `task_poller_count` per worker, add more worker instances instead |
+| Sequential workflows are slow | Ensure eager dispatch is working — check `orcher_tasks_completed_total` vs poll counts |
+| Queue depth growing | Add more workers or increase `max_concurrent_workflows` |
+
+---
+
+## Next Steps
+
+- [Creating a Worker](/guides/operations/workers/creating-a-worker) — Builder API and configuration options
+- [Connectivity](/guides/operations/workers/connectivity) — Registration, polling, heartbeats, and eager dispatch
+- [Operations](/guides/operations/workers/operations) — Graceful shutdown, monitoring, and troubleshooting

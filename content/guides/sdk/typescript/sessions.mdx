@@ -1,0 +1,78 @@
+---
+id: typescript-sessions
+title: Sessions
+description: Pin a series of tasks to one worker with sessions — for files on local disk, models loaded in memory and other worker-local state
+sidebar_label: 'Sessions'
+---
+
+A session runs a series of tasks on the **same worker**. Use one when a task leaves something
+behind in its worker that the next task needs: a file on local disk, a model loaded into memory,
+an open connection.
+
+---
+
+## Creating a Session
+
+Define the tasks as usual:
+
+<$CodeSample path="typescript/src/sessions/pipeline.ts" region="tasks" />
+
+Then call `ctx.createSession()` in the workflow and run the tasks through the session:
+
+<$CodeSample path="typescript/src/sessions/pipeline.ts" region="session" />
+
+`session.executeTask()` takes the same typed references as `ctx.executeTask()`, and sends the
+task to a queue that only the session's worker polls. It takes no per-call options.
+
+---
+
+## Releasing the Slot
+
+Each worker hosts at most 10 sessions at once. `session.complete()` frees the session's slot on
+its worker; nothing else does, short of the worker shutting down. So:
+
+- **Call `complete()` on every path that ends the session**, success and failure alike.
+- **Don't call it in `finally` or before re-throwing a suspension.** Waiting for a task throws a
+  suspension (see [handling failures](/guides/sdk/typescript/workflows#handling-failures-in-a-workflow)),
+  and completing then would close the session while its tasks are still to come.
+- **Don't throw after `complete()`.** A workflow that throws fails, and nothing else it did in
+  that run of its code is sent to the engine, `complete()` included. Report the failure in the
+  workflow's result instead, as the sample does.
+
+---
+
+## How It Works
+
+1. `ctx.createSession()` schedules an internal session-creation task on the workflow's queue.
+2. A worker picks it up and takes one of its session slots. If it has none free, the creation
+   task fails, and is retried like any task, possibly on another worker.
+3. That worker starts polling a queue of its own, `{queue}__session__{id}`, and the workflow
+   receives the queue's name.
+4. `session.executeTask()` sends each task to that queue, so only that worker runs them.
+5. `session.complete()` schedules an internal task on that queue, which frees the slot and stops
+   the worker polling it.
+
+On replay the session comes from the journal; it is not created again.
+
+---
+
+## Limitations
+
+- **A session lives and dies with its worker.** If the worker stops, its session queue has no
+  poller, and tasks sent to it wait. Nothing detects this for you: there is no heartbeat on the
+  session and no failed state.
+- **Session options are not enforced.** `createSession()` accepts `creationTimeout`,
+  `executionTimeout`, `maxConcurrentTasks` and `heartbeatInterval`, but the worker does not apply
+  them in 0.5.4.
+- **No migration.** Worker-local state (files, models, connections) is not moved anywhere.
+- **One worker.** All of a session's tasks run on one worker; for work that can run anywhere, use
+  ordinary tasks.
+- **The slot count is fixed** at 10 per worker; it is not a worker option.
+
+---
+
+## Next Steps
+
+- [Tasks](/guides/sdk/typescript/tasks): task definitions and retries
+- [Workflows](/guides/sdk/typescript/workflows): suspension and failure handling
+- [Patterns](/guides/sdk/typescript/patterns): common patterns

@@ -1,0 +1,76 @@
+---
+id: 'platform-engineers-learning-path'
+title: 'Learning Path: Platform Engineers'
+description: 'A comprehensive guide for platform engineers to deploy, scale, and operate Orcher in production environments.'
+sidebar_label: 'Platform Engineers'
+---
+
+Welcome! If you're a platform engineer, your job is to build reliable, scalable infrastructure that enables developers to ship features quickly. This guide will teach you everything you need to know to deploy, scale, and operate Orcher in production.
+
+Unlike other guides that assume you're writing application code, this one focuses on your world: infrastructure, operations, scaling, cost optimization, and keeping services running 24/7.
+
+## What You'll Learn
+
+This learning path is structured around the platform engineering lifecycle:
+
+**Part 1: Understanding the System** (1-1.5 hours)
+- How Orcher's architecture fundamentally differs from traditional orchestration platforms
+- Why this difference matters for operations (spoiler: way simpler)
+- The mental model shift from managing distributed systems to managing stateless apps + database
+- Infrastructure requirements and realistic capacity planning
+
+**Part 2: Deploying to Production** (2-3 hours)
+- Kubernetes deployment (the recommended approach)
+- Alternative deployment models (VMs, serverless)
+- Database setup and optimization
+- High availability configurations
+- Multi-region strategies
+- Network architecture and security considerations
+
+**Part 3: Scaling and Optimization** (1.5-2 hours)
+- How to scale (and when not to)
+- Worker pool tuning and the mathematics of throughput
+- Database performance optimization
+- Cost optimization strategies (because someone's watching the bill)
+- Multi-tenancy patterns for SaaS platforms
+
+**Part 4: Operating in Production** (2-3 hours)
+- Comprehensive monitoring and alerting
+- Debugging production issues
+- Backup and disaster recovery procedures
+- Upgrade strategies
+- Common failure modes and how to prevent them
+- On-call runbooks
+
+**Time to Complete**: 7-10 hours
+**Prerequisites**: Kubernetes or VM management experience, PostgreSQL basics
+**Difficulty**: Intermediate to Advanced
+
+---
+
+## The path
+
+<div className="not-prose my-8 max-w-2xl mx-auto">
+  {[
+    { n: '01', href: '/guides/learning/platform-engineers/understanding', title: 'Understanding the System', body: 'The two-component architecture and how work flows through it — the mental model for operating Orcher.', learn: 'architecture · work flow · capacity' },
+    { n: '02', href: '/guides/learning/platform-engineers/deploying', title: 'Deploying to Production', body: 'Kubernetes step by step, deployment models, database selection, and high availability.', learn: 'kubernetes · database · HA' },
+    { n: '03', href: '/guides/learning/platform-engineers/scaling', title: 'Scaling and Performance', body: 'The scaling model, worker-pool math, database tuning, and cost optimization.', learn: 'worker pools · db tuning · cost' },
+    { n: '04', href: '/guides/learning/platform-engineers/operating', title: 'Operating in Production', body: 'Monitoring and alerting, debugging, backup and disaster recovery, and upgrades.', learn: 'monitoring · debugging · DR' },
+  ].map((s, i, arr) => (
+    <div key={s.n}>
+      <Link href={s.href} className="no-underline group flex gap-4 border p-5 hover:bg-surface-75 transition-colors">
+        <span className="font-mono text-sm text-foreground-muted shrink-0 pt-0.5">{s.n}</span>
+        <div className="flex-1">
+          <div className="text-sm font-medium text-foreground group-hover:underline">{s.title}</div>
+          <p className="m-0 mt-1 text-xs text-foreground-light leading-relaxed">{s.body}</p>
+          <div className="mt-2 font-mono text-[10px] uppercase tracking-widest text-foreground-muted">{s.learn}</div>
+        </div>
+      </Link>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-[1.65rem]">
+          <div className="w-px h-4 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+</div>

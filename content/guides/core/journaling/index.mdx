@@ -1,0 +1,63 @@
+---
+id: 'journaling'
+title: 'Automatic Journaling'
+description: 'Learn how Orcher automatically journals workflow executions to provide durable, replay-safe workflows that survive failures without duplicate side effects.'
+sidebar_label: 'Journaling'
+---
+
+Automatic journaling is the foundation of Orcher's durable execution model. Every step in a workflow is recorded to PostgreSQL, enabling workflows to survive crashes and resume exactly where they left off — without re-executing completed steps.
+
+When a workflow runs, Orcher records every step's result to two storage layers:
+
+1. **Execution Log** — A step-level idempotency cache keyed by `(workflow_id, step_name)`. Stores the result, status, and attempt count for each step.
+2. **Workflow Execution Journal** — An append-only event log ordered by `event_id`. Records the full history of the workflow execution as a sequence of typed entries.
+
+On replay (after a crash, timeout, or server restart), the SDK receives the journal entries, converts them into cached results, and injects them before the workflow handler runs. Completed steps return their cached result instantly — the original code never re-executes.
+
+### Key Benefits
+
+- **Zero Data Loss** — All progress is persisted to PostgreSQL
+- **No Repeated Steps** — Completed tasks return their journaled result instead of re-running on replay; make external calls idempotent, since a task retried before it records its result can run again
+- **Crash Recovery** — Workflows resume from the last checkpoint
+
+---
+
+## Explore Journaling
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/journaling/how-it-works" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">How It Works</h3>
+      <p className="text-sm text-foreground-light">
+        Understand journaling in action — first execution vs replay, storage layers, entry types, and the in-memory cache
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/journaling/replay-safety" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Replay Safety</h3>
+      <p className="text-sm text-foreground-light">
+        Learn the determinism rules, safe vs unsafe operations, how to view the journal, and practical examples
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/journaling/versioning" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Versioning</h3>
+      <p className="text-sm text-foreground-light">
+        Pin an in-flight execution to the code release that started it, and roll out new workflow code safely
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/journaling/best-practices" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Best Practices</h3>
+      <p className="text-sm text-foreground-light">
+        Performance tuning, best practices for step design, and troubleshooting common journal issues
+      </p>
+    </div>
+  </Link>
+</div>

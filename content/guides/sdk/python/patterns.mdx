@@ -1,0 +1,82 @@
+---
+id: python-patterns
+title: Patterns
+description: Common workflow patterns with the Python SDK, including compensation, fan-out and fan-in, approvals, state machines and batches
+sidebar_label: 'Patterns'
+---
+
+Workflow shapes that come up again and again, written with the Python SDK. Each one relies on the same guarantee: a step the journal has recorded is not repeated when the workflow resumes.
+
+---
+
+## Compensation (saga)
+
+When a workflow changes several systems and a later step fails, undo the earlier steps. `Saga` collects a compensation after each step that succeeds and runs them newest first:
+
+<$CodeSample path="python/patterns/saga.py" region="saga" />
+
+- Compensations are tasks, so they are journaled and retried like any task. A compensation that still fails is logged and the rest still run.
+- Register a compensation after its step succeeds, so it can use the step's result (the reservation id here). `saga.add_step(action, compensation)` runs an action and registers its compensation in one call when the compensation doesn't need the result.
+- `except Exception` is safe here: the signal the SDK uses to suspend a workflow is not an `Exception`, so a workflow that is merely waiting for a task never compensates.
+
+---
+
+## Fan-out and fan-in
+
+To run independent tasks at the same time, schedule them together with `asyncio.gather`. A loop of `await`s would run them one after another:
+
+<$CodeSample path="python/patterns/fan_out.py" region="tasks" />
+
+For larger units of work, fan out to child workflows. `start_child_workflow` doesn't wait, so all the children start before the parent waits on any of them:
+
+<$CodeSample path="python/patterns/fan_out.py" region="children" />
+
+If one fails, `handle.result()` raises `WorkflowError` for it.
+
+---
+
+## Waiting for a person
+
+A workflow can wait days for a decision without holding a worker. Ask, wait for an event with a deadline, and escalate if none comes:
+
+<$CodeSample path="python/patterns/approval.py" region="approval" />
+
+The approver's tool sends the decision with [`handle.send_event("decision", {"approved": True})`](/guides/sdk/python/client#workflow-handles).
+
+---
+
+## State machine
+
+A loop over an explicit state keeps a long, multi-stage process readable, and a query handler makes the current state visible from outside:
+
+<$CodeSample path="python/patterns/state_machine.py" region="machine" />
+
+---
+
+## Batches with progress
+
+Process items one task at a time, record progress, and expose it through a query. A failed item is caught as `TaskError` so the rest of the batch carries on:
+
+<$CodeSample path="python/patterns/batch.py" region="progress" />
+
+One task per item gives each item its own retries and its own journal entry. For many small items, a task per chunk keeps the journal short. Each task's input and result must stay under the engine's [8 MiB payload limit](/guides/sdk/python/tasks#inputs-results-and-size-limits):
+
+<$CodeSample path="python/patterns/batch.py" region="chunks" />
+
+For a batch with no end, such as a sync that runs forever, process one page per run and [restart with fresh history](/guides/sdk/python/workflows#restart-with-fresh-history) so the journal stays small.
+
+---
+
+## Idempotent side effects
+
+Tasks run at least once: a retried or reassigned attempt may repeat side effects that a previous attempt already made. Pass the services you call an idempotency key that stays the same across attempts; see [Tasks run at least once](/guides/sdk/python/tasks#tasks-run-at-least-once).
+
+Starting a workflow is idempotent through its id: give each piece of work a workflow id derived from it (an order id, a webhook delivery id), and a repeated start is refused rather than run twice. See [duplicate starts](/guides/sdk/python/client#duplicate-starts).
+
+---
+
+## Next steps
+
+- [Workflows](/guides/sdk/python/workflows): the `WorkflowContext` API
+- [Tasks](/guides/sdk/python/tasks): retries and idempotency
+- [Testing](/guides/sdk/python/testing): test these workflows in memory

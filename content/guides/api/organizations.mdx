@@ -1,0 +1,147 @@
+---
+id: 'api-organizations'
+title: 'Organization Endpoints'
+description: 'Create and manage organizations, members, and invitations via the Orcher REST API'
+sidebar_label: 'Organizations'
+---
+
+## Organization Management
+
+### Create Organization
+
+```bash
+POST /api/v1/organizations
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "name": "Acme Corp",
+  "slug": "acme-corp",
+  "description": "Main organization"
+}
+```
+
+**Response:**
+
+```json
+{
+  "organization_id": "org_123",
+  "name": "Acme Corp",
+  "slug": "acme-corp",
+  "owner_id": "usr_123",
+  "created_at": "2024-01-07T12:00:00Z"
+}
+```
+
+### List Organizations
+
+```bash
+GET /api/v1/organizations
+Authorization: Bearer <token>
+```
+
+### Get Organization
+
+```bash
+GET /api/v1/organizations/:org_id
+Authorization: Bearer <token>
+```
+
+### Update Organization
+
+```bash
+PUT /api/v1/organizations/:org_id
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "name": "Acme Corporation",
+  "description": "Updated description"
+}
+```
+
+### Delete Organization
+
+```bash
+DELETE /api/v1/organizations/:org_id
+Authorization: Bearer <token>
+```
+
+---
+
+## Member Management
+
+### List Members
+
+```bash
+GET /api/v1/organizations/:org_id/members
+Authorization: Bearer <token>
+```
+
+### Update Member Role
+
+```bash
+PUT /api/v1/organizations/:org_id/members/:member_id/role
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "role": "admin"
+}
+```
+
+### Remove Member
+
+```bash
+DELETE /api/v1/organizations/:org_id/members/:member_id
+Authorization: Bearer <token>
+```
+
+---
+
+## Invitations
+
+### Invite Member
+
+```bash
+POST /api/v1/organizations/:org_id/invitations
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "email": "member@example.com",
+  "role": "developer"
+}
+```
+
+**Response:**
+
+```json
+{
+  "invitation_id": "inv_789",
+  "email": "member@example.com",
+  "role": "developer",
+  "status": "pending",
+  "expires_at": "2024-01-14T12:00:00Z"
+}
+```
+
+### Accept Invitation
+
+```bash
+POST /api/v1/invitations/accept
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "invitation_id": "inv_789"
+}
+```
+
+---
+
+## Next Steps
+
+- [Users](/guides/api/users) — User account management
+- [Registry](/guides/api/registry) — Workflow registration and deployment
+- [Namespaces](/guides/api/namespaces) — Multi-tenancy and isolation

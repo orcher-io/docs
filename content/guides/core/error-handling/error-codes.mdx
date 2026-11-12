@@ -1,0 +1,188 @@
+---
+id: 'error-codes'
+title: 'Error Codes'
+sidebar_label: 'Error Codes'
+---
+
+Every failure an SDK raises carries a **code**. For orchestration failures the
+code is the same in every language, which makes it the thing to branch on when
+the same condition has to be handled in Rust, Python and TypeScript alike — a
+missing workflow is `WORKFLOW_NOT_FOUND` in all three, and the conformance suite
+asserts that on every release.
+
+The class you catch is idiomatic to your language and differs between them.
+
+---
+
+## The two vocabularies
+
+Codes come from two sets, and which one you see tells you what went wrong.
+
+| | Example codes | What it means |
+| --- | --- | --- |
+| **Orchestration** | `WORKFLOW_NOT_FOUND`, `WORKFLOW_ALREADY_EXISTS`, `TASK_EXECUTION_FAILED` | Something about your workflow or task. The request reached the server and the server had an answer. |
+| **Transport** | TypeScript: `UNAVAILABLE`, `DEADLINE_EXCEEDED`. Rust: `CONNECTION_FAILED`, `REQUEST_TIMEOUT` | Something about the call itself. The server may never have seen it. |
+
+The distinction matters when deciding whether to retry. A transport failure means
+try again — the server was unreachable and your workflow may be perfectly
+healthy. `WORKFLOW_NOT_FOUND` means the server answered, and retrying will
+produce the same answer.
+
+Transport codes are spelled differently per SDK today, so branch on the
+orchestration codes for logic you intend to port, and treat transport failures
+as a category rather than by exact name.
+
+---
+
+## Matching on a code
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+match client.get_workflow_handle("order-123").await {
+    Ok(handle) => { /* ... */ }
+    Err(e) => match e.code() {
+        ErrorCode::WorkflowNotFound => { /* no such workflow */ }
+        ErrorCode::ConnectionFailed => { /* transport — worth retrying */ }
+        _ => return Err(e),
+    },
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import WorkflowError
+
+try:
+    handle = await client.get_workflow("order-123")
+except WorkflowError as e:
+    if e.code.name == "WORKFLOW_NOT_FOUND":
+        ...  # no such workflow
+    else:
+        raise
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { ExecutionErrorCode, ErrorCode } from '@orcher-io/sdk';
+
+try {
+  await handle.status();
+} catch (e: any) {
+  if (e.code === ExecutionErrorCode.WORKFLOW_NOT_FOUND) {
+    // no such workflow
+  } else if (e.code === ErrorCode.Unavailable) {
+    // transport — worth retrying
+  } else {
+    throw e;
+  }
+}
+```
+
+</TabPanel>
+
+</Tabs>
+
+<Admonition type="note">
+
+Python spells its codes as an enum whose members carry the name — compare
+`e.code.name`, or the member itself. TypeScript exposes two enums because it
+carries both vocabularies: `ExecutionErrorCode` for orchestration codes and
+`ErrorCode` for transport ones.
+
+</Admonition>
+
+---
+
+## Catching by class
+
+Matching on the class is the natural thing to write, and it works — a missing
+workflow arrives as a workflow error in every SDK, not as a generic failure.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::error::{ClientError, Error};
+
+match result {
+    Err(Error::Client(ClientError::WorkflowNotFound { workflow_id, .. })) => { /* ... */ }
+    Err(e) => return Err(e),
+    Ok(v) => v,
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import WorkflowError, ClientError, OrcherError
+
+try:
+    result = await handle.result()
+except WorkflowError as e:      # the workflow itself failed
+    ...
+except ClientError as e:        # the call failed
+    ...
+except OrcherError as e:        # anything this SDK raises
+    ...
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { WorkflowError, ClientError, OrcherError } from '@orcher-io/sdk';
+
+try {
+  await handle.result();
+} catch (e) {
+  if (e instanceof WorkflowError) {
+    // the workflow itself failed
+  } else if (e instanceof ClientError) {
+    // the call failed
+  } else if (e instanceof OrcherError) {
+    // anything this SDK raises
+  }
+}
+```
+
+</TabPanel>
+
+</Tabs>
+
+`OrcherError` is the base of everything the TypeScript and Python SDKs raise, so
+catching it is the way to say "any orcher failure" without listing subclasses.
+
+---
+
+## Why not match on the message
+
+Messages are written for people and get reworded. A check like
+`if "not found" in str(e)` passes review, works in testing, and breaks silently
+the day someone improves the wording — with no compiler or test to catch it.
+
+Codes exist so you never have to do that.

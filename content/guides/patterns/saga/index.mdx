@@ -1,0 +1,536 @@
+---
+id: 'saga'
+title: 'Saga & Compensation Pattern'
+description: 'Implement distributed transactions without locks using the Saga pattern — compensations you define, run reliably on Orcher''s durable execution'
+sidebar_label: 'Overview'
+---
+
+The Saga pattern enables you to implement distributed transactions across multiple services without using distributed locks or two-phase commit. A saga is a sequence of local transactions where each step updates a single service. If any step fails, the saga executes compensating transactions to undo the impact of all preceding steps — maintaining eventual consistency across your system. Key concepts include forward recovery (retrying failed steps until they succeed), backward recovery (undoing completed steps on failure), idempotent compensation actions (safe to retry), and eventual consistency (the system reaches a consistent state, though not immediately). Use sagas when you need to coordinate multiple services that each own their own data, handle long-running operations spanning minutes or hours, or avoid distributed locks and two-phase commit protocols.
+
+<div className="not-prose my-8 max-w-lg mx-auto grid grid-cols-1 md:grid-cols-2 gap-4">
+  {/* Success path */}
+  <div className="border">
+    <div className="bg-surface-75 px-4 py-2 border-b text-center">
+      <div className="text-xs font-medium text-foreground">Success Path</div>
+      <div className="text-[10px] text-foreground-muted">all steps complete</div>
+    </div>
+    {[
+      { step: 1, task: 'Reserve inventory' },
+      { step: 2, task: 'Charge payment' },
+      { step: 3, task: 'Ship order' },
+    ].map((s, i, arr) => (
+      <div key={s.step}>
+        <div className="px-4 py-2 flex items-center gap-3">
+          <span className="w-5 h-5 flex items-center justify-center border bg-background text-[10px] font-mono text-foreground-muted shrink-0">{s.step}</span>
+          <code className="text-[11px] text-foreground flex-1">{s.task}</code>
+          <span className="text-[10px] text-foreground-muted">✓</span>
+        </div>
+        {i < arr.length - 1 && <div className="flex justify-center"><div className="w-px h-2 bg-border-strong" /></div>}
+      </div>
+    ))}
+    <div className="flex justify-center"><div className="w-px h-2 bg-border-strong" /></div>
+    <div className="mx-3 mb-3 border bg-surface-100 py-2 text-center">
+      <div className="text-[10px] font-medium text-foreground">Done</div>
+    </div>
+  </div>
+
+  {/* Failure + compensation path */}
+  <div className="border">
+    <div className="bg-surface-75 px-4 py-2 border-b text-center">
+      <div className="text-xs font-medium text-foreground">Failure Path</div>
+      <div className="text-[10px] text-foreground-muted">step 3 fails → compensate</div>
+    </div>
+    {[
+      { step: 1, task: 'Reserve inventory', status: 'ok' },
+      { step: 2, task: 'Charge payment', status: 'ok' },
+      { step: 3, task: 'Ship order', status: 'fail' },
+    ].map((s, i, arr) => (
+      <div key={s.step}>
+        <div className={`px-4 py-2 flex items-center gap-3 ${s.status === 'fail' ? 'bg-red-500/5' : ''}`}>
+          <span className={`w-5 h-5 flex items-center justify-center border bg-background text-[10px] font-mono shrink-0 ${s.status === 'fail' ? 'border-red-400/30 text-red-400' : 'text-foreground-muted'}`}>{s.step}</span>
+          <code className="text-[11px] text-foreground flex-1">{s.task}</code>
+          <span className={`text-[10px] ${s.status === 'fail' ? 'text-red-400' : 'text-foreground-muted'}`}>{s.status === 'fail' ? '✗' : '✓'}</span>
+        </div>
+        {i < arr.length - 1 && <div className="flex justify-center"><div className="w-px h-2 bg-border-strong" /></div>}
+      </div>
+    ))}
+    <div className="flex justify-center"><div className="w-px h-2 bg-border-strong" /></div>
+    <div className="mx-3 mb-1 text-[10px] font-mono uppercase tracking-wider text-foreground-muted text-center">compensate ↩</div>
+    {[
+      { step: 2, task: 'Refund payment' },
+      { step: 1, task: 'Release inventory' },
+    ].map((s, i, arr) => (
+      <div key={s.step}>
+        <div className="px-4 py-2 flex items-center gap-3 opacity-70">
+          <span className="w-5 h-5 flex items-center justify-center border border-dashed bg-background text-[10px] font-mono text-foreground-muted shrink-0">{s.step}</span>
+          <code className="text-[11px] text-foreground flex-1">{s.task}</code>
+          <span className="text-[10px] text-foreground-muted">↩</span>
+        </div>
+        {i < arr.length - 1 && <div className="flex justify-center"><div className="w-px h-2 bg-border-strong" /></div>}
+      </div>
+    ))}
+    <div className="flex justify-center"><div className="w-px h-2 bg-border-strong" /></div>
+    <div className="mx-3 mb-3 border border-dashed bg-surface-75 py-2 text-center">
+      <div className="text-[10px] font-medium text-foreground">Rolled back</div>
+    </div>
+  </div>
+</div>
+
+---
+
+## Two ways to build a saga
+
+Orcher gives you two ways to run a saga, and you can mix them in the same workflow:
+
+- **The `Saga` helper** — register each step with its compensation as you go, and the helper runs the compensations in reverse order if a later step fails. Best for most sagas.
+- **Manual compensation** — write the `try`/`catch` (or `match`) yourself and undo prior steps by hand. Best when you want full control over ordering, partial rollback, or conditional compensation.
+
+Both are built on the same foundation: every action and every compensation is an ordinary task, so each step and each rollback is durable and survives crashes.
+
+## The Saga helper
+
+The helper tracks completed steps and their compensations. There are two ways to register a step, and the difference matters:
+
+- `add_step(action, compensation)` runs the action and registers a compensation that **doesn't** need the action's result.
+- `add_compensation(...)` registers a compensation for an action you ran yourself — use it when the compensation needs the action's **output** (a charge id, a booking reference).
+
+Call `commit()` when every step succeeds. On failure, the registered compensations run in reverse order (LIFO). In Python and TypeScript, trigger them from your `except`/`catch` with `saga.compensate()` (it's idempotent); in Rust, the fluent `.execute()` compensates automatically.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use orcher::workflow::Saga;
+
+#[workflow(name = "book_trip", version = "1.0.0")]
+pub async fn book_trip(ctx: WorkflowContext, req: TripRequest) -> Result<Confirmation> {
+    let mut saga = Saga::new();
+
+    // Fluent: run the action and register a static compensation. If a later
+    // step fails, registered compensations run in reverse order automatically.
+    let hotel: Booking = saga
+        .add_step(&ctx, book_hotel, req.clone())
+        .with_compensation(cancel_hotel)
+        .execute()
+        .await?;
+
+    // Manual: the compensation needs the action's result (the charge id).
+    let charge = ctx.execute_task(charge_card, req.clone()).await?;
+    saga.add_compensation(refund_card, charge.id.clone());
+
+    saga.commit();
+    Ok(Confirmation { hotel_id: hotel.id, charge_id: charge.id })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, WorkflowContext, Saga } from '@orcher/sdk';
+
+@Workflow({ name: 'book_trip', version: '1.0.0' })
+export class BookTrip {
+  async run(ctx: WorkflowContext, req: TripRequest) {
+    const saga = new Saga();
+    try {
+      // Fluent: run the action, register a static compensation.
+      const hotel = await saga.addStep(
+        () => ctx.executeTask(BookingTasks.bookHotel, req),
+        () => ctx.executeTask(BookingTasks.cancelHotel, req),
+      );
+
+      // Manual: the compensation needs the action's result (the charge id).
+      const charge = await ctx.executeTask(PaymentTasks.charge, req);
+      saga.addCompensation(() => ctx.executeTask(PaymentTasks.refund, { chargeId: charge.id }));
+
+      saga.commit();
+      return { hotelId: hotel.id, chargeId: charge.id };
+    } catch (err) {
+      await saga.compensate();
+      throw err;
+    }
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, Saga
+
+@workflow(name="book_trip", version="1.0")
+async def book_trip(ctx, req):
+    saga = Saga()
+    try:
+        # Fluent: run the action, register a static compensation.
+        hotel = await saga.add_step(
+            action=lambda: ctx.execute_task(book_hotel, req=req),
+            compensation=lambda: ctx.execute_task(cancel_hotel, req=req),
+        )
+
+        # Manual: the compensation needs the action's result (the charge id).
+        charge = await ctx.execute_task(charge_card, req=req)
+        saga.add_compensation(lambda: ctx.execute_task(refund_card, charge_id=charge["id"]))
+
+        saga.commit()
+        return {"hotel_id": hotel["id"], "charge_id": charge["id"]}
+    except Exception:
+        await saga.compensate()
+        raise
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Manual compensation
+
+If you want full control — custom ordering, partial rollback, or conditional compensation — write the compensation yourself. Steps execute sequentially, and when one fails, each step's `catch` block undoes the previously completed steps in reverse order. It is more verbose than the helper, but nothing is hidden.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OrderData {
+    order_id: String,
+    customer_id: String,
+    amount: f64,
+    items: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OrderResult {
+    order_id: String,
+    success: bool,
+    payment_id: Option<String>,
+    inventory_id: Option<String>,
+    shipment_id: Option<String>,
+}
+
+// Basic saga workflow with compensation
+#[workflow(name = "order_saga", version = "1.0.0")]
+pub async fn order_saga(
+    ctx: WorkflowContext,
+    order: OrderData,
+) -> Result<OrderResult> {
+    println!("Starting order saga for {}", order.order_id);
+
+    let mut result = OrderResult {
+        order_id: order.order_id.clone(),
+        success: false,
+        payment_id: None,
+        inventory_id: None,
+        shipment_id: None,
+    };
+
+    // Step 1: Reserve inventory
+    let inventory_id = match ctx
+        .execute_task(reserve_inventory, order.items.clone())
+        .await
+    {
+        Ok(id) => {
+            result.inventory_id = Some(id.clone());
+            id
+        }
+        Err(e) => {
+            println!("Inventory reservation failed: {}", e);
+            return Ok(result);
+        }
+    };
+
+    // Step 2: Charge payment
+    let payment_id = match ctx
+        .execute_task(charge_payment, order.amount)
+        .await
+    {
+        Ok(id) => {
+            result.payment_id = Some(id.clone());
+            id
+        }
+        Err(e) => {
+            println!("Payment failed, compensating inventory");
+            // Compensate: Release inventory
+            ctx.execute_task(release_inventory, inventory_id).await?;
+            return Ok(result);
+        }
+    };
+
+    // Step 3: Create shipment
+    let shipment_id = match ctx
+        .execute_task(create_shipment, order.order_id.clone())
+        .await
+    {
+        Ok(id) => {
+            result.shipment_id = Some(id.clone());
+            id
+        }
+        Err(e) => {
+            println!("Shipment failed, compensating payment and inventory");
+            // Compensate: Refund payment
+            ctx.execute_task(refund_payment, payment_id).await?;
+            // Compensate: Release inventory
+            ctx.execute_task(release_inventory, inventory_id).await?;
+            return Ok(result);
+        }
+    };
+
+    result.success = true;
+    println!("Order saga completed successfully");
+    Ok(result)
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import {
+  Workflow, Tasks, Task, WorkflowContext, TaskContext, createTaskRefs
+} from '@orcher/sdk';
+
+interface OrderData {
+  orderId: string;
+  customerId: string;
+  amount: number;
+  items: string[];
+}
+
+interface OrderResult {
+  orderId: string;
+  success: boolean;
+  paymentId?: string;
+  inventoryId?: string;
+  shipmentId?: string;
+}
+
+@Tasks()
+class OrderSagaTasks {
+  @Task({ name: 'reserveInventory' })
+  async reserveInventory(ctx: TaskContext, items: string[]): Promise<string> { /* ... */ }
+
+  @Task({ name: 'releaseInventory' })
+  async releaseInventory(ctx: TaskContext, inventoryId: string): Promise<void> { /* ... */ }
+
+  @Task({ name: 'chargePayment' })
+  async chargePayment(ctx: TaskContext, amount: number): Promise<string> { /* ... */ }
+
+  @Task({ name: 'refundPayment' })
+  async refundPayment(ctx: TaskContext, paymentId: string): Promise<void> { /* ... */ }
+
+  @Task({ name: 'createShipment' })
+  async createShipment(ctx: TaskContext, orderId: string): Promise<string> { /* ... */ }
+}
+
+const tasks = createTaskRefs(OrderSagaTasks);
+
+// Basic saga workflow with compensation
+@Workflow()
+class OrderSaga {
+  async execute(ctx: WorkflowContext, order: OrderData): Promise<OrderResult> {
+    console.log(`Starting order saga for ${order.orderId}`);
+
+    const result: OrderResult = {
+      orderId: order.orderId,
+      success: false,
+    };
+
+    // Step 1: Reserve inventory
+    let inventoryId: string;
+    try {
+      inventoryId = await ctx.executeTask(tasks.reserveInventory, order.items);
+      result.inventoryId = inventoryId;
+    } catch (e) {
+      console.log('Inventory reservation failed:', e);
+      return result;
+    }
+
+    // Step 2: Charge payment
+    let paymentId: string;
+    try {
+      paymentId = await ctx.executeTask(tasks.chargePayment, order.amount);
+      result.paymentId = paymentId;
+    } catch (e) {
+      console.log('Payment failed, compensating inventory');
+      // Compensate: Release inventory
+      await ctx.executeTask(tasks.releaseInventory, inventoryId);
+      return result;
+    }
+
+    // Step 3: Create shipment
+    try {
+      const shipmentId = await ctx.executeTask(tasks.createShipment, order.orderId);
+      result.shipmentId = shipmentId;
+    } catch (e) {
+      console.log('Shipment failed, compensating payment and inventory');
+      // Compensate: Refund payment
+      await ctx.executeTask(tasks.refundPayment, paymentId);
+      // Compensate: Release inventory
+      await ctx.executeTask(tasks.releaseInventory, inventoryId);
+      return result;
+    }
+
+    result.success = true;
+    console.log('Order saga completed successfully');
+    return result;
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext, TaskContext
+
+@task(name="reserve_inventory")
+async def reserve_inventory(ctx: TaskContext, items: list[str]) -> str:
+    # ... reserve inventory items, return reservation ID
+    return "inv-001"
+
+@task(name="release_inventory")
+async def release_inventory(ctx: TaskContext, inventory_id: str) -> None:
+    # ... release previously reserved inventory
+    pass
+
+@task(name="charge_payment")
+async def charge_payment(ctx: TaskContext, amount: float) -> str:
+    # ... charge customer, return payment ID
+    return "pay-001"
+
+@task(name="refund_payment")
+async def refund_payment(ctx: TaskContext, payment_id: str) -> None:
+    # ... refund a previous payment
+    pass
+
+@task(name="create_shipment")
+async def create_shipment(ctx: TaskContext, order_id: str) -> str:
+    # ... create a shipment, return shipment ID
+    return "ship-001"
+
+# Basic saga workflow with compensation
+@workflow(name="order_saga", version="1.0.0")
+async def order_saga(ctx: WorkflowContext, order: dict) -> dict:
+    print(f"Starting order saga for {order['order_id']}")
+
+    result = {
+        "order_id": order["order_id"],
+        "success": False,
+        "payment_id": None,
+        "inventory_id": None,
+        "shipment_id": None,
+    }
+
+    # Step 1: Reserve inventory
+    try:
+        inventory_id = await ctx.execute_task(reserve_inventory, order["items"])
+        result["inventory_id"] = inventory_id
+    except Exception as e:
+        print(f"Inventory reservation failed: {e}")
+        return result
+
+    # Step 2: Charge payment
+    try:
+        payment_id = await ctx.execute_task(charge_payment, order["amount"])
+        result["payment_id"] = payment_id
+    except Exception as e:
+        print("Payment failed, compensating inventory")
+        await ctx.execute_task(release_inventory, inventory_id)
+        return result
+
+    # Step 3: Create shipment
+    try:
+        shipment_id = await ctx.execute_task(create_shipment, order["order_id"])
+        result["shipment_id"] = shipment_id
+    except Exception as e:
+        print("Shipment failed, compensating payment and inventory")
+        await ctx.execute_task(refund_payment, payment_id)
+        await ctx.execute_task(release_inventory, inventory_id)
+        return result
+
+    result["success"] = True
+    print("Order saga completed successfully")
+    return result
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/patterns/saga/coordinator" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Saga Coordinator Pattern</h3>
+      <p className="text-sm text-foreground-light">
+        Encapsulate state tracking and compensation logic into a dedicated coordinator
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/saga/parallel" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Parallel Saga</h3>
+      <p className="text-sm text-foreground-light">
+        Execute independent saga steps in parallel to reduce total execution time
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/saga/forward-recovery" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Forward Recovery</h3>
+      <p className="text-sm text-foreground-light">
+        Retry failed steps with increasing delays instead of compensating
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/saga/event-driven" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Event-Driven Saga</h3>
+      <p className="text-sm text-foreground-light">
+        Coordinate saga steps through external events and confirmations
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/saga/best-practices" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Best Practices & Pitfalls</h3>
+      <p className="text-sm text-foreground-light">
+        Idempotency, compensation order, performance, and common mistakes to avoid
+      </p>
+    </div>
+  </Link>
+</div>

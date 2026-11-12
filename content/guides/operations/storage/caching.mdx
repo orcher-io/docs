@@ -1,0 +1,102 @@
+---
+id: 'storage-caching'
+title: 'Caching & Schema'
+description: 'In-memory cache tiers, database schema details, and internal storage patterns'
+---
+
+## In-Memory Cache
+
+The orchestrator uses a **Moka-based LRU cache** (`HighPerfCache`) to reduce database roundtrips for hot workflow state. This is an in-process cache — no external dependency required.
+
+### Cache Tiers
+
+| Cache | Max Entries | TTL | Purpose |
+|-------|------------|-----|---------|
+| Workflow state | 10,000 | 5 min | Active workflow execution data |
+| Journal entries | 5,000 | 1 min | Recent journal entries for replay |
+| Claims | 50,000 | 2 min | Workflow claim ownership (shorter than claim timeout) |
+
+### How It Works
+
+The `HighPerfCache` sits between the dispatch engine and PostgreSQL:
+
+1. **On poll** — Check cache for workflow state before querying the database
+2. **On update** — Invalidate cached entry so the next read fetches fresh data
+3. **On eviction** — LRU eviction when cache is full; no data loss since PostgreSQL is authoritative
+
+Cache metrics (hits, misses, invalidations) are tracked for monitoring.
+
+### Memory Impact
+
+| Concurrent Workflows | Approximate Cache Memory |
+|---------------------|-------------------------|
+| Up to 100 | ~50 MB |
+| 100–1,000 | ~200 MB |
+| 1,000–5,000 | ~500 MB |
+| 5,000–10,000 | ~1 GB |
+
+Memory usage scales with the number of **active** (not total) workflows.
+
+---
+
+## Database Schema Details
+
+### Workflow Claiming
+
+The `workflow_executions` table uses claim-based polling for safe distributed work assignment:
+
+```sql
+-- Workers claim workflows with SELECT FOR UPDATE SKIP LOCKED
+-- This avoids contention between multiple orchestrator nodes
+SELECT * FROM workflow_executions
+WHERE task_queue = $1
+  AND namespace = $2
+  AND status IN ('pending', 'running')
+  AND claimed_at IS NULL
+ORDER BY priority DESC, submitted_at ASC
+FOR UPDATE SKIP LOCKED
+LIMIT 1;
+```
+
+Key columns: `claimed_by`, `claim_timeout_at`, `pending_requeue`, `shard_id`, `priority`.
+
+### Journal (Event Sourcing)
+
+Every workflow step is recorded in the journal for replay protection:
+
+```sql
+-- Journal entries for a workflow execution
+SELECT * FROM workflow_execution_journal
+WHERE execution_id = $1
+ORDER BY sequence_number ASC;
+```
+
+Entry types include: `WorkflowStarted`, `StepCompleted`, `TimerStarted`, `TimerFired`, `EventReceived`, `WorkflowCompleted`, `WorkflowFailed`.
+
+### Outbox Pattern
+
+Task dispatch uses the outbox pattern for atomic delivery:
+
+```sql
+-- State change + outbox insert in one transaction
+BEGIN;
+  UPDATE workflow_executions SET status = 'running' WHERE id = $1;
+  INSERT INTO outbox_queue (execution_id, task_queue, namespace, payload)
+  VALUES ($1, $2, $3, $4);
+COMMIT;
+
+-- OutboxProcessor claims entries with lease-based locking
+UPDATE outbox_queue
+SET status = 'processing', lease_expires_at = NOW() + INTERVAL '30 seconds'
+WHERE status = 'pending'
+LIMIT 10
+RETURNING *;
+```
+
+---
+
+## Next Steps
+
+- [Storage Overview](/guides/operations/storage) — PostgreSQL configuration and migrations
+- [Redis](/guides/operations/storage/redis) — Optional Redis configuration for fast queue notification
+- [Operations & Troubleshooting](/guides/operations/storage/operations) — Docker Compose setup and troubleshooting

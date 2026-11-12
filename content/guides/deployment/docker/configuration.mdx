@@ -1,0 +1,97 @@
+---
+id: 'docker-configuration'
+title: 'Orchestrator Configuration'
+description: 'Configure the Orcher orchestrator via environment variables, CLI flags, and TOML configuration files'
+sidebar_label: 'Configuration'
+---
+
+The orchestrator is configured entirely via environment variables and CLI flags. Environment variables take precedence over defaults; CLI flags take precedence over environment variables.
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DATABASE_URL` | — | PostgreSQL or PgBouncer connection string (required) |
+| `REDIS_URL` | — | Redis connection string (optional, enables fast dispatch) |
+| `GRPC_BIND_ADDR` | `0.0.0.0:50051` | gRPC server bind address |
+| `HTTP_BIND_ADDR` | `0.0.0.0:8080` | HTTP server bind address (health/metrics) |
+| `LOG_LEVEL` | `info` | Log level: `trace`, `debug`, `info`, `warn`, `error` |
+| `LOG_FORMAT` | `compact` | Output format: `compact`, `json`, `pretty`, `bunyan` |
+| `ORCHER_ORCHESTRATOR_CONFIG` | — | Path to TOML config file (optional) |
+
+## CLI Flags
+
+```bash
+orchestrator [OPTIONS]
+
+Options:
+  -c, --config <FILE>             Configuration file path
+      --grpc-addr <ADDR>          gRPC server bind address
+      --http-addr <ADDR>          HTTP server bind address
+      --database-url <URL>        Database URL
+      --coordination-mode <MODE>  Workflow coordination mode
+      --log-level <LEVEL>         Log level [default: info]
+      --log-format <FORMAT>       Log format [default: compact]
+```
+
+## TOML Configuration
+
+For complex deployments, use a TOML configuration file:
+
+```toml
+[server]
+grpc_addr = "0.0.0.0:50051"
+http_addr = "0.0.0.0:8001"
+max_concurrent_streams = 1000
+
+[orchestrator]
+max_workers = 100
+max_concurrent_tasks = 1000
+heartbeat_timeout_secs = 90
+
+[storage]
+database_url = "postgresql://orcher:orcher@localhost:6432/orcher"
+redis_url = "redis://localhost:6379"
+
+[polling]
+claim_timeout_secs = 300
+poll_timeout_secs = 60
+reclaim_interval_secs = 10
+enable_notifications = true
+batch_claim_size = 10
+
+[timeout_watcher]
+enabled = true
+poll_interval_secs = 30
+batch_size = 100
+grace_period_secs = 5
+
+[workflow_retry]
+enabled = true
+default_max_attempts = 3
+default_initial_backoff_secs = 1
+default_backoff_multiplier = 2.0
+default_max_backoff_secs = 300
+
+[background_jobs]
+metrics_enabled = true
+metrics_interval_secs = 3600
+retention_enabled = true
+retention_interval_secs = 86400
+
+[background_jobs.retention_days]
+workflow_executions = 90
+execution_logs = 30
+journal_entries = 90
+task_executions = 90
+outbox_queue = 7
+```
+
+---
+
+## Next Steps
+
+- [Docker Overview](/guides/deployment/docker) — Quick start and Docker Compose services
+- [Production](/guides/deployment/docker/production) — Production Dockerfile and full production stack
+- [Troubleshooting](/guides/deployment/docker/troubleshooting) — Health checks, volumes, and common issues
+- [Configuration Reference](/guides/deployment/configuration) — Full configuration reference

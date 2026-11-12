@@ -1,0 +1,364 @@
+---
+id: 'saga-parallel'
+title: 'Parallel Saga with Compensation'
+sidebar_label: 'Parallel Saga'
+---
+
+## Parallel Saga with Compensation
+
+When saga steps are independent of each other, you can execute them in parallel to reduce total execution time. If any branch fails, all successful branches are compensated. This pattern is ideal when you need to reserve resources across multiple services simultaneously — such as booking a flight, hotel, and car rental at the same time — where none of the services depend on the others' results.
+
+<div className="not-prose my-8 max-w-md mx-auto">
+  <div className="flex flex-col items-center">
+    <div className="border bg-surface-75 px-5 py-2 text-center">
+      <div className="text-xs font-medium text-foreground">Book Trip</div>
+    </div>
+    <div className="w-px h-3 bg-border-strong" />
+    <div className="text-[10px] font-mono uppercase tracking-wider text-foreground-muted mb-1">parallel execution</div>
+    {/* Fan-out to 3 services */}
+    <div className="relative w-full">
+      <div className="absolute top-0 h-px bg-border-strong" style={{ left: 'calc(16.6% - 0.30rem)', right: 'calc(16.6% - 0.30rem)' }} />
+      <div className="grid grid-cols-3 gap-3">
+        {[
+          { service: 'Flight', action: 'Reserve seat', status: 'ok' },
+          { service: 'Hotel', action: 'Reserve room', status: 'fail' },
+          { service: 'Car', action: 'Reserve rental', status: 'ok' },
+        ].map((s) => (
+          <div key={s.service} className="flex flex-col items-center">
+            <div className="w-px h-4 bg-border-strong" />
+            <div className={`border w-full py-2.5 px-2 text-center ${s.status === 'fail' ? 'border-red-400/30 bg-red-500/5' : 'bg-background'}`}>
+              <div className="text-[10px] font-medium text-foreground">{s.service}</div>
+              <div className={`text-[9px] mt-0.5 ${s.status === 'fail' ? 'text-red-400' : 'text-foreground-muted'}`}>
+                {s.status === 'fail' ? '✗ ' + s.action : '✓ ' + s.action}
+              </div>
+            </div>
+            <div className="w-px h-4 bg-border-strong" />
+          </div>
+        ))}
+      </div>
+      <div className="absolute bottom-0 h-px bg-border-strong" style={{ left: 'calc(16.6% - 0.30rem)', right: 'calc(16.6% - 0.30rem)' }} />
+    </div>
+    <div className="text-[10px] font-mono text-red-400 mt-1 mb-1">hotel failed → compensate</div>
+    <div className="w-px h-2 bg-border-strong" />
+    {/* Compensation fan-out */}
+    <div className="relative w-full">
+      <div className="absolute top-0 h-px bg-border-strong" style={{ left: 'calc(25% - 0.30rem)', right: 'calc(25% - 0.30rem)' }} />
+      <div className="flex gap-3">
+        <div className="flex-1 flex flex-col items-center">
+          <div className="w-px h-4 bg-border-strong" />
+          <div className="border border-dashed w-full py-2 px-2 text-center opacity-70">
+            <div className="text-[10px] font-medium text-foreground">Cancel flight</div>
+            <div className="text-[9px] text-foreground-muted mt-0.5">↩ refund</div>
+          </div>
+        </div>
+        <div className="flex-1 flex flex-col items-center">
+          <div className="w-px h-4 bg-border-strong" />
+          <div className="border border-dashed w-full py-2 px-2 text-center opacity-70">
+            <div className="text-[10px] font-medium text-foreground">Cancel car</div>
+            <div className="text-[9px] text-foreground-muted mt-0.5">↩ refund</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use futures::future::join_all;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MultiServiceOrder {
+    order_id: String,
+    services: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ParallelSagaResult {
+    order_id: String,
+    successful_services: Vec<String>,
+    failed_services: Vec<String>,
+    success: bool,
+}
+
+// Parallel saga with compensation
+#[workflow(name = "parallel_saga", version = "1.0.0")]
+pub async fn parallel_saga(
+    ctx: WorkflowContext,
+    order: MultiServiceOrder,
+) -> Result<ParallelSagaResult> {
+    println!("Starting parallel saga for {}", order.order_id);
+
+    let mut successful = Vec::new();
+    let mut failed = Vec::new();
+    let mut compensation_ids = Vec::new();
+
+    // Execute all services in parallel
+    let mut task_futures = Vec::new();
+    for service in &order.services {
+        let task = ctx.execute_task(
+            execute_service,
+            (service.clone(), order.order_id.clone()),
+        );
+        task_futures.push((service.clone(), task));
+    }
+
+    // Wait for all results
+    for (service, task) in task_futures {
+        match task.await {
+            Ok(result_id) => {
+                successful.push(service.clone());
+                compensation_ids.push((service, result_id));
+            }
+            Err(e) => {
+                println!("Service {} failed: {}", service, e);
+                failed.push(service);
+            }
+        }
+    }
+
+    // If any failed, compensate all successful ones
+    if !failed.is_empty() {
+        println!("Parallel saga failed, compensating {} services", successful.len());
+
+        let mut compensation_tasks = Vec::new();
+        for (service, result_id) in compensation_ids {
+            let task = ctx.execute_task(
+                compensate_service,
+                (service, result_id),
+            );
+            compensation_tasks.push(task);
+        }
+
+        let results = join_all(compensation_tasks).await;
+        for result in results {
+            if let Err(e) = result {
+                println!("Compensation failed: {}", e);
+            }
+        }
+
+        return Ok(ParallelSagaResult {
+            order_id: order.order_id,
+            successful_services: Vec::new(),
+            failed_services: failed,
+            success: false,
+        });
+    }
+
+    println!("Parallel saga completed successfully");
+    Ok(ParallelSagaResult {
+        order_id: order.order_id,
+        successful_services: successful,
+        failed_services: failed,
+        success: true,
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import {
+  Workflow, Tasks, Task, WorkflowContext, TaskContext, createTaskRefs
+} from '@orcher/sdk';
+
+interface MultiServiceOrder {
+  orderId: string;
+  services: string[];
+}
+
+interface ParallelSagaResult {
+  orderId: string;
+  successfulServices: string[];
+  failedServices: string[];
+  success: boolean;
+}
+
+@Tasks()
+class ParallelSagaTasks {
+  @Task({ name: 'executeService' })
+  async executeService(
+    ctx: TaskContext,
+    input: { service: string; orderId: string },
+  ): Promise<string> { /* ... */ }
+
+  @Task({ name: 'compensateService' })
+  async compensateService(
+    ctx: TaskContext,
+    input: { service: string; resultId: string },
+  ): Promise<void> { /* ... */ }
+}
+
+const tasks = createTaskRefs(ParallelSagaTasks);
+
+// Parallel saga with compensation
+@Workflow()
+class ParallelSaga {
+  async execute(
+    ctx: WorkflowContext,
+    order: MultiServiceOrder,
+  ): Promise<ParallelSagaResult> {
+    console.log(`Starting parallel saga for ${order.orderId}`);
+
+    const successful: string[] = [];
+    const failed: string[] = [];
+    const compensationIds: Array<{ service: string; resultId: string }> = [];
+
+    // Execute all services in parallel
+    const serviceResults = await Promise.allSettled(
+      order.services.map(async (service) => {
+        const resultId = await ctx.executeTask(tasks.executeService, {
+          service,
+          orderId: order.orderId,
+        });
+        return { service, resultId };
+      }),
+    );
+
+    for (const result of serviceResults) {
+      if (result.status === 'fulfilled') {
+        successful.push(result.value.service);
+        compensationIds.push(result.value);
+      } else {
+        failed.push('unknown');
+      }
+    }
+
+    // If any failed, compensate all successful ones
+    if (failed.length > 0) {
+      console.log(
+        `Parallel saga failed, compensating ${successful.length} services`,
+      );
+
+      await Promise.allSettled(
+        compensationIds.map(({ service, resultId }) =>
+          ctx.executeTask(tasks.compensateService, { service, resultId }),
+        ),
+      );
+
+      return {
+        orderId: order.orderId,
+        successfulServices: [],
+        failedServices: failed,
+        success: false,
+      };
+    }
+
+    console.log('Parallel saga completed successfully');
+    return {
+      orderId: order.orderId,
+      successfulServices: successful,
+      failedServices: failed,
+      success: true,
+    };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+import asyncio
+from orcher import workflow, task, WorkflowContext, TaskContext
+
+@task(name="execute_service")
+async def execute_service(ctx: TaskContext, service: str, order_id: str) -> str:
+    # ... execute service-specific operation, return result ID
+    return f"{service}-result-001"
+
+@task(name="compensate_service")
+async def compensate_service(ctx: TaskContext, service: str, result_id: str) -> None:
+    # ... compensate a previously executed service operation
+    pass
+
+# Parallel saga with compensation
+@workflow(name="parallel_saga", version="1.0.0")
+async def parallel_saga(ctx: WorkflowContext, order: dict) -> dict:
+    print(f"Starting parallel saga for {order['order_id']}")
+
+    successful = []
+    failed = []
+    compensation_ids = []
+
+    # Execute all services (spawn tasks, then await)
+    pending = []
+    for service in order["services"]:
+        pending.append((service, ctx.execute_task(execute_service, service, order["order_id"])))
+
+    for service, task_future in pending:
+        try:
+            result_id = await task_future
+            successful.append(service)
+            compensation_ids.append((service, result_id))
+        except Exception as e:
+            print(f"Service {service} failed: {e}")
+            failed.append(service)
+
+    # If any failed, compensate all successful ones
+    if failed:
+        print(f"Parallel saga failed, compensating {len(successful)} services")
+
+        for service, result_id in compensation_ids:
+            try:
+                await ctx.execute_task(compensate_service, service, result_id)
+            except Exception as e:
+                print(f"Compensation failed: {e}")
+
+        return {
+            "order_id": order["order_id"],
+            "successful_services": [],
+            "failed_services": failed,
+            "success": False,
+        }
+
+    print("Parallel saga completed successfully")
+    return {
+        "order_id": order["order_id"],
+        "successful_services": successful,
+        "failed_services": failed,
+        "success": True,
+    }
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/patterns/saga/forward-recovery" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Forward Recovery</h3>
+      <p className="text-sm text-foreground-light">
+        Retry failed steps with increasing delays instead of compensating
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/saga/event-driven" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Event-Driven Saga</h3>
+      <p className="text-sm text-foreground-light">
+        Coordinate saga steps through external events and confirmations
+      </p>
+    </div>
+  </Link>
+</div>

@@ -1,0 +1,199 @@
+---
+id: 'actors-using'
+title: 'Using Actors'
+description: 'Learn how to invoke actors, register them with a worker, and understand the actor execution model in Orcher.'
+sidebar_label: 'Using Actors'
+---
+
+## Invoking Actors
+
+Actors are invoked by sending an operation request with the actor name, instance key, and operation name. Orcher routes the request to an available worker that handles that actor type.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="typescript"
+  queryGroup="language"
+>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// `client` is a connected Client instance
+
+// Create a type-safe proxy for a specific actor instance
+const cart = client.actorRef(ShoppingCart, 'user-123');
+
+// Invoke operations — ctx parameter is stripped, you just pass the business args
+const updatedCart = await cart.addItem({ name: 'Widget', price: 9.99, quantity: 1 });
+const total = await cart.getTotal();
+```
+
+</TabPanel>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::Client;
+
+let client = Client::connect("http://localhost:50051").await?;
+
+// Invoke operations by name (untyped)
+let cart: Cart = client
+    .invoke_actor("ShoppingCart", "user-123", "add_item", item)
+    .await?;
+let total: f64 = client
+    .invoke_actor("ShoppingCart", "user-123", "get_total", ())
+    .await?;
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher.actor import ActorInvocationClient
+
+client = ActorInvocationClient(bridge, "ShoppingCart", "user-123")
+
+# Invoke operations
+cart = await client.invoke("add_item", {"name": "Widget", "price": 9.99, "quantity": 1})
+total = await client.invoke("get_total")
+
+# Fire-and-forget (don't wait for result)
+await client.send("add_item", {"name": "Gadget", "price": 14.99, "quantity": 2})
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Registering Actors with a Worker
+
+Actors are registered with the worker builder alongside workflows and tasks. The worker handles polling for operations and routing them to the correct actor handler.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="typescript"
+  queryGroup="language"
+>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { WorkerBuilder } from '@orcher/sdk';
+
+const worker = WorkerBuilder.new('cart-worker')
+  .serverUrl('http://localhost:50051')
+  .registerActor(ShoppingCart)
+  .build();
+
+await worker.run();
+```
+
+</TabPanel>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::WorkerBuilder;
+
+let worker = WorkerBuilder::new("cart-worker")
+    .server_url("http://localhost:50051")
+    .register_actor::<ShoppingCart>()
+    .build()
+    .await?;
+
+worker.run().await?;
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import WorkerBuilder
+
+worker = (
+    WorkerBuilder("cart-worker")
+    .server_url("http://localhost:50051")
+    .register_actor(ShoppingCart)
+    .build()
+)
+
+await worker.run()
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Execution Model
+
+Understanding how actors execute helps you write correct, performant operations.
+
+### Per-Key Queuing
+
+Orcher maintains a per-key queue for each active actor instance. When an operation arrives for `ShoppingCart["user-123"]`, it's placed in the queue for that specific key. The router dequeues operations one at a time (for exclusive) or in batches (for shared), ensuring the concurrency rules described above. An exclusive operation acts as a barrier between shared batches: the running batch drains, the exclusive runs alone, and shared operations that arrived in the meantime run after it.
+
+If a worker picks up an operation and never reports back — for example, it crashes mid-execution — the operation times out and fails rather than blocking the key indefinitely; the caller receives a timeout error and the queue moves on.
+
+### Worker Polling
+
+Workers poll the server for actor operations, similar to how they poll for workflow tasks. The server returns the next operation from the global work queue, and the worker executes it using the locally registered actor handler. Results are reported back to the server.
+
+### State Persistence
+
+All state operations (`get`, `set`, `delete`) are RPC calls to the server, which persists state in PostgreSQL. This means:
+
+- **Actors are transient** — the worker process can restart and actors automatically resume from server-side state
+- **State survives crashes** — there's no in-memory state to lose
+- **Multiple workers** can handle the same actor type — the server routes operations to any available worker
+
+### Optimistic Locking
+
+State writes support version-based optimistic locking via `expected_version`. If two operations race on the same state key, the second write fails with a version conflict, allowing the caller to retry. This is handled automatically for exclusive operations (since they're serialized), but is available as an extra safety layer for advanced use cases.
+
+---
+
+## Best Practices
+
+1. **Keep operations short.** Each operation holds the per-key lock (for exclusive mode). Long-running operations block all other mutations for that key. If you need to do expensive work, offload it to a task or workflow and return quickly.
+
+2. **Use shared mode for reads.** Marking read-only operations as `shared` allows them to run concurrently, significantly improving read throughput for popular actor instances. Read-only is enforced: a shared operation that attempts a state write is rejected by the engine — keep every write in an exclusive operation.
+
+3. **Scope state keys carefully.** Use prefixed keys (`item:widget`, `item:gadget`) rather than storing everything in a single large object. This makes partial reads and updates more efficient.
+
+4. **Don't store instance fields.** Actor instances are transient. All important data must go through `ctx.state`. If a worker restarts, the actor is recreated from scratch with no instance memory.
+
+5. **Prefer actors over workflows for entity state.** If your use case is "manage the state of X" (a cart, a counter, a session), actors are a better fit than workflows. Workflows are better for "execute this sequence of steps."
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-4 not-prose">
+  <Link href="/guides/core/actors/defining-actors" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Defining Actors & Operations</h3>
+    <p className="text-sm text-foreground-light">Define actors, operations, state management, and the ActorContext API.</p>
+  </Link>
+  <Link href="/guides/core/state-management" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Managing State</h3>
+    <p className="text-sm text-foreground-light">Learn about state management patterns across workflows and actors.</p>
+  </Link>
+  <Link href="/guides/core/events" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Handling Events</h3>
+    <p className="text-sm text-foreground-light">Send events to actors and workflows for inter-component communication.</p>
+  </Link>
+  <Link href="/guides/core/error-handling" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Error Handling</h3>
+    <p className="text-sm text-foreground-light">Configure retries and failure handling for robust actor operations.</p>
+  </Link>
+</div>

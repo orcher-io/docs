@@ -1,0 +1,316 @@
+---
+id: 'bg-email-campaigns'
+title: 'Email Campaigns with Batching & Rate Limiting'
+sidebar_label: 'Email Campaigns'
+---
+
+Bulk email sends need to respect provider rate limits while tracking progress. With Orcher, you process recipients in batches, sleep between them using durable timers, and checkpoint progress automatically. If the worker restarts at batch 47 of 100, it skips the first 46 batches (already journaled) and continues from batch 47.
+
+## How it works
+
+The loop alternates a send with a one-second durable sleep — and *both* are journaled. On replay, completed batches return their recorded results and completed sleeps finish instantly, so a restart never re-sends an email and never re-waits a second that already passed.
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Resume Without Re-Sending or Re-Waiting</div>
+  </div>
+  {[
+    { label: 'send_email_batch(046)', detail: '100 sent — journaled', icon: '✓', state: 'done' },
+    { label: 'sleep(1s)', detail: 'Completed — journaled', icon: '⏱', state: 'done' },
+    { label: 'send_email_batch(047)', detail: '100 sent — journaled', icon: '✓', state: 'done' },
+    { label: 'worker crashes', detail: 'Mid-campaign, 53 batches to go', icon: '✗', state: 'crash' },
+    { label: 'replay', detail: '47 batches + 47 sleeps replay instantly — nothing re-sent, nothing re-waited', icon: '↻', state: 'resume' },
+    { label: 'send_email_batch(048)', detail: 'The campaign continues on cadence', icon: '✓', state: 'done' },
+  ].map((row, i, arr) => (
+    <div key={i}>
+      <div className={`px-4 py-2 flex items-center gap-3 ${row.state === 'crash' ? 'bg-red-500/5' : ''} ${row.state === 'resume' ? 'bg-surface-75' : ''}`}>
+        <span className={`w-5 h-5 flex items-center justify-center text-[10px] shrink-0 ${row.state === 'crash' ? 'text-red-400' : 'text-foreground-muted'}`}>{row.icon}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{row.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{row.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">No subscriber hears from you twice; the provider's rate limit is never burst on resume.</span>
+  </div>
+</div>
+
+## Example: a rate-limited campaign
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="typescript"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use std::time::Duration;
+
+#[task]
+async fn fetch_recipients(segment_id: String) -> Result<Vec<Recipient>> {
+    db::query_recipients_by_segment(&segment_id).await
+}
+
+#[task]
+async fn send_email_batch(batch: Vec<Recipient>) -> Result<BatchResult> {
+    let mut sent = 0;
+    for recipient in &batch {
+        email_provider::send(&recipient.email, &recipient.template).await?;
+        sent += 1;
+    }
+    Ok(BatchResult { sent, failed: batch.len() - sent })
+}
+
+#[task]
+async fn record_campaign_stats(stats: CampaignStats) -> Result<()> {
+    analytics::record(stats).await
+}
+
+#[workflow(name = "send_email_campaign", version = "1.0.0")]
+async fn send_email_campaign(
+    ctx: WorkflowContext,
+    input: CampaignInput,
+) -> Result<CampaignResult> {
+    let recipients = ctx.execute_task(fetch_recipients, input.segment_id).await?;
+    let total = recipients.len();
+    let mut sent = 0;
+    let mut failed = 0;
+
+    // Process in batches of 100 with rate limiting
+    for batch in recipients.chunks(100) {
+        match ctx.execute_task(send_email_batch, batch.to_vec()).await {
+            Ok(result) => sent += result.sent,
+            Err(_) => failed += batch.len(),
+        }
+
+        // Rate limit: 1 second between batches (durable timer)
+        ctx.sleep(Duration::from_secs(1)).await?;
+    }
+
+    ctx.execute_task(record_campaign_stats, CampaignStats {
+        campaign_id: input.campaign_id,
+        total,
+        sent,
+        failed,
+    }).await?;
+
+    Ok(CampaignResult { total, sent, failed })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import {
+  Workflow,
+  Tasks,
+  Task,
+  WorkflowContext,
+  createTaskRefs,
+} from '@orcher/sdk';
+
+@Tasks()
+class EmailTasks {
+  @Task()
+  async fetchRecipients(segmentId: string): Promise<Recipient[]> {
+    return await db.queryRecipientsBySegment(segmentId);
+  }
+
+  @Task()
+  async sendEmailBatch(batch: Recipient[]): Promise<BatchResult> {
+    let sent = 0;
+    for (const recipient of batch) {
+      await emailProvider.send(recipient.email, recipient.template);
+      sent++;
+    }
+    return { sent, failed: batch.length - sent };
+  }
+
+  @Task()
+  async recordCampaignStats(stats: CampaignStats): Promise<void> {
+    await analytics.record(stats);
+  }
+}
+
+const tasks = createTaskRefs(EmailTasks);
+
+@Workflow({ name: 'send_email_campaign', version: '1.0.0' })
+class SendEmailCampaign {
+  async run(
+    ctx: WorkflowContext,
+    input: CampaignInput,
+  ): Promise<CampaignResult> {
+    const recipients = await ctx.executeTask(
+      tasks.fetchRecipients, input.segmentId,
+    );
+    const total = recipients.length;
+    let sent = 0;
+    let failed = 0;
+
+    // Process in batches of 100 with rate limiting
+    for (let i = 0; i < recipients.length; i += 100) {
+      const batch = recipients.slice(i, i + 100);
+
+      try {
+        const result = await ctx.executeTask(tasks.sendEmailBatch, batch);
+        sent += result.sent;
+      } catch {
+        failed += batch.length;
+      }
+
+      // Rate limit: 1 second between batches (durable timer)
+      await ctx.sleep(1000);
+    }
+
+    await ctx.executeTask(tasks.recordCampaignStats, {
+      campaignId: input.campaignId,
+      total,
+      sent,
+      failed,
+    });
+
+    return { total, sent, failed };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext
+
+@task
+async def fetch_recipients(segment_id: str) -> list[Recipient]:
+    return await db.query_recipients_by_segment(segment_id)
+
+@task
+async def send_email_batch(batch: list[Recipient]) -> BatchResult:
+    sent = 0
+    for recipient in batch:
+        await email_provider.send(recipient.email, recipient.template)
+        sent += 1
+    return BatchResult(sent=sent, failed=len(batch) - sent)
+
+@task
+async def record_campaign_stats(stats: CampaignStats) -> None:
+    await analytics.record(stats)
+
+@workflow(name="send_email_campaign", version="1.0.0")
+async def send_email_campaign(
+    ctx: WorkflowContext, input: CampaignInput
+) -> CampaignResult:
+    recipients = await ctx.execute_task(fetch_recipients, input.segment_id)
+    total = len(recipients)
+    sent = 0
+    failed = 0
+
+    # Process in batches of 100 with rate limiting
+    for i in range(0, total, 100):
+        batch = recipients[i:i + 100]
+
+        try:
+            result = await ctx.execute_task(send_email_batch, batch)
+            sent += result.sent
+        except Exception:
+            failed += len(batch)
+
+        # Rate limit: 1 second between batches (durable timer)
+        await ctx.sleep(1000)
+
+    await ctx.execute_task(record_campaign_stats, CampaignStats(
+        campaign_id=input.campaign_id, total=total, sent=sent, failed=failed,
+    ))
+
+    return CampaignResult(total=total, sent=sent, failed=failed)
+```
+
+</TabPanel>
+
+</Tabs>
+
+The `ctx.sleep()` call is a durable timer — it's journaled, so on replay it completes instantly rather than sleeping again. This means a 100-batch campaign that crashes at batch 50 doesn't re-wait the 49 seconds of sleep that already passed.
+
+## Where the journal can't see
+
+The checkpoint granularity is the **task boundary** — and this example loops over 100 individual sends *inside* one task. If the task dies at email 51, its retry starts the loop from email 1:
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Inside a Task, You're on Your Own</div>
+  </div>
+  {[
+    { label: 'send_email_batch(012)', detail: 'Task starts — 100 recipients', icon: '1' },
+    { label: 'emails 1–50 sent', detail: 'Provider accepted them — no journal entries', icon: '✓', state: 'done' },
+    { label: 'send #51 fails', detail: 'Task errors — nothing was checkpointed', icon: '✗', state: 'crash' },
+    { label: 'task retries', detail: 'The loop starts from email 1', icon: '↻', state: 'resume' },
+    { label: 'emails 1–50 sent again', detail: 'Duplicates — unless sends carry idempotency keys', icon: '✗', state: 'crash' },
+  ].map((row, i, arr) => (
+    <div key={i}>
+      <div className={`px-4 py-2 flex items-center gap-3 ${row.state === 'crash' ? 'bg-red-500/5' : ''} ${row.state === 'resume' ? 'bg-surface-75' : ''}`}>
+        <span className={`w-5 h-5 flex items-center justify-center text-[10px] shrink-0 ${row.state === 'crash' ? 'text-red-400' : row.state ? 'text-foreground-muted' : 'font-mono text-foreground-muted border border-default'}`}>{row.icon}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{row.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{row.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">The journal checkpoints between tasks, never inside them — design the inside accordingly.</span>
+  </div>
+</div>
+
+Two defenses, use both: pass a **provider idempotency key per recipient** (message ID derived from campaign + recipient) so a re-sent email deduplicates at the provider, and keep batches small enough that a worst-case replay is acceptable.
+
+## Design notes
+
+- **Batch size is also blast radius.** It sets checkpoint granularity (as in [batch processing](/guides/use-cases/data-processing/batch-processing)) *and* the maximum duplicate exposure if a mid-batch failure meets a non-idempotent provider. 100 is a reasonable default; size down if your provider has no deduplication.
+- **The sleep sets a pace, not a precise rate.** Actual throughput is `batch_size / (send duration + 1s)` — the timer adds spacing but doesn't measure the provider's clock. For strict provider budgets, size batches conservatively rather than tuning the sleep.
+- **Failed batches are counted, not retried — deliberately.** The workflow records them in the stats and finishes, giving you a re-run worklist instead of a stuck campaign. If a batch deserves in-place retries, wrap the send in [retry with backoff](/guides/use-cases/background-tasks/retry-backoff).
+- **Fetching recipients once pins the audience.** The recipient list is journaled with `fetch_recipients`, so a resume six hours later emails the *original* segment — subscribers added mid-run aren't silently included. That's usually what you want; re-fetch per batch only if you explicitly want a live audience.
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/use-cases/background-tasks/scheduled-jobs" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Scheduled Jobs</h3>
+      <p className="text-sm text-foreground-light">
+        Recurring workflows with durable timers for daily reports and periodic tasks.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/use-cases/background-tasks/retry-backoff" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Retry with Backoff</h3>
+      <p className="text-sm text-foreground-light">
+        Exponential backoff for external API calls with journaled retry state.
+      </p>
+    </div>
+  </Link>
+</div>

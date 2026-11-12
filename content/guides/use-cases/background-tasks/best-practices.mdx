@@ -1,0 +1,53 @@
+---
+id: 'bg-best-practices'
+title: 'Best Practices & Performance'
+sidebar_label: 'Best Practices'
+---
+
+Everything on this page assumes the patterns from this section — [email campaigns](/guides/use-cases/background-tasks/email-campaigns), [scheduled jobs](/guides/use-cases/background-tasks/scheduled-jobs), [retry with backoff](/guides/use-cases/background-tasks/retry-backoff), and [content processing](/guides/use-cases/background-tasks/content-processing). Each practice below links back to the pattern that demonstrates it.
+
+## Design Principles
+
+### Use Durable Timers Instead of External Cron
+
+A `ctx.sleep()` in a loop is more reliable than an external cron scheduler because the timer state is journaled alongside the workflow. If your cron daemon and your worker both go down, the external approach loses the schedule. With Orcher, the workflow resumes its sleep countdown automatically on restart — see [scheduled jobs](/guides/use-cases/background-tasks/scheduled-jobs) for when to use a timer loop versus the Schedule API instead.
+
+### Keep Tasks Small and Focused
+
+A task that sends 10,000 emails is hard to retry — if it fails at email 9,999, you either retry all 10,000 or build your own checkpointing. Instead, batch into groups of 100 and let Orcher checkpoint each batch. The checkpoint boundary is the task boundary, so the size of a task is the size of your worst-case replay — the exact tradeoff worked through in [email campaigns](/guides/use-cases/background-tasks/email-campaigns#where-the-journal-cant-see).
+
+### Handle Errors at the Right Level First
+
+The platform already retries a failing task before the error reaches your workflow — so don't hand-roll retries for transient faults. Reserve workflow-level try/catch for policy: counting partial failures, alerting, falling back. [Retry with backoff](/guides/use-cases/background-tasks/retry-backoff#dont-reach-for-this-too-soon) draws the line between the two.
+
+### Use Parallel Execution for Independent Steps
+
+If two tasks don't depend on each other — transcoding to MP4 and WebM, uploading three assets — run them concurrently with `try_join!` (Rust), `Promise.all` (TypeScript), or `asyncio.gather` (Python). Each parallel task is still individually journaled and recoverable. The [content-processing pipeline](/guides/use-cases/background-tasks/content-processing) shows the DAG shape; the fan-out is free structure.
+
+### Record Metrics as a Final Task
+
+At the end of a batch workflow, write a summary (total processed, succeeded, failed, duration) as a separate task. Because that write is journaled, it's a durable record of the job outcome that survives even if the process crashes immediately after — and the failed-item counts become the worklist for a targeted re-run rather than a full reprocess.
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/patterns/long-running" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Long-Running Processes</h3>
+      <p className="text-sm text-foreground-light">
+        Durable timers, human-in-the-loop approvals, and workflows that run for days or weeks.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/fan-out-fan-in" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Fan-Out/Fan-In Pattern</h3>
+      <p className="text-sm text-foreground-light">
+        Distribute work across child workflows and aggregate results for high-throughput batch processing.
+      </p>
+    </div>
+  </Link>
+</div>

@@ -1,0 +1,199 @@
+---
+id: 'queue-configuration'
+title: 'Configuring Queues'
+description: 'Assign workers to queues, isolate workloads, and use namespaces for multi-tenancy'
+sidebar_label: 'Configuration'
+---
+
+## Assigning Workers to Queues
+
+Each worker polls exactly one task queue, specified via the builder API:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<()> {
+    // This worker polls the "payments" queue
+    let worker = WorkerBuilder::new()
+        .server_url("http://localhost:50051")
+        .namespace("production")
+        .task_queue("payments")
+        .max_concurrent_workflows(100)
+        .max_concurrent_tasks(200)
+        .build()
+        .await?;
+
+    worker.run().await
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import Worker
+
+async def main():
+    # This worker polls the "payments" queue
+    worker = (
+        Worker.builder()
+        .server_url("http://localhost:50051")
+        .namespace("production")
+        .task_queue("payments")
+        .max_concurrent_workflows(100)
+        .max_concurrent_tasks(100)
+        .build()
+    )
+    await worker.run()
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Worker } from '@orcher/sdk';
+
+// This worker polls the "payments" queue
+const worker = new Worker({
+  serverUrl: 'http://localhost:50051',
+  namespace: 'production',
+  taskQueue: 'payments',
+});
+
+await worker.run();
+```
+
+</TabPanel>
+
+</Tabs>
+
+## Queue Isolation by Workload
+
+Use separate queues to match workers to their workload characteristics:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+// CPU-intensive work — deploy on compute-optimized instances
+let compute_worker = WorkerBuilder::new()
+    .task_queue("ml-inference")
+    .max_concurrent_tasks(10)  // Low concurrency for CPU tasks
+    .build().await?;
+
+// I/O-intensive work — deploy on network-optimized instances
+let io_worker = WorkerBuilder::new()
+    .task_queue("api-calls")
+    .max_concurrent_tasks(500)  // High concurrency for I/O tasks
+    .build().await?;
+
+// Payment processing — dedicated, high-reliability workers
+let payment_worker = WorkerBuilder::new()
+    .task_queue("payments")
+    .max_concurrent_tasks(50)
+    .build().await?;
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+# CPU-intensive work
+compute_worker = (
+    Worker.builder()
+    .task_queue("ml-inference")
+    .max_concurrent_tasks(10)
+    .build()
+)
+
+# I/O-intensive work
+io_worker = (
+    Worker.builder()
+    .task_queue("api-calls")
+    .max_concurrent_tasks(100)
+    .build()
+)
+
+# Payment processing
+payment_worker = (
+    Worker.builder()
+    .task_queue("payments")
+    .max_concurrent_tasks(50)
+    .build()
+)
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// CPU-intensive work
+const computeWorker = new Worker({
+  serverUrl: 'http://localhost:50051',
+  namespace: 'production',
+  taskQueue: 'ml-inference',
+});
+
+// I/O-intensive work
+const ioWorker = new Worker({
+  serverUrl: 'http://localhost:50051',
+  namespace: 'production',
+  taskQueue: 'api-calls',
+});
+
+// Payment processing
+const paymentWorker = new Worker({
+  serverUrl: 'http://localhost:50051',
+  namespace: 'production',
+  taskQueue: 'payments',
+});
+```
+
+</TabPanel>
+
+</Tabs>
+
+## Namespace Isolation
+
+Namespaces provide complete queue isolation for multi-tenancy and environment separation. Two workers polling the same queue name in different namespaces will never receive each other's work:
+
+```bash
+# Development workers
+ORCHER_NAMESPACE=development ./my-worker
+
+# Production workers
+ORCHER_NAMESPACE=production ./my-worker
+
+# Per-tenant isolation
+ORCHER_NAMESPACE=tenant-acme ./my-worker
+```
+
+---
+
+## Next Steps
+
+- [Queues Overview](/guides/operations/queue) — How queues work in Orcher
+- [Polling & Dead Letter Queue](/guides/operations/queue/polling) — Tune pollers, configure retries, and enable Redis fast path
+- [Monitoring & Troubleshooting](/guides/operations/queue/monitoring) — CLI commands, auto-scaling, and common issues

@@ -1,0 +1,294 @@
+---
+id: 'distributed-saga'
+title: 'Saga Pattern with Compensating Transactions'
+sidebar_label: 'Saga Pattern'
+---
+
+When a multi-service transaction fails partway through, you need to undo the steps that already succeeded. The saga pattern tracks each completed step and runs compensating actions in reverse order on failure. Orcher journals every step, so even if the process crashes during compensation, it resumes exactly where it left off — no manual cleanup required.
+
+## How it works
+
+A saga has a shape: every forward step pushes one compensation onto a stack, and a failure pops the whole stack in reverse. You can see it in the example's widening catch blocks — the further the trip booking gets, the more there is to undo.
+
+<div className="not-prose my-8 max-w-lg mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">The Compensation Stack</div>
+  </div>
+  <div className="grid grid-cols-[1fr_auto_1.2fr] gap-px bg-border-default text-center">
+    <div className="bg-surface-75 px-3 py-2 text-[10px] font-mono uppercase tracking-widest text-foreground-muted">Forward step</div>
+    <div className="bg-surface-75 px-3 py-2" />
+    <div className="bg-surface-75 px-3 py-2 text-[10px] font-mono uppercase tracking-widest text-foreground-muted">If it fails, undo</div>
+    {[
+      { step: 'book_flight', undo: 'nothing — first step', muted: true },
+      { step: 'book_hotel', undo: '↺ cancel_flight' },
+      { step: 'book_car', undo: '↺ cancel_hotel → cancel_flight' },
+    ].flatMap((row) => [
+      <div key={`${row.step}-a`} className="bg-background px-3 py-2.5">
+        <span className="text-xs font-medium font-mono text-foreground">{row.step}</span>
+      </div>,
+      <div key={`${row.step}-b`} className="bg-background px-2 py-2.5 flex items-center">
+        <span className="text-[10px] text-foreground-muted">→</span>
+      </div>,
+      <div key={`${row.step}-c`} className="bg-background px-3 py-2.5">
+        <span className={`text-[11px] font-mono ${row.muted ? 'text-foreground-muted' : 'text-foreground-light'}`}>{row.undo}</span>
+      </div>,
+    ])}
+  </div>
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Each completed step adds one compensation; failure pops them newest-first.</span>
+  </div>
+</div>
+
+## Example: booking a trip with rollback
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="typescript"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[task]
+async fn book_flight(details: FlightDetails) -> Result<Booking> {
+    flight_api::book(details).await
+}
+
+#[task]
+async fn book_hotel(details: HotelDetails) -> Result<Booking> {
+    hotel_api::book(details).await
+}
+
+#[task]
+async fn book_car(details: CarDetails) -> Result<Booking> {
+    car_api::book(details).await
+}
+
+#[task]
+async fn cancel_flight(booking_id: String) -> Result<()> {
+    flight_api::cancel(&booking_id).await
+}
+
+#[task]
+async fn cancel_hotel(booking_id: String) -> Result<()> {
+    hotel_api::cancel(&booking_id).await
+}
+
+#[workflow(name = "book_trip", version = "1.0.0")]
+async fn book_trip(
+    ctx: WorkflowContext,
+    input: TripBooking,
+) -> Result<BookingResult> {
+    // Step 1: Book flight
+    let flight = ctx.execute_task(book_flight, input.flight).await?;
+
+    // Step 2: Book hotel (compensate flight on failure)
+    let hotel = match ctx.execute_task(book_hotel, input.hotel).await {
+        Ok(h) => h,
+        Err(e) => {
+            ctx.execute_task(cancel_flight, flight.id.clone()).await?;
+            return Err(e);
+        }
+    };
+
+    // Step 3: Book car (compensate hotel + flight on failure)
+    let car = match ctx.execute_task(book_car, input.car).await {
+        Ok(c) => c,
+        Err(e) => {
+            ctx.execute_task(cancel_hotel, hotel.id.clone()).await?;
+            ctx.execute_task(cancel_flight, flight.id.clone()).await?;
+            return Err(e);
+        }
+    };
+
+    Ok(BookingResult {
+        flight_id: flight.id,
+        hotel_id: hotel.id,
+        car_id: car.id,
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import {
+  Workflow,
+  Tasks,
+  Task,
+  WorkflowContext,
+  createTaskRefs,
+} from '@orcher/sdk';
+
+@Tasks()
+class TravelTasks {
+  @Task()
+  async bookFlight(details: FlightDetails): Promise<Booking> {
+    return await flightApi.book(details);
+  }
+
+  @Task()
+  async bookHotel(details: HotelDetails): Promise<Booking> {
+    return await hotelApi.book(details);
+  }
+
+  @Task()
+  async bookCar(details: CarDetails): Promise<Booking> {
+    return await carApi.book(details);
+  }
+
+  @Task()
+  async cancelFlight(bookingId: string): Promise<void> {
+    await flightApi.cancel(bookingId);
+  }
+
+  @Task()
+  async cancelHotel(bookingId: string): Promise<void> {
+    await hotelApi.cancel(bookingId);
+  }
+}
+
+const tasks = createTaskRefs(TravelTasks);
+
+@Workflow({ name: 'book_trip', version: '1.0.0' })
+class BookTrip {
+  async run(ctx: WorkflowContext, input: TripBooking): Promise<BookingResult> {
+    // Step 1: Book flight
+    const flight = await ctx.executeTask(tasks.bookFlight, input.flight);
+
+    // Step 2: Book hotel (compensate flight on failure)
+    let hotel: Booking;
+    try {
+      hotel = await ctx.executeTask(tasks.bookHotel, input.hotel);
+    } catch (error) {
+      await ctx.executeTask(tasks.cancelFlight, flight.id);
+      throw error;
+    }
+
+    // Step 3: Book car (compensate hotel + flight on failure)
+    let car: Booking;
+    try {
+      car = await ctx.executeTask(tasks.bookCar, input.car);
+    } catch (error) {
+      await ctx.executeTask(tasks.cancelHotel, hotel.id);
+      await ctx.executeTask(tasks.cancelFlight, flight.id);
+      throw error;
+    }
+
+    return { flightId: flight.id, hotelId: hotel.id, carId: car.id };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext
+
+@task
+async def book_flight(details: FlightDetails) -> Booking:
+    return await flight_api.book(details)
+
+@task
+async def book_hotel(details: HotelDetails) -> Booking:
+    return await hotel_api.book(details)
+
+@task
+async def book_car(details: CarDetails) -> Booking:
+    return await car_api.book(details)
+
+@task
+async def cancel_flight(booking_id: str) -> None:
+    await flight_api.cancel(booking_id)
+
+@task
+async def cancel_hotel(booking_id: str) -> None:
+    await hotel_api.cancel(booking_id)
+
+@workflow(name="book_trip", version="1.0.0")
+async def book_trip(ctx: WorkflowContext, input: TripBooking) -> BookingResult:
+    # Step 1: Book flight
+    flight = await ctx.execute_task(book_flight, input.flight)
+
+    # Step 2: Book hotel (compensate flight on failure)
+    try:
+        hotel = await ctx.execute_task(book_hotel, input.hotel)
+    except Exception as e:
+        await ctx.execute_task(cancel_flight, flight.id)
+        raise e
+
+    # Step 3: Book car (compensate hotel + flight on failure)
+    try:
+        car = await ctx.execute_task(book_car, input.car)
+    except Exception as e:
+        await ctx.execute_task(cancel_hotel, hotel.id)
+        await ctx.execute_task(cancel_flight, flight.id)
+        raise e
+
+    return BookingResult(
+        flight_id=flight.id, hotel_id=hotel.id, car_id=car.id,
+    )
+```
+
+</TabPanel>
+
+</Tabs>
+
+Compensation actions execute in reverse order of the forward steps. Because Orcher journals each task result, compensation is durable too — a rollback interrupted by a crash resumes instead of restarting:
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Crash Mid-Rollback</div>
+  </div>
+  {[
+    { label: 'book_car', detail: 'Fails — rollback begins', icon: '✗', state: 'crash' },
+    { label: 'cancel_hotel', detail: 'Compensation completed — journaled', icon: '✓', state: 'done' },
+    { label: 'worker dies', detail: 'Rollback half-finished', icon: '✗', state: 'crash' },
+    { label: 'replay', detail: 'cancel_hotel skipped — its result is in the journal', icon: '↻', state: 'resume' },
+    { label: 'cancel_flight', detail: 'Rollback completes — hotel is never double-cancelled', icon: '✓', state: 'done' },
+  ].map((row, i, arr) => (
+    <div key={i}>
+      <div className={`px-4 py-2 flex items-center gap-3 ${row.state === 'crash' ? 'bg-red-500/5' : ''} ${row.state === 'resume' ? 'bg-surface-75' : ''}`}>
+        <span className={`w-5 h-5 flex items-center justify-center text-[10px] shrink-0 ${row.state === 'crash' ? 'text-red-400' : 'text-foreground-muted'}`}>{row.icon}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{row.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{row.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Compensation is code like any other — journaled, replayed, and finished.</span>
+  </div>
+</div>
+
+## Design notes
+
+- **A compensation is a countermeasure, not an inverse.** `cancel_flight` may incur a fee, land on a waitlist, or trigger a voucher — the system returns to a *consistent* state, not necessarily the original one. Name compensations after what they really do.
+- **Order forward steps by how much you'd hate to undo them.** Put the cheapest-to-compensate steps first and the most painful (or non-compensatable) step last — ideally the last step needs no compensation at all because nothing comes after it that can fail.
+- **Compensations can fail too.** Each `cancel_*` is a journaled task with retries; if one exhausts them, the workflow fails with the rollback exactly half-done — and the journal records precisely which compensations completed, turning a 3 a.m. mystery into a worklist.
+- **The try/catch ladder doesn't scale forever.** Three steps read fine; at six, track completed steps in a list and compensate in a reverse loop — or push each phase into a [child workflow](/guides/use-cases/distributed-systems/child-workflows) that owns its own compensation.
+
+---
+
+## Next Steps
+
+- [Child Workflows for Service Composition](/guides/use-cases/distributed-systems/child-workflows) — Compose services into reusable workflow units.
+- [Event Gates for Human Approvals](/guides/use-cases/distributed-systems/event-gates) — Pause workflows until external input arrives.
+- [Multi-Service Deployment](/guides/use-cases/distributed-systems/multi-service-deployment) — Fan-out across regions with parallel execution.
+- [Best Practices & Performance](/guides/use-cases/distributed-systems/best-practices) — Guidelines and benchmarks for distributed workflows.

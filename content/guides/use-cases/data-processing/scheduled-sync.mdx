@@ -1,0 +1,325 @@
+---
+id: 'data-processing-scheduled'
+title: 'Scheduled Sync (CDC Pattern)'
+description: 'Incremental data sync using change data capture patterns with durable timers'
+sidebar_label: 'Scheduled Sync'
+---
+
+For pipelines that need to run continuously — syncing changes from a source system every few minutes — use a long-running workflow with durable timers. The workflow tracks a watermark (timestamp or offset) so it always picks up exactly where it left off, even after restarts.
+
+The conventional version of this needs three moving parts: a cron scheduler, a job runner, and a state store for the cursor. Here all three collapse into one workflow — `ctx.sleep` is the schedule, the workflow is the runner, and the journaled watermark is the cursor.
+
+## How it works
+
+Each cycle fetches everything changed since the watermark, applies it, advances the watermark, and goes to sleep. The sleep is a **durable timer**: the workflow fully suspends — holding no thread, no connection, no memory — and the server re-dispatches it when the timer fires.
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">One Sync Cycle</div>
+  </div>
+  {[
+    { label: 'fetch_changes', detail: 'Everything since watermark — journaled', icon: '1' },
+    { label: 'apply_changes', detail: 'Idempotent upsert — skipped if no changes', icon: '2' },
+    { label: 'advance watermark', detail: 'New cursor journaled with the step', icon: '3' },
+    { label: 'ctx.sleep(interval)', detail: 'Suspended — zero resources until timer fires', icon: '⏸', state: 'suspend' },
+  ].map((step, i, arr) => (
+    <div key={i}>
+      <div className={`px-4 py-2 flex items-center gap-3 ${step.state === 'suspend' ? 'bg-surface-75' : ''}`}>
+        <span className={`w-5 h-5 flex items-center justify-center text-[10px] shrink-0 ${step.state === 'suspend' ? 'text-foreground-muted' : 'font-mono text-foreground-muted border border-default'}`}>{step.icon}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{step.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{step.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">↻ timer fires → next cycle fetches from the last watermark — no gaps, no overlap</span>
+  </div>
+</div>
+
+## Example: incremental sync with a watermark
+
+The workflow below syncs changes on a fixed interval. The watermark is an ordinary local variable — it needs no database row or config entry, because every step that produced it is journaled and restored on replay.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use std::time::Duration;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SyncConfig {
+    source_url: String,
+    dest_table: String,
+    sync_interval_secs: u64,
+    max_iterations: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SyncState {
+    watermark: String,  // Tracks last synced timestamp or offset
+    total_synced: usize,
+    iterations: u32,
+}
+
+#[task]
+async fn fetch_changes(source_url: String, since: String) -> Result<(Vec<serde_json::Value>, String)> {
+    // Query source for records changed since the watermark
+    let (records, new_watermark) = source::get_changes(&source_url, &since).await?;
+    Ok((records, new_watermark))
+}
+
+#[task]
+async fn apply_changes(dest_table: String, records: Vec<serde_json::Value>) -> Result<usize> {
+    // Upsert changed records into destination
+    let count = dest::upsert(&dest_table, &records).await?;
+    Ok(count)
+}
+
+#[workflow(name = "incremental_sync", version = "1.0.0")]
+pub async fn incremental_sync(
+    ctx: WorkflowContext,
+    config: SyncConfig,
+) -> Result<SyncState> {
+    let mut state = SyncState {
+        watermark: "1970-01-01T00:00:00Z".to_string(),
+        total_synced: 0,
+        iterations: 0,
+    };
+
+    loop {
+        // Fetch changes since last watermark
+        let (changes, new_watermark) = ctx.execute_task(
+            fetch_changes, (config.source_url.clone(), state.watermark.clone())
+        ).await?;
+
+        if !changes.is_empty() {
+            // Apply changes to destination
+            let count = ctx.execute_task(
+                apply_changes, (config.dest_table.clone(), changes)
+            ).await?;
+            state.total_synced += count;
+            println!("Synced {} records (total: {})", count, state.total_synced);
+        }
+
+        state.watermark = new_watermark;
+        state.iterations += 1;
+
+        if state.iterations >= config.max_iterations {
+            break;
+        }
+
+        // Sleep until next sync — durable timer, zero resource consumption
+        ctx.sleep(Duration::from_secs(config.sync_interval_secs)).await?;
+    }
+
+    Ok(state)
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, WorkflowContext, createTaskRefs } from '@orcher/sdk';
+
+interface SyncConfig {
+  sourceUrl: string;
+  destTable: string;
+  syncIntervalSecs: number;
+  maxIterations: number;
+}
+
+interface SyncState {
+  watermark: string;
+  totalSynced: number;
+  iterations: number;
+}
+
+@Tasks()
+class SyncTasks {
+  @Task()
+  async fetchChanges(sourceUrl: string, since: string): Promise<{ records: unknown[]; watermark: string }> {
+    return await source.getChanges(sourceUrl, since);
+  }
+
+  @Task()
+  async applyChanges(destTable: string, records: unknown[]): Promise<number> {
+    return await dest.upsert(destTable, records);
+  }
+}
+
+const tasks = createTaskRefs(SyncTasks);
+
+@Workflow({ name: 'incremental_sync', version: '1.0.0' })
+class IncrementalSync {
+  async run(ctx: WorkflowContext, config: SyncConfig): Promise<SyncState> {
+    const state: SyncState = {
+      watermark: '1970-01-01T00:00:00Z',
+      totalSynced: 0,
+      iterations: 0,
+    };
+
+    while (true) {
+      // Fetch changes since last watermark
+      const { records: changes, watermark: newWatermark } = await ctx.executeTask(
+        tasks.fetchChanges, config.sourceUrl, state.watermark
+      );
+
+      if (changes.length > 0) {
+        const count = await ctx.executeTask(
+          tasks.applyChanges, config.destTable, changes
+        );
+        state.totalSynced += count;
+        console.log(`Synced ${count} records (total: ${state.totalSynced})`);
+      }
+
+      state.watermark = newWatermark;
+      state.iterations++;
+
+      if (state.iterations >= config.maxIterations) break;
+
+      // Sleep until next sync — durable timer, zero resource consumption
+      await ctx.sleep(config.syncIntervalSecs * 1000);
+    }
+
+    return state;
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext
+from dataclasses import dataclass
+
+@dataclass
+class SyncConfig:
+    source_url: str
+    dest_table: str
+    sync_interval_secs: int
+    max_iterations: int
+
+@dataclass
+class SyncState:
+    watermark: str
+    total_synced: int
+    iterations: int
+
+@task
+async def fetch_changes(source_url: str, since: str) -> tuple[list[dict], str]:
+    """Query source for records changed since the watermark."""
+    return await source.get_changes(source_url, since)
+
+@task
+async def apply_changes(dest_table: str, records: list[dict]) -> int:
+    """Upsert changed records into destination."""
+    return await dest.upsert(dest_table, records)
+
+@workflow(name="incremental_sync", version="1.0.0")
+async def incremental_sync(ctx: WorkflowContext, config: SyncConfig) -> SyncState:
+    state = SyncState(
+        watermark="1970-01-01T00:00:00Z",
+        total_synced=0,
+        iterations=0,
+    )
+
+    while True:
+        # Fetch changes since last watermark
+        changes, new_watermark = await ctx.execute_task(
+            fetch_changes, config.source_url, state.watermark
+        )
+
+        if changes:
+            count = await ctx.execute_task(
+                apply_changes, config.dest_table, changes
+            )
+            state.total_synced += count
+            print(f"Synced {count} records (total: {state.total_synced})")
+
+        state.watermark = new_watermark
+        state.iterations += 1
+
+        if state.iterations >= config.max_iterations:
+            break
+
+        # Sleep until next sync — durable timer, zero resource consumption
+        await ctx.sleep(config.sync_interval_secs)
+
+    return state
+```
+
+</TabPanel>
+
+</Tabs>
+
+## Surviving a deploy mid-sleep
+
+The usual failure mode for cron-based sync is the gap: the scheduler fires while the runner is being deployed, the run is missed, and the cursor drifts. With a durable timer there is nothing to miss — the timer lives in the server, not the process:
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Deploy During a Sleep</div>
+  </div>
+  {[
+    { label: 'cycle 12 completes', detail: 'watermark = 10:45:00 — journaled', icon: '✓', state: 'done' },
+    { label: 'ctx.sleep(5 min)', detail: 'Workflow suspended', icon: '⏸', state: 'suspend' },
+    { label: 'deploy', detail: 'Workers restart — suspended workflow unaffected', icon: '↯', state: 'deploy' },
+    { label: 'timer fires', detail: 'Replay restores state — watermark = 10:45:00', icon: '↻', state: 'resume' },
+    { label: 'cycle 13 begins', detail: 'Fetches changes since 10:45:00 — no gap, no double run', icon: '✓', state: 'done' },
+  ].map((row, i, arr) => (
+    <div key={i}>
+      <div className={`px-4 py-2 flex items-center gap-3 ${row.state === 'deploy' ? 'bg-red-500/5' : ''} ${row.state === 'suspend' || row.state === 'resume' ? 'bg-surface-75' : ''}`}>
+        <span className={`w-5 h-5 flex items-center justify-center text-[10px] shrink-0 ${row.state === 'deploy' ? 'text-red-400' : 'text-foreground-muted'}`}>{row.icon}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{row.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{row.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">The schedule and the cursor both live in the platform — the process is disposable.</span>
+  </div>
+</div>
+
+Crashes mid-cycle behave like any workflow crash: completed steps replay from the journal, and the in-flight step retries. If the process dies right after `apply_changes` but before the watermark advances, replay returns the journaled fetch and apply results and continues — the watermark never skips ahead of work that wasn't applied.
+
+## Design notes
+
+- **Durable timers, not external cron.** No scheduler infrastructure, no missed runs during deploys, and no overlapping runs — the next cycle can't start until the previous one finishes. See [Schedule with Durable Timers, Not External Cron](/guides/use-cases/data-processing/best-practices#schedule-with-durable-timers-not-external-cron).
+- **Make `apply_changes` idempotent.** A retry can re-apply a batch of changes whose upsert already reached the destination. Upserting by key makes the second application a no-op — the same rule as [batch processing's load step](/guides/use-cases/data-processing/batch-processing#crash-recovery-step-by-step).
+- **Bound the loop.** Every cycle appends journal entries, so an unbounded loop grows its journal forever. The example stops after `max_iterations` and returns its final state — restart the workflow with the returned watermark to continue with a fresh journal.
+- **Watermark choice matters.** A timestamp is simple but can miss rows written concurrently with the query; a monotonic offset or sequence ID from the source (as `fetch_changes` returns here) is safer for true change-data-capture.
+
+---
+
+## Next Steps
+
+- Next pattern: [Data Validation](/guides/use-cases/data-processing/data-validation)
+- Previous: [Parallel ETL](/guides/use-cases/data-processing/parallel-etl)
+- Back to [Data Pipelines & ETL overview](/guides/use-cases/data-processing)

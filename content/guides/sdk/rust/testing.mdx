@@ -1,0 +1,93 @@
+---
+id: rust-testing
+title: Testing
+description: Unit-test Rust SDK workflows in memory with TestWorkflowExecutor and mocked tasks, test actor operations, and know what the test kit doesn't cover
+sidebar_label: 'Testing'
+---
+
+`orcher_sdk::testing` runs workflows in memory, with no server: tasks are answered by mocks, so a test checks the workflow's own logic. It is part of the default features (`testing`). Use `#[tokio::test]` for async tests.
+
+The examples test this workflow:
+
+<$CodeSample path="rust/sdk-testing/src/lib.rs" region="workflow" />
+
+---
+
+## Testing a Workflow with Mocked Tasks
+
+`TestWorkflowExecutor` runs a workflow function and answers each task it schedules from a `MockRegistry`. It runs the workflow, collects the tasks it scheduled, runs their mocks, and replays the workflow with the results, until the workflow returns.
+
+<$CodeSample path="rust/sdk-testing/src/lib.rs" region="executor" />
+
+- Pass the `#[workflow]` function itself; the macro keeps it callable.
+- Mocks are keyed by the task's registered name, and every task the workflow reaches needs one.
+- `WorkflowExecution::new` takes the workflow id, run id, workflow type, namespace and task queue that `ctx` reports.
+- `with_max_steps(n)` limits how many times the workflow is run (1000 by default), which catches a workflow that never finishes.
+
+---
+
+## Mocking Tasks
+
+`MockTaskBuilder::new(task_name, registry)` registers one mock:
+
+| Method | The mock |
+|--------|----------|
+| `returns(value)` | Returns `value` on every call. Pass the success value, not a `Result`. |
+| `returns_seq(vec![...])` | Returns the next value on each call, and fails once they run out |
+| `with_fn(function)` | Computes the result from the task's input; the function takes and returns JSON bytes |
+| `fails_with(message)` | Fails on every call |
+
+A function mock can check the input the workflow passed and count calls:
+
+<$CodeSample path="rust/sdk-testing/src/lib.rs" region="inputs" />
+
+A failing mock ends the test run with an error; the workflow doesn't receive it as a `TaskFailed`:
+
+<$CodeSample path="rust/sdk-testing/src/lib.rs" region="failure" />
+
+---
+
+## Workflows Without Tasks
+
+`TestEnv` registers workflows by type name and runs them in memory. It does not consult task mocks, so use it for workflows whose steps are inline (`ctx.execute`) and use `TestWorkflowExecutor` for workflows that call tasks.
+
+<$CodeSample path="rust/sdk-testing/src/lib.rs" region="closure-workflow" />
+
+<$CodeSample path="rust/sdk-testing/src/lib.rs" region="test-env" />
+
+---
+
+## Testing Task Logic
+
+There is no public constructor for `TaskContext`, so a `#[task]` body can't be called outside a worker. Keep the logic a task needs in plain functions and test those directly:
+
+<$CodeSample path="rust/sdk-testing/src/lib.rs" region="logic" />
+
+---
+
+## Actors
+
+`create_test_context(actor_name, key)` builds an `ActorContext` backed by in-memory state, and `#[operations]` keeps each operation's body as `<name>_impl`:
+
+<$CodeSample path="rust/sdk-testing/src/lib.rs" region="actor" />
+
+Clones of a context share its state. `create_test_context_with_shared_state` shares one store between several contexts.
+
+---
+
+## What the Test Kit Doesn't Cover
+
+- `TestWorkflowExecutor` resolves tasks only. A workflow that waits on a timer, an event or a child workflow stops with an error at that point.
+- A mocked task never fails *into* the workflow, so failure handling (`WorkflowError::TaskFailed`, compensation) isn't exercised.
+- Task code never runs, and nothing is persisted or replayed from a real journal.
+- `TestEnv` records whether each run completed, but not the tasks or state of a run. Its `advance_time` moves a `MockClock` for your own code; it doesn't fire `ctx.sleep` timers.
+
+For the rest, run the workflow against a server: start the engine locally, run a worker in the test process or beside it, and drive it with a `Client`.
+
+---
+
+## Next Steps
+
+- [Workflows](/guides/sdk/rust/workflows): the behavior under test
+- [Tasks](/guides/sdk/rust/tasks): keeping task logic testable
+- [Patterns](/guides/sdk/rust/patterns): workflows worth testing

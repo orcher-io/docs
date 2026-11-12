@@ -1,0 +1,160 @@
+---
+id: 'quickstart'
+title: 'Quickstart'
+description: 'Your first crash-proof workflow in five minutes, in Python, TypeScript or Rust.'
+---
+
+Start an Orcher engine on your machine, run a workflow, then crash its worker halfway through and watch the workflow finish anyway. Everything here comes from the public [quickstart repository](https://github.com/orcher-io/quickstart), and the same guide is on the website at [orcher.io/quickstart](https://orcher.io/quickstart).
+
+## What you'll build
+
+An `order` workflow with two tasks and a durable timer between them:
+
+```
+charge ──▶ sleep 10s ──▶ ship
+```
+
+The engine records every step as it finishes, and keeps the timer itself, so no process has to stay up while it runs. A worker that dies mid-order is replaced by a new one, which picks the order up where it stopped: it ships the order without charging it again.
+
+## Prerequisites
+
+- [Docker](https://docs.docker.com/get-docker/) with Compose v2
+- For the language you pick: Python 3.11 or later, Node.js 22 or later, or stable Rust
+
+## 1. Start the engine
+
+```bash
+git clone https://github.com/orcher-io/quickstart.git
+cd quickstart
+docker compose up -d --wait
+```
+
+This starts Postgres and the engine, which applies its database schema as it starts, with gRPC on `localhost:50051` and health checks on `localhost:8080/health/ready`. Authentication is off: this engine is for your machine only.
+
+<Admonition type="note">
+
+Port taken? Pick others, and point the examples at the new gRPC port:
+
+```bash
+ORCHER_GRPC_PORT=50061 ORCHER_HTTP_PORT=8081 docker compose up -d --wait
+export ORCHER_URL=http://localhost:50061
+```
+
+</Admonition>
+
+## 2. Run a worker
+
+A worker connects to the engine, registers the workflow and its tasks, and runs them. Pick a language and leave the worker running in its own terminal.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="python"
+  queryGroup="language"
+>
+
+<TabPanel id="python" label="Python">
+
+```bash
+cd python
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+python worker.py
+```
+
+The workflow and its tasks, from [`python/worker.py`](https://github.com/orcher-io/quickstart/blob/4eccbec90982763feadec0ed8ee399653b2ef4cd/python/worker.py):
+
+<$CodeSample path="python/quickstart/worker.py" region="workflow" />
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```bash
+cd typescript
+npm install
+npm run build
+npm run worker
+```
+
+The workflow and its tasks, from [`typescript/src/worker.ts`](https://github.com/orcher-io/quickstart/blob/4eccbec90982763feadec0ed8ee399653b2ef4cd/typescript/src/worker.ts):
+
+<$CodeSample path="typescript/src/quickstart/worker.ts" region="workflow" />
+
+</TabPanel>
+
+<TabPanel id="rust" label="Rust">
+
+```bash
+cd rust
+cargo run --bin worker
+```
+
+The workflow and its tasks, from [`rust/src/bin/worker.rs`](https://github.com/orcher-io/quickstart/blob/4eccbec90982763feadec0ed8ee399653b2ef4cd/rust/src/bin/worker.rs):
+
+<$CodeSample path="rust/quickstart/src/bin/worker.rs" region="workflow" />
+
+</TabPanel>
+
+</Tabs>
+
+## 3. Start a workflow
+
+In a second terminal, in the same directory, start an order and wait for it:
+
+```bash
+python start.py                # Python
+npm run start-workflow         # TypeScript
+cargo run --bin start          # Rust
+```
+
+The worker prints `charged order-…`, then `shipped order-…` ten seconds later, and the starter prints the workflow's result:
+
+```
+started workflow order-3f9c1a7e
+result: charged order-3f9c1a7e, then shipped order-3f9c1a7e
+```
+
+## 4. Kill the worker mid-run and watch it resume
+
+1. Start another order, as in step 3.
+2. When the worker prints `charged order-…`, the workflow is sleeping. Stop the worker with <kbd>Ctrl</kbd>+<kbd>C</kbd>, or kill it outright.
+3. The starter keeps waiting: the order is safe in the engine, not in the worker. Start the worker again, as in step 2.
+4. The new worker prints `shipped order-…` once the ten seconds are up, and the starter prints the result. It never prints `charged` again: the charge already happened, so the workflow resumes after it.
+
+[`scripts/kill-and-resume.sh`](https://github.com/orcher-io/quickstart/blob/4eccbec90982763feadec0ed8ee399653b2ef4cd/scripts/kill-and-resume.sh) does the same with `kill -9`, and fails unless the order was charged exactly once and shipped by the second worker:
+
+```bash
+scripts/kill-and-resume.sh python    # or typescript, or rust
+```
+
+It runs the examples from their directories, so install them first, as in step 2 (for Rust, `cargo build --bins`; for Python, set `PYTHON` to your virtualenv's interpreter if it isn't active).
+
+When you're done, `docker compose down -v` stops the engine and deletes its data.
+
+## The engine image
+
+[`ghcr.io/orcher-io/orcher:0.7.0`](https://github.com/orgs/orcher-io/packages/container/package/orcher) is the engine, open source under the Apache License 2.0 ([orcher-io/orcher](https://github.com/orcher-io/orcher)), like the quickstart and the SDKs. Its license ships in the image as `/LICENSE`, beside `/THIRD_PARTY_NOTICES`, which lists the open-source components built into the engine with their own licenses:
+
+```bash
+docker compose exec orcher cat /LICENSE
+docker compose exec orcher cat /THIRD_PARTY_NOTICES
+```
+
+## Next steps
+
+Each SDK's README covers retries, events, child workflows, actors and testing:
+
+| Language | SDK | Package |
+|----------|-----|---------|
+| Python | [orcher-io/sdk-py](https://github.com/orcher-io/sdk-py) | [`orcher-sdk` on PyPI](https://pypi.org/project/orcher-sdk/) |
+| TypeScript | [orcher-io/sdk-ts](https://github.com/orcher-io/sdk-ts) | [`@orcher/sdk` on npm](https://www.npmjs.com/package/@orcher/sdk) |
+| Rust | [orcher-io/sdk-rust](https://github.com/orcher-io/sdk-rust) | [`orcher-sdk` on crates.io](https://crates.io/crates/orcher-sdk) |
+
+Beneath them, [orcher-io/sdk-core](https://github.com/orcher-io/sdk-core) is the core the SDKs share, and [orcher-io/protos](https://github.com/orcher-io/protos) holds the Protocol Buffer definitions of the API they speak.
+
+Then read on in these docs:
+
+- [Understanding Orcher](/guides/core/understanding): the concepts behind workflows, tasks and durable execution
+- [Workflows](/guides/core/workflows/getting-started) and [tasks](/guides/core/tasks/getting-started): writing your own

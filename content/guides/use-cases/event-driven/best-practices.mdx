@@ -1,0 +1,52 @@
+---
+id: 'event-best-practices'
+title: 'Best Practices & Performance'
+sidebar_label: 'Best Practices'
+---
+
+Everything on this page assumes the patterns from this section — [order processing](/guides/use-cases/event-driven/order-processing), [stateful actors](/guides/use-cases/event-driven/stateful-actors), [stream aggregation](/guides/use-cases/event-driven/stream-aggregation), and [pattern detection](/guides/use-cases/event-driven/pattern-detection). Each practice below links back to the pattern that demonstrates it.
+
+## Design Principles
+
+### One Workflow per Event Type
+
+Keep event handlers focused — a single workflow should handle one event type or one closely related group. This makes them easier to test, version independently, and reason about during debugging. The [order-processing dispatcher](/guides/use-cases/event-driven/order-processing) shows the shape, and the point where a fat `match` should split into per-type child workflows.
+
+### Actors for State, Workflows for Chains
+
+If multiple events update the same entity — a shopping cart, user profile, device status — use an [actor](/guides/use-cases/event-driven/stateful-actors), whose single-writer guarantee removes the race by construction. If you need to react to one event by running a sequence of tasks, use a workflow. They compose: an actor operation can start a child workflow, and a workflow can invoke actor operations.
+
+### Design for Idempotent Event Handling
+
+Orcher never repeats a completed step *within* a workflow, but external sources deliver at-least-once — webhook retries and queue redelivery mean the same event can start the workflow twice. Make the downstream effects idempotent (dedupe on the event or order ID) so a redelivery is a no-op, exactly as laid out in [what the handler must tolerate](/guides/use-cases/event-driven/order-processing#the-two-guarantees-an-event-bus-wont-give-you).
+
+### Use Event Gates for Correlations Over Time
+
+When you need to detect a pattern across events over time — fraud, abandoned carts, SLA breaches — use `wait_for_event_with_timeout` rather than polling a database. The workflow suspends at zero cost and wakes instantly when the correlated event arrives; the timeout branch handles the "it never came" case for free. [Pattern detection](/guides/use-cases/event-driven/pattern-detection) covers both the presence and absence signals.
+
+### Keep Actor Operations Fast
+
+An `exclusive` operation holds the actor's writer slot per key, so a slow one blocks every other write to that entity. Keep exclusive operations to state reads and writes, and delegate heavy work — payment, shipping, transcoding — to a child workflow, as [stateful actors](/guides/use-cases/event-driven/stateful-actors#design-notes) does with checkout. And remember the corollary: throughput scales with distinct actors, so a single hot entity is your ceiling.
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-4 not-prose">
+  <Link href="/guides/core/actors" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Actors Guide</h3>
+    <p className="text-sm text-foreground-light">Deep dive into actor definitions, operations, state API, concurrency modes, and the execution model.</p>
+  </Link>
+  <Link href="/guides/core/events" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Events & Signals</h3>
+    <p className="text-sm text-foreground-light">Core concepts behind event gates, signal delivery, and inter-workflow communication.</p>
+  </Link>
+  <Link href="/guides/patterns/long-running" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Long-Running Processes</h3>
+    <p className="text-sm text-foreground-light">Durable timers, human-in-the-loop approvals, and workflows that run for days or weeks.</p>
+  </Link>
+  <Link href="/guides/use-cases/distributed-systems" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Service Orchestration</h3>
+    <p className="text-sm text-foreground-light">Child workflows, saga rollback, event gates, and parallel fan-out for distributed systems.</p>
+  </Link>
+</div>

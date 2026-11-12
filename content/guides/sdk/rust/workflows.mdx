@@ -1,0 +1,204 @@
+---
+id: rust-workflows
+title: Workflows
+description: Define durable workflows with the Rust SDK — tasks, inline steps, timers, child workflows, events, queries and updates, and determinism
+sidebar_label: 'Workflows'
+---
+
+A workflow is an async function that orchestrates tasks, timers, events and other workflows. The engine journals the outcome of every step. When a workflow resumes, after a timer fires, a task completes or a worker restarts, the worker runs the function again from the top and each step that already has a journaled outcome returns it instead of running again. This is replay, and it is why workflow code must be **deterministic**: given the same journal, it must issue the same steps in the same order.
+
+- Do side effects (network, files, databases) in tasks or `ctx.execute`, never directly in the workflow.
+- Read time and randomness from `ctx.time()` and `ctx.rand()`, not the system clock or a thread RNG.
+- Always return the error from a step with `?`, or match it and pass on what you don't handle (see [Handling Failures](#handling-failures)).
+
+---
+
+## Defining a Workflow
+
+<$CodeSample path="rust/sdk-workflows/src/lib.rs" region="define" />
+
+A workflow function is `async`, takes `WorkflowContext` first and exactly one input after it, and returns `orcher_sdk::Result<T>`. The input and output are serialized as JSON, so they need `Serialize` and `Deserialize`. Use a struct when a workflow needs several values, and `()` when it needs none:
+
+<$CodeSample path="rust/sdk-workflows/src/lib.rs" region="no-input" />
+
+### `#[workflow]` attributes
+
+| Attribute | Effect |
+|-----------|--------|
+| `name` | The workflow type that clients start. Defaults to the function name. |
+| `timeout`, `version` | No effect; each produces a deprecation warning. Set the deadline per start with `StartWorkflowOptions::with_workflow_execution_timeout` ([Client](/guides/sdk/rust/client#execution-deadline)), and the code release on the worker with `WorkerBuilder::version_id` or `ORCHER_VERSION_ID` ([Worker](/guides/sdk/rust/worker#versioning-releases)). |
+| `namespace` | A compile error. A workflow runs in whatever namespace its worker serves; set the namespace on the worker and where workflows are started. |
+
+The macro also accepts `description`, `task_queue`, `max_concurrent`, `tags(...)`, `retry_policy(...)`, `cron`, `schedule` and `enabled`, but in 0.7 the worker does not apply them. Choose the task queue, retry policy and cron schedule when you start the workflow, with `StartWorkflowOptions` ([Client](/guides/sdk/rust/client)).
+
+---
+
+## Executing Tasks
+
+`ctx.execute_task(task, input)` schedules a task and waits for its result. Name the task with the constant `#[task]` generates, or with a string:
+
+<$CodeSample path="rust/sdk-workflows/src/lib.rs" region="task-by-name" />
+
+The typed reference only checks the task's name. The input and output are serialized as JSON and checked when the task runs, so the output type you ask for (`let x: T = ...`) must match what the task returns. Name the output type even when it is `()`: `execute_task` is generic over it.
+
+Tasks run on the workflow's task queue. A task's retry policy and timeouts come from its `#[task]` attributes, which the worker running the *workflow* reads, so link the task's crate into that worker. A task scheduled by string name that the worker doesn't know runs with the defaults: 3 attempts and a 300-second timeout. See [Tasks](/guides/sdk/rust/tasks).
+
+### Inline steps
+
+For a one-off side effect that doesn't need its own task, `ctx.execute(step_name, closure)` runs an async closure on the workflow's worker and journals its result:
+
+<$CodeSample path="rust/sdk-workflows/src/lib.rs" region="closure" />
+
+| | `execute_task(task, input)` | `execute("name", closure)` |
+|---|---|---|
+| Runs on | Any worker polling the queue | The worker running the workflow, during the activation |
+| Retries | Under the task's retry policy | None; an error is returned to the workflow |
+| Timeout | The task's `timeout` (300 s by default) | None |
+| Reuse and testing | Shared by workflows, mockable in tests | Local to the workflow |
+
+Both are at least once: a step that ran but whose result was never journaled, because a worker died at the wrong moment, runs again. Make side effects idempotent ([Tasks](/guides/sdk/rust/tasks#idempotency)).
+
+---
+
+## Timers
+
+<$CodeSample path="rust/sdk-workflows/src/lib.rs" region="timers" />
+
+`ctx.sleep` starts a durable timer that the engine fires, so it holds across worker restarts and no worker is busy while it waits. Its id comes from the step's position in the code; `sleep_with_id` lets you choose it.
+
+---
+
+## Child Workflows
+
+<$CodeSample path="rust/sdk-workflows/src/lib.rs" region="child" />
+
+- `execute_child_workflow(type, input)` starts a child and waits for its result. `start_child_workflow(type, input)` returns a `ChildWorkflowHandle` straight away, so you can start several children before waiting on any of them; `handle.result()` waits, and the handle also has `send_event` and `cancel`.
+- `ChildWorkflowOptions` sets the child's `workflow_id`, `execution_timeout`, `task_queue` (the parent's by default) and `orphan_policy`: what happens to the child when the parent closes first. `OrphanPolicy::Cancel` (the default) asks the child to cancel, `Terminate` ends it at once, and `Abandon` leaves it running.
+- Without a `workflow_id`, the child's id is derived from its position in the parent's code. Derive it from `ctx.workflow_id()` as above when you want it to be unique and recognizable.
+- A child that fails, is cancelled, terminated or times out surfaces in the parent as `WorkflowError::ChildWorkflowFailed`.
+
+---
+
+## Events
+
+Clients send events to a running workflow with `handle.send_event(name, payload)` ([Client](/guides/sdk/rust/client#workflow-handles)). The workflow receives them by name:
+
+<$CodeSample path="rust/sdk-workflows/src/lib.rs" region="events" />
+
+- Events of one name are delivered oldest first. An event that arrives before the workflow waits for it is kept until it does.
+- `wait_for_event_with_timeout` returns `Ok(None)` when the timeout passes first. The deadline is a durable timer, so it holds while no worker is running the workflow. An event that arrives after the deadline is kept for the next wait on that name.
+
+---
+
+## Handling Failures
+
+A task that fails for good, because its attempts are used up or it failed with a non-retryable error, is returned to the workflow as `Error::Workflow(WorkflowError::TaskFailed { task_type, attempts, reason, .. })`. The workflow can handle it or return it, which fails the workflow:
+
+<$CodeSample path="rust/sdk-workflows/src/lib.rs" region="failures" />
+
+<Admonition type="caution">
+
+While a task, timer, child or event is still pending, the step returns a *suspension* error: `Error::Workflow(WorkflowError::Suspended { .. })`, for which `error.is_suspend()` is true. It is how the SDK hands control back to the worker, and it must reach the worker unchanged. Match the errors you mean to handle and return everything else, as above. A catch-all arm such as `Err(_) => ...` treats every step that hasn't finished yet as failed, so a healthy workflow would take its failure path on its first activation.
+
+</Admonition>
+
+A workflow that returns an error fails. It is not retried unless it was started with a retry policy ([Client](/guides/sdk/rust/client#retrying-a-workflow)).
+
+---
+
+## Queries, Updates and Workflow State
+
+`ctx.set_state` and `ctx.get_state` keep JSON values by key for the current run. The state is rebuilt by replay, like everything else in the workflow, so it is a convenient place for values that query handlers report.
+
+<$CodeSample path="rust/sdk-workflows/src/lib.rs" region="queries" />
+
+- A **query** handler is a synchronous `Fn() -> R` that takes no arguments. Clients call it with `handle.query(name, ())`. It reads; it should not change state.
+- An **update** handler is an async `Fn(I) -> Future<Output = Result<R>>`. Clients call it with `handle.update(name, args)` and wait for its result, which is journaled.
+- Every workflow also answers the built-in queries `workflow_id`, `workflow_type`, `run_id`, `is_replaying`, `attempt`, `version`, `namespace`, `task_queue` and `workflow_info` (all of these as one JSON object).
+
+---
+
+## Determinism
+
+### Deterministic helpers
+
+<$CodeSample path="rust/sdk-workflows/src/lib.rs" region="deterministic" />
+
+- `ctx.rand()` is seeded from the workflow id and advances with each draw: `uuid()`, `random()` (a float in `[0, 1)`), `random_range(range)`, `bool()`, `choose(&items)`, `choose_multiple(&items, n)` and `shuffle(&mut items)`.
+- `ctx.time().now()` is seconds since the UNIX epoch, read from the journal: the workflow's start, then the moment the engine journaled each result, timer or event the workflow has received. It moves forward only as the workflow receives things, and is the same at each point on every replay. `started_at()`, `elapsed()`, `elapsed_secs()` and `elapsed_millis()` use the same clock.
+
+### Logging
+
+The workflow function runs again on every replay, so a log line in it repeats. Log from tasks, or skip logging while replaying:
+
+<$CodeSample path="rust/sdk-workflows/src/lib.rs" region="logging" />
+
+### What happens when code changes under a running workflow
+
+Each activation, the worker reports which journaled steps (tasks, timers and child workflows) the code reached. If a run's code skips a step the journal recorded and then issues new work or finishes, or issues different work at a position the journal already has, the activation is **held**: it is not applied, the run stays open with its journal unchanged, and the worker logs an error that names the workflow and run. The activation is handed back and tried again after 2 seconds, doubling up to 1 minute, until a worker whose code replays the journal picks it up.
+
+Not every change is caught. Reordering steps of different kinds (a task and a timer swapping places) and changing a timer's duration replay without error, against a journal that no longer matches the code.
+
+To change a workflow safely:
+
+- Let in-flight runs finish before deploying an incompatible change, or run the new code under a new workflow type (`#[workflow(name = "process_order_v2")]`) beside the old one.
+- Tag each worker with the code release it runs (`WorkerBuilder::version_id`), which the server records on each execution.
+- `ctx.version()` is a metadata label only. Don't branch on it.
+
+See [Determinism](/guides/core/workflows/determinism) for the concepts.
+
+---
+
+## Restarting with a Fresh History
+
+Every step a workflow takes is added to its journal, and replay reads all of it. A workflow that loops for a long time should restart itself now and then:
+
+<$CodeSample path="rust/sdk-workflows/src/lib.rs" region="restart" />
+
+`ctx.restart_fresh()` ends the run and starts a new one with the same workflow id, an empty history and no input. `restart_fresh_with(input, options)` passes an input, and its `RestartFreshOptions` can change the `workflow_type`, `task_queue` or `timeout` of the new run; changing the type moves a long-running workflow onto new code. Return straight after calling either. A client waiting on the original run's result receives the result of the run that finally completes.
+
+---
+
+## Payload Size
+
+Each payload, a workflow or task input or result, an event or an update, is limited by the engine to 8 MiB by default; the operator can change the limit. A task whose result is too large to send fails with the error type `PayloadTooLarge`, which is never retried. Every activation also carries the payloads the workflow has received, and a gRPC message is limited to 32 MiB by default (`ORCHER_MAX_MESSAGE_BYTES` on the worker, and the engine's own setting). Store large data elsewhere and pass a reference ([Patterns](/guides/sdk/rust/patterns#passing-large-data-by-reference)).
+
+---
+
+## Workflow Metadata
+
+<$CodeSample path="rust/sdk-workflows/src/lib.rs" region="metadata" />
+
+`ctx.attempt()` counts from 1 and increases when a workflow started with a retry policy runs again. `ctx.is_replaying()` is true while the activation is replaying journaled steps.
+
+---
+
+## WorkflowContext Reference
+
+| Method | Description |
+|--------|-------------|
+| `execute_task(task, input)` | Run a task and wait for its result |
+| `execute(name, closure)` | Run an inline step on this worker and journal its result |
+| `sleep(duration)` / `sleep_with_id(id, duration)` | Durable timer |
+| `wait_for_event(name)` | Wait for the next event with this name |
+| `wait_for_event_with_timeout(name, duration)` | Same, or `None` after the timeout |
+| `execute_child_workflow(type, input)` | Start a child workflow and wait for its result |
+| `start_child_workflow(type, input)` | Start a child workflow and return a handle |
+| `execute_child_workflow_with_options` / `start_child_workflow_with_options` | The same with `ChildWorkflowOptions` |
+| `create_session(options)` | Pin tasks to one worker ([Sessions](/guides/sdk/rust/sessions)) |
+| `set_state(key, &value)` / `get_state(key)` | Per-run state, as JSON |
+| `register_query_handler(name, handler)` | Answer a query |
+| `register_update_handler(name, handler)` | Accept an update |
+| `rand()` / `time()` | Deterministic randomness and time |
+| `restart_fresh()` / `restart_fresh_with(input, options)` | End the run and start a fresh one |
+| `workflow_id()`, `run_id()`, `workflow_type()`, `namespace()`, `task_queue()`, `attempt()` | Metadata |
+| `is_replaying()` | Whether the activation is replaying journaled steps |
+| `version()` | Metadata label; don't branch on it |
+
+---
+
+## Next Steps
+
+- [Tasks](/guides/sdk/rust/tasks): retries, non-retryable errors, heartbeats, cancellation
+- [Client](/guides/sdk/rust/client): starting workflows, events, queries and updates
+- [Patterns](/guides/sdk/rust/patterns): sagas, parallel tasks, fan-out/fan-in

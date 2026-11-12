@@ -1,0 +1,270 @@
+---
+id: api-schedules
+title: Schedule Endpoints
+sidebar_label: Schedules
+---
+
+Manage cron-based recurring workflow executions. Schedules store a cron expression and a workflow configuration (`task_template`); when a schedule fires, the platform starts a new workflow execution automatically.
+
+## Create Schedule
+
+```bash
+POST /api/v1/schedules
+Content-Type: application/json
+
+{
+  "name": "nightly-report",
+  "description": "Generate daily analytics report at 2 AM UTC",
+  "cronExpression": "0 0 2 * * *",
+  "timezone": "UTC",
+  "taskTemplate": {
+    "workflowType": "daily_report",
+    "taskQueue": "reports",
+    "namespace": "production",
+    "input": {
+      "recipients": ["team@example.com"]
+    }
+  },
+  "maxInstances": 1,
+  "overlapPolicy": "skip",
+  "maxRuns": 365,
+  "tags": ["analytics", "daily"]
+}
+```
+
+**Response (201 Created):**
+
+```json
+{
+  "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "name": "nightly-report",
+  "description": "Generate daily analytics report at 2 AM UTC",
+  "cronExpression": "0 0 2 * * *",
+  "timezone": "UTC",
+  "enabled": true,
+  "taskTemplate": {
+    "workflow_type": "daily_report",
+    "task_queue": "reports",
+    "namespace": "production",
+    "input": { "recipients": ["team@example.com"] }
+  },
+  "maxInstances": 1,
+  "overlapPolicy": "skip",
+  "maxRuns": 365,
+  "status": "active",
+  "nextRunAt": "2024-01-08T02:00:00Z",
+  "runCount": 0,
+  "successCount": 0,
+  "failureCount": 0,
+  "tags": ["analytics", "daily"],
+  "metadata": {},
+  "createdAt": "2024-01-07T15:30:00Z",
+  "updatedAt": "2024-01-07T15:30:00Z"
+}
+```
+
+### Task Template
+
+The `taskTemplate` object configures which workflow to start on each trigger:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `workflowType` | string | *required* | Workflow name registered by workers |
+| `taskQueue` | string | `"default"` | Task queue for the workflow |
+| `namespace` | string | `"default"` | Namespace for the execution |
+| `input` | object | `null` | Input payload passed to the workflow |
+
+### Overlap Policy
+
+Controls behavior when the previous execution is still running when a new trigger fires:
+
+| Value | Description |
+|-------|-------------|
+| `skip` | Skip the new run (default) |
+| `queue` | Queue the new run to start after the current one completes |
+| `replace` | Cancel the running execution and start a new one |
+| `parallel` | Run concurrently (up to `maxInstances`) |
+
+### Cron Expression Format
+
+Uses 6-field cron expressions (seconds included):
+
+| Field        | Values                  |
+|--------------|-------------------------|
+| Second       | 0-59                    |
+| Minute       | 0-59                    |
+| Hour         | 0-23                    |
+| Day of Month | 1-31                    |
+| Month        | 1-12 or JAN-DEC        |
+| Day of Week  | 0-6 or SUN-SAT         |
+
+**Examples:**
+
+| Expression          | Description              |
+|---------------------|--------------------------|
+| `0 0 2 * * *`       | Every day at 2:00 AM     |
+| `0 */15 * * * *`    | Every 15 minutes         |
+| `0 0 9 * * MON-FRI` | Weekdays at 9:00 AM     |
+
+---
+
+## Get Schedule
+
+```bash
+GET /api/v1/schedules/:id
+```
+
+**Response:**
+
+```json
+{
+  "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "name": "nightly-report",
+  "cronExpression": "0 0 2 * * *",
+  "timezone": "UTC",
+  "enabled": true,
+  "status": "active",
+  "nextRunAt": "2024-01-08T02:00:00Z",
+  "lastRunAt": "2024-01-07T02:00:00Z",
+  "runCount": 30,
+  "successCount": 29,
+  "failureCount": 1,
+  "...": "..."
+}
+```
+
+---
+
+## Update Schedule
+
+Partial update — only provided fields are changed.
+
+```bash
+PUT /api/v1/schedules/:id
+Content-Type: application/json
+
+{
+  "cronExpression": "0 0 3 * * *",
+  "description": "Moved to 3 AM UTC"
+}
+```
+
+**Response:** Updated schedule object (same shape as create response).
+
+---
+
+## Delete Schedule
+
+```bash
+DELETE /api/v1/schedules/:id
+```
+
+**Response:**
+
+```json
+{
+  "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "status": "deleted",
+  "message": "Schedule deleted successfully"
+}
+```
+
+---
+
+## List Schedules
+
+```bash
+GET /api/v1/schedules?status=active&name=report&limit=50&offset=0
+```
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `status` | string | — | Filter by status (`active`, `paused`, `completed`, `failed`) |
+| `name` | string | — | Filter by name (case-insensitive substring match) |
+| `limit` | integer | 50 | Results per page |
+| `offset` | integer | 0 | Pagination offset |
+
+**Response:**
+
+```json
+{
+  "schedules": [
+    {
+      "id": "a1b2c3d4-...",
+      "name": "nightly-report",
+      "cronExpression": "0 0 2 * * *",
+      "status": "active",
+      "nextRunAt": "2024-01-08T02:00:00Z",
+      "runCount": 30,
+      "..."
+    }
+  ],
+  "total": 12,
+  "count": 12,
+  "offset": 0
+}
+```
+
+---
+
+## Pause Schedule
+
+Temporarily stop a schedule from firing without deleting it. The schedule retains its configuration and run history.
+
+```bash
+POST /api/v1/schedules/:id/pause
+```
+
+**Response:**
+
+```json
+{
+  "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "status": "paused",
+  "message": "Schedule paused successfully"
+}
+```
+
+---
+
+## Resume Schedule
+
+Resume a paused schedule. The next fire time is recalculated from the current time.
+
+```bash
+POST /api/v1/schedules/:id/resume
+```
+
+**Response:**
+
+```json
+{
+  "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "status": "active",
+  "message": "Schedule resumed successfully"
+}
+```
+
+---
+
+## Schedule vs. Durable Timer Loop
+
+Orcher supports two patterns for recurring work:
+
+| | Cron Schedule (this API) | Durable Timer Loop |
+|---|---|---|
+| **How** | Server-side cron trigger | `ctx.sleep()` in workflow code |
+| **Lifecycle** | Independent of worker | Tied to a long-running workflow execution |
+| **Management** | CRUD via REST API | Managed through workflow execution |
+| **Use when** | Standard cron jobs, ops-managed schedules | Complex recurring logic with state between iterations |
+
+See [Scheduled Jobs](/guides/use-cases/background-tasks/scheduled-jobs) for the durable timer loop pattern.
+
+---
+
+## Next Steps
+
+- [Workflow Endpoints](/guides/api/workflows) — Execute and monitor workflows
+- [Errors & Limits](/guides/api/errors-and-limits) — Error handling and rate limiting

@@ -1,0 +1,159 @@
+---
+id: rust-tasks
+title: Tasks
+description: Define tasks with the Rust SDK — attributes, retry policies, non-retryable errors, task groups, heartbeats, cancellation and idempotency
+sidebar_label: 'Tasks'
+---
+
+Tasks do the work that touches the outside world: API calls, database writes, file operations. A workflow schedules a task, any worker polling the workflow's task queue runs it, and the engine journals its result. A failed attempt is retried under the task's retry policy.
+
+Tasks run **at least once**. The result of a task is journaled once, and replaying the workflow returns it without running the task again. But an attempt can run and then fail to report its result, for example when its worker dies, and the engine then runs it again. Write tasks so that running one twice does no harm ([Idempotency](#idempotency)).
+
+There are two ways to define tasks:
+
+- **Standalone tasks**: one `#[task]` function each.
+- **Task groups**: several `#[task]` methods on a struct, under `#[tasks]`, with shared defaults.
+
+---
+
+## Standalone Tasks
+
+<$CodeSample path="rust/sdk-tasks/src/lib.rs" region="standalone" />
+
+A task function is `async`, takes `TaskContext` first and exactly one input after it, and returns `orcher_sdk::Result<T>`. Use a struct for several values and `()` for none. The macro keeps the function body as `<name>_impl` and generates a constant with the function's name, which workflows pass to `execute_task`:
+
+<$CodeSample path="rust/sdk-tasks/src/lib.rs" region="call" />
+
+### `#[task]` attributes
+
+| Attribute | Default | Effect |
+|-----------|---------|--------|
+| `name` | Function name | The name the task is registered and scheduled under. See the caution below. |
+| `retry` | | Maximum attempts **in all**, including the first, with exponential backoff: 1 s, doubling, at most 60 s between attempts. `retry = 1` means no retries. |
+| `retry_policy(max_attempts, initial_interval, max_interval, backoff_coefficient)` | 3, 1, 60, 2.0 | The full policy, intervals in seconds. Takes precedence over `retry`. |
+| `non_retryable_errors = ["Type", ...]` | | Error types that fail the task at once ([Non-retryable errors](#non-retryable-errors)). |
+| `timeout` / `timeout_mins` | 300 s | Limit on one attempt, in seconds or minutes. |
+| `heartbeat_timeout` | The engine's (60 s unless configured) | Seconds without a heartbeat before the attempt is considered lost. Must be less than `timeout`. |
+
+A task with no retry attributes gets 3 attempts with the default backoff.
+
+`description`, `version`, `namespace`, `task_queue`, `priority`, `max_concurrent`, `rate_limit`, `resources(...)` and `memory` are accepted but not applied in 0.7. A task always runs on the task queue of the workflow that schedules it, or of its [session](/guides/sdk/rust/sessions).
+
+<Admonition type="caution">
+
+On a standalone `#[task]`, leave `name` unset or set it to the function name. In 0.7 the generated reference schedules the task under the *function* name, while the worker registers it under `name`, so `#[task(name = "charge")] async fn charge_card(...)` registers `charge` but `execute_task(charge_card, ...)` schedules `charge_card`. Task groups don't have this problem.
+
+</Admonition>
+
+Retry policies and timeouts are looked up by task name on the worker that runs the **workflow**, when it schedules the task. If tasks and workflows are built into different binaries, link the task definitions into the workflow's worker too, or the task runs with the defaults.
+
+---
+
+## Retry Policies and Errors
+
+### Non-retryable errors
+
+<$CodeSample path="rust/sdk-tasks/src/lib.rs" region="retry-policy" />
+
+- `TaskError::application(error_type, message)` fails the attempt under `error_type`. It is retried unless the task's `non_retryable_errors` lists that type.
+- `TaskError::non_retryable(error_type, message)` is never retried, whatever the policy says.
+- Any other error fails the attempt and is retried while attempts remain.
+
+`TaskError` is in `orcher_sdk::error`, not the prelude. When the last attempt fails, the workflow receives `WorkflowError::TaskFailed` with the number of attempts made ([Handling Failures](/guides/sdk/rust/workflows#handling-failures)).
+
+### Errors from other libraries
+
+`std::io::Error`, `serde_json::Error` and `anyhow::Error` convert into `orcher_sdk::Error` with `?`. Errors from other crates don't; map them, and pick an error type a retry policy can name:
+
+<$CodeSample path="rust/sdk-tasks/src/lib.rs" region="foreign-errors" />
+
+---
+
+## Task Groups
+
+Group related tasks on a struct with `#[tasks]`. Attributes on `#[tasks(...)]` are defaults for every task in the block, and a method's own `#[task(...)]` overrides them:
+
+<$CodeSample path="rust/sdk-tasks/src/lib.rs" region="group" />
+
+Each task is registered under its method name (or its `name`), not prefixed with the struct, so method names must be unique across the worker's tasks. Workflows name a grouped task through the associated constant, `PaymentTasks::capture`. Task methods take `TaskContext` first, not `&self`; methods without `#[task]` are kept as written.
+
+`#[tasks]` accepts `retry`, `timeout`, `timeout_mins` and `heartbeat_timeout` as defaults that take effect, plus the same metadata attributes as `#[task]`.
+
+---
+
+## Heartbeats
+
+The worker heartbeats every running task on its own, whatever the task's code does, so a long task needs no heartbeat code to stay alive. If its worker dies, the heartbeats stop, the engine treats the attempt as lost once `heartbeat_timeout` passes, and the task is retried on another worker.
+
+`ctx.heartbeat()` and `ctx.heartbeat_with_details(details)` add a heartbeat from the task's code, folded into the worker's own: they never wait, and calling them often doesn't send more. Use `heartbeat_with_details` to record progress:
+
+<$CodeSample path="rust/sdk-tasks/src/lib.rs" region="heartbeat" />
+
+`ctx.heartbeat_timeout()` returns the heartbeat timeout the attempt was given, if any. Both calls fail once the task has been cancelled.
+
+---
+
+## Cancellation
+
+When the engine asks a task to stop, for example because its workflow was cancelled, the worker learns of it through the task's heartbeats and cancels the task's token. Check it between units of work:
+
+<$CodeSample path="rust/sdk-tasks/src/lib.rs" region="cancel-poll" />
+
+Or race the work against it:
+
+<$CodeSample path="rust/sdk-tasks/src/lib.rs" region="cancel-select" />
+
+---
+
+## Attempts
+
+`ctx.attempt()` is the attempt number, starting at 1. `ctx.is_retry()` is true from the second attempt on.
+
+<$CodeSample path="rust/sdk-tasks/src/lib.rs" region="attempts" />
+
+---
+
+## Idempotency
+
+`ctx.task_id()` is the same on every attempt of a task and differs between the tasks a workflow schedules, so with the workflow id it makes an idempotency key for the systems a task calls:
+
+<$CodeSample path="rust/sdk-tasks/src/lib.rs" region="idempotency" />
+
+Don't generate a fresh id (`Uuid::new_v4()`) inside a task for this: each attempt would get a different one.
+
+---
+
+## CPU-Heavy Work
+
+Task code runs on the worker's Tokio runtime, which also runs its polls and heartbeats. Move CPU-heavy work to the blocking pool:
+
+<$CodeSample path="rust/sdk-tasks/src/lib.rs" region="blocking" />
+
+---
+
+## Payload Size
+
+A task's input and result are each limited by the engine to 8 MiB by default. A result too large to send fails the task with the error type `PayloadTooLarge`, which is not retried. Return a reference to large data instead ([Patterns](/guides/sdk/rust/patterns#passing-large-data-by-reference)).
+
+---
+
+## TaskContext Reference
+
+| Method | Description |
+|--------|-------------|
+| `heartbeat()` | Add a heartbeat from the task's code (the worker heartbeats on its own) |
+| `heartbeat_with_details(Some(details))` | The same, with serializable progress details |
+| `is_cancelled()` | Whether the engine has asked the task to stop |
+| `cancellation_token()` | The token that is cancelled then, for `tokio::select!` |
+| `attempt()` / `is_retry()` | Attempt number from 1; whether this is a retry |
+| `workflow_id()` / `run_id()` / `task_id()` | Identifiers; `task_id()` is stable across attempts |
+| `heartbeat_timeout()` | The heartbeat timeout this attempt was given |
+| `logger()` | The task's identifiers, for structured logging |
+
+---
+
+## Next Steps
+
+- [Workflows](/guides/sdk/rust/workflows): scheduling tasks and handling their failures
+- [Worker](/guides/sdk/rust/worker): concurrency and task queues
+- [Testing](/guides/sdk/rust/testing): mocking tasks

@@ -1,0 +1,57 @@
+---
+id: 'error-handling'
+title: 'Error Handling'
+description: 'Learn how to handle errors in Orcher workflows. Understand retry policies, compensation patterns, circuit breakers, and graceful degradation strategies.'
+sidebar_label: 'Error Handling'
+---
+
+Error handling is critical for building resilient workflows. Orcher provides multiple strategies for handling failures — from automatic retries with configurable backoff policies, to the saga pattern — where you pair each step with a compensating action to undo completed work on failure — to circuit breakers that prevent cascading failures. You can also implement graceful degradation with fallback data sources, set timeouts to bound long-running operations, and route persistent failures to dead letter queues for manual inspection. This guide covers each strategy with complete examples.
+
+---
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/error-handling/retry-compensation" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Retry & Compensation</h3>
+      <p className="text-sm text-foreground-light">
+        Automatic retry with configurable backoff, plus saga compensation patterns you compose
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/error-handling/error-codes" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Error Codes</h3>
+      <p className="text-sm text-foreground-light">
+        The code vocabulary shared across SDKs, and what to branch on instead of message text
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/error-handling/resilience-patterns" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Resilience Patterns</h3>
+      <p className="text-sm text-foreground-light">
+        Circuit breakers, graceful degradation, and timeout handling
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/error-handling/dead-letter-queue" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Dead Letter Queue</h3>
+      <p className="text-sm text-foreground-light">
+        Route persistent failures to a DLQ for manual inspection and replay
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/error-handling/best-practices" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Best Practices & Troubleshooting</h3>
+      <p className="text-sm text-foreground-light">
+        Guidelines for retry policies, idempotent compensation, logging, timeouts, and common issues
+      </p>
+    </div>
+  </Link>
+</div>

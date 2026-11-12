@@ -1,0 +1,330 @@
+---
+id: 'parent-child-map-reduce'
+title: 'Map-Reduce Pattern'
+description: 'Split large datasets into batches, process in parallel with child workflows, and aggregate results with Orcher'
+sidebar_label: 'Map-Reduce'
+---
+
+## Map-Reduce Pattern
+
+The map-reduce pattern splits a large dataset into smaller batches, processes each batch as a separate child workflow (the "map" phase), and then aggregates the results in the parent (the "reduce" phase). This distributes work across multiple workers for parallel processing while maintaining a single parent that tracks overall progress and handles partial failures.
+
+<div className="not-prose my-8 max-w-md mx-auto">
+  <div className="flex flex-col items-center">
+    {/* Input */}
+    <div className="border bg-surface-75 px-5 py-2 text-center w-full">
+      <div className="text-xs font-medium text-foreground">1,000 Records</div>
+      <div className="text-[10px] text-foreground-muted mt-0.5">large dataset</div>
+    </div>
+    <div className="w-px h-3 bg-border-strong" />
+    {/* Split */}
+    <div className="border bg-background px-5 py-2 text-center w-full">
+      <div className="text-xs font-medium text-foreground">Split into Batches</div>
+      <div className="text-[10px] text-foreground-muted mt-0.5">chunk_size = 100</div>
+    </div>
+    <div className="w-px h-3 bg-border-strong" />
+    {/* Map phase */}
+    <div className="text-[10px] font-mono uppercase tracking-wider text-foreground-muted mb-1">map — parallel child workflows</div>
+    <div className="relative w-full">
+      <div className="absolute top-0 h-px bg-border-strong" style={{ left: 'calc(10% - 0.2rem)', right: 'calc(10% - 0.2rem)' }} />
+      <div className="grid grid-cols-5 gap-1.5">
+        {['1–100', '101–200', '201–300', '...', '901–1k'].map((batch, i) => (
+          <div key={i} className="flex flex-col items-center">
+            <div className="w-px h-4 bg-border-strong" />
+            <div className={`border w-full py-2 px-1 text-center ${batch === '...' ? 'border-dashed bg-transparent' : 'border-dashed bg-background'}`}>
+              <div className="text-[9px] font-medium text-foreground">{batch}</div>
+              {batch !== '...' && <div className="text-[8px] text-foreground-muted mt-0.5">child wf</div>}
+            </div>
+            <div className="w-px h-4 bg-border-strong" />
+          </div>
+        ))}
+      </div>
+      <div className="absolute bottom-0 h-px bg-border-strong" style={{ left: 'calc(10% - 0.2rem)', right: 'calc(10% - 0.2rem)' }} />
+    </div>
+    {/* Reduce phase */}
+    <div className="text-[10px] font-mono uppercase tracking-wider text-foreground-muted mt-1">reduce — aggregate in parent</div>
+    <div className="w-px h-3 bg-border-strong" />
+    <div className="border bg-surface-100 px-5 py-2.5 text-center w-full">
+      <div className="text-xs font-medium text-foreground">Merge Results</div>
+      <div className="text-[10px] text-foreground-muted mt-0.5">combine · deduplicate · summarize</div>
+    </div>
+    <div className="w-px h-3 bg-border-strong" />
+    <div className="border bg-surface-75 px-5 py-2 text-center">
+      <div className="text-xs font-medium text-foreground">Final Result</div>
+    </div>
+  </div>
+</div>
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+// Child workflow - processes a batch of records
+#[workflow(name = "process_batch", version = "1.0.0")]
+pub async fn process_batch(
+    ctx: WorkflowContext,
+    batch: Vec<Record>,
+) -> Result<BatchResult> {
+    let mut processed = 0;
+    let mut failed = 0;
+
+    for record in batch {
+        match ctx.execute_task(process_record, record).await {
+            Ok(_) => processed += 1,
+            Err(_) => failed += 1,
+        }
+    }
+
+    Ok(BatchResult { processed, failed })
+}
+
+// Parent workflow - map-reduce coordinator
+#[workflow(name = "process_dataset", version = "1.0.0")]
+pub async fn process_dataset(
+    ctx: WorkflowContext,
+    records: Vec<Record>,
+) -> Result<DatasetResult> {
+    const BATCH_SIZE: usize = 100;
+
+    // Map: Split into batches and spawn child workflows
+    let batches: Vec<Vec<Record>> = records
+        .chunks(BATCH_SIZE)
+        .map(|chunk| chunk.to_vec())
+        .collect();
+
+    println!("Processing {} batches", batches.len());
+
+    let mut handles = Vec::new();
+    for (i, batch) in batches.into_iter().enumerate() {
+        let handle = ctx
+            .start_child_workflow("process_batch", batch)
+            .await?;
+
+        handles.push((i, handle));
+    }
+
+    // Reduce: Collect results from all batches
+    let mut total_processed = 0;
+    let mut total_failed = 0;
+
+    for (batch_num, handle) in handles {
+        match handle.result::<BatchResult>().await {
+            Ok(result) => {
+                println!("Batch {} complete: {} processed, {} failed",
+                    batch_num, result.processed, result.failed);
+                total_processed += result.processed;
+                total_failed += result.failed;
+            }
+            Err(e) => {
+                eprintln!("Batch {} failed: {}", batch_num, e);
+                total_failed += BATCH_SIZE;
+            }
+        }
+    }
+
+    Ok(DatasetResult {
+        total: records.len(),
+        processed: total_processed,
+        failed: total_failed,
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import {
+  Workflow, Tasks, Task, WorkflowContext, TaskContext, createTaskRefs
+} from '@orcher/sdk';
+
+interface BatchResult {
+  processed: number;
+  failed: number;
+}
+
+interface DatasetResult {
+  total: number;
+  processed: number;
+  failed: number;
+}
+
+@Tasks()
+class RecordTasks {
+  @Task({ name: 'processRecord' })
+  async processRecord(ctx: TaskContext, record: DataRecord): Promise<void> { /* ... */ }
+}
+
+const tasks = createTaskRefs(RecordTasks);
+
+// Child workflow - processes a batch of records
+@Workflow()
+class ProcessBatch {
+  async execute(ctx: WorkflowContext, batch: DataRecord[]): Promise<BatchResult> {
+    let processed = 0;
+    let failed = 0;
+
+    for (const record of batch) {
+      try {
+        await ctx.executeTask(tasks.processRecord, record);
+        processed++;
+      } catch (e) {
+        failed++;
+      }
+    }
+
+    return { processed, failed };
+  }
+}
+
+// Parent workflow - map-reduce coordinator
+@Workflow()
+class ProcessDataset {
+  async execute(ctx: WorkflowContext, records: DataRecord[]): Promise<DatasetResult> {
+    const BATCH_SIZE = 100;
+
+    // Map: Split into batches and spawn child workflows
+    const batches: DataRecord[][] = [];
+    for (let i = 0; i < records.length; i += BATCH_SIZE) {
+      batches.push(records.slice(i, i + BATCH_SIZE));
+    }
+
+    console.log(`Processing ${batches.length} batches`);
+
+    const handles = await Promise.all(
+      batches.map((batch, i) =>
+        ctx.startChildWorkflow('process_batch', batch).then((h) => ({ i, h })),
+      ),
+    );
+
+    // Reduce: Collect results from all batches
+    let totalProcessed = 0;
+    let totalFailed = 0;
+
+    for (const { i: batchNum, h: handle } of handles) {
+      try {
+        const result = await handle.result<BatchResult>();
+        console.log(
+          `Batch ${batchNum} complete: ${result.processed} processed, ${result.failed} failed`,
+        );
+        totalProcessed += result.processed;
+        totalFailed += result.failed;
+      } catch (e) {
+        console.error(`Batch ${batchNum} failed:`, e);
+        totalFailed += BATCH_SIZE;
+      }
+    }
+
+    return {
+      total: records.length,
+      processed: totalProcessed,
+      failed: totalFailed,
+    };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext, TaskContext
+
+@task(name="process_record")
+async def process_record(ctx: TaskContext, record: dict) -> None:
+    # ... process a single record
+    pass
+
+# Child workflow - processes a batch of records
+@workflow(name="process_batch", version="1.0.0")
+async def process_batch(ctx: WorkflowContext, batch: list[dict]) -> dict:
+    processed = 0
+    failed = 0
+
+    for record in batch:
+        try:
+            await ctx.execute_task(process_record, record)
+            processed += 1
+        except Exception:
+            failed += 1
+
+    return {"processed": processed, "failed": failed}
+
+# Parent workflow - map-reduce coordinator
+@workflow(name="process_dataset", version="1.0.0")
+async def process_dataset(ctx: WorkflowContext, records: list[dict]) -> dict:
+    BATCH_SIZE = 100
+
+    # Map: Split into batches and spawn child workflows
+    batches = [records[i:i + BATCH_SIZE] for i in range(0, len(records), BATCH_SIZE)]
+
+    print(f"Processing {len(batches)} batches")
+
+    handles = []
+    for i, batch in enumerate(batches):
+        handle = await ctx.start_child_workflow("process_batch", batch)
+        handles.append((i, handle))
+
+    # Reduce: Collect results from all batches
+    total_processed = 0
+    total_failed = 0
+
+    for batch_num, handle in handles:
+        try:
+            result = await handle.result()
+            print(
+                f"Batch {batch_num} complete: "
+                f"{result['processed']} processed, {result['failed']} failed"
+            )
+            total_processed += result["processed"]
+            total_failed += result["failed"]
+        except Exception as e:
+            print(f"Batch {batch_num} failed: {e}")
+            total_failed += BATCH_SIZE
+
+    return {
+        "total": len(records),
+        "processed": total_processed,
+        "failed": total_failed,
+    }
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/patterns/parent-child/best-practices" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Best Practices & Performance</h3>
+      <p className="text-sm text-foreground-light">
+        Guidelines for designing efficient parent-child hierarchies
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/parent-child/error-handling" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Error Handling & Monitoring</h3>
+      <p className="text-sm text-foreground-light">
+        Strategies for handling child failures and monitoring execution trees
+      </p>
+    </div>
+  </Link>
+</div>

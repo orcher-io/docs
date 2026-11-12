@@ -1,0 +1,267 @@
+---
+id: python-workflows
+title: Workflows
+description: Define workflows with the Python SDK, and use the WorkflowContext for tasks, timers, child workflows, events, state, queries and replay-safe time
+sidebar_label: 'Workflows'
+---
+
+A workflow is the function that decides what happens, in what order. The engine journals each step it takes, and every time the workflow resumes (after a task finishes, a timer fires or a worker restarts) the SDK replays the workflow code against that journal. Steps that already happened return their recorded results instead of running again.
+
+That replay is why workflow code must be **deterministic**: given the same journal, it must make the same calls in the same order. Do I/O in [tasks](/guides/sdk/python/tasks), and use `ctx.time`, `ctx.random` and `ctx.sleep()` instead of the clock, `random` and `asyncio.sleep`.
+
+---
+
+## Defining a workflow
+
+Decorate an `async` function whose first parameter is the `WorkflowContext`:
+
+<$CodeSample path="python/workflows/defining.py" region="function" />
+
+`name` is required, and is the type clients start. `version` is a label recorded on the execution for logs and metrics (see [Changing workflow code](#changing-workflow-code)); `description` is free text.
+
+A class with an `async def run(self, ctx, ...)` method works too. `orcher-sdk` 0.4.4 types the decorator for functions only, so mypy needs the `type: ignore` shown:
+
+<$CodeSample path="python/workflows/defining.py" region="class" />
+
+`@workflow` also accepts `cron_schedule=`, but in `orcher-sdk` 0.4.4 that value is only kept in the workflow's metadata: the worker doesn't send it to the engine. See [cron schedules](/guides/sdk/python/client#cron-schedules) for running a workflow on a schedule.
+
+---
+
+## Inputs and results
+
+A workflow's input arrives the way it was sent. A dict is spread into keyword arguments, any other single value is passed as one positional argument, and no input passes nothing:
+
+<$CodeSample path="python/workflows/inputs.py" region="workflow" />
+
+<$CodeSample path="python/workflows/inputs.py" region="start" />
+
+Several values in `args` arrive as **one** list argument, not as separate arguments, so send a dict when the workflow takes more than one parameter.
+
+Inputs and results travel as JSON: return dicts, lists, strings, numbers, booleans or `None` from a workflow.
+
+<Admonition type="caution">
+
+In `orcher-sdk` 0.4.4 a workflow whose result is falsy (`0`, `False`, `""`, `[]` or `{}`) reaches the caller as `None` ([sdk-py#6](https://github.com/orcher-io/sdk-py/issues/6)). Until that is fixed, wrap such a result, for example `{"count": 0}`.
+
+</Admonition>
+
+---
+
+## Running tasks
+
+Pass the task function itself, not its name, and its arguments as **keyword** arguments:
+
+<$CodeSample path="python/workflows/defining.py" region="call" />
+
+The first time the workflow reaches this line, the task is scheduled and the workflow suspends. When the task completes, the workflow is replayed and the call returns the task's result from the journal. Results travel as JSON. A function task (not a `@tasks` method) whose return annotation is a dataclass hands the workflow that dataclass, rebuilt from the JSON; otherwise the workflow gets the decoded JSON value, such as a dict.
+
+### Per-call options
+
+The retry policy, timeout and heartbeat timeout default to what `@task` declared; pass them to override for one call. `queue_timeout` bounds how long the task may wait for a worker to pick it up, separately from how long it may run:
+
+<$CodeSample path="python/workflows/executing.py" region="overrides" />
+
+### When a task fails
+
+When a task fails for good (its retries are used up, or the error is non-retryable), `execute_task` raises `TaskError` in the workflow. Catch it to take another path; leave it uncaught and the workflow fails:
+
+<$CodeSample path="python/workflows/executing.py" region="failure" />
+
+`except Exception` in workflow code is safe: the signal the SDK uses to suspend a workflow derives from `BaseException`, so it passes through. Don't put workflow steps in a `finally` block, though: `finally` also runs every time the workflow suspends.
+
+### Running tasks in parallel
+
+`await` suspends at the first task whose result isn't in the journal yet, so a loop of `await ctx.execute_task(...)` runs its tasks one after another. To run them at the same time, schedule them together with `asyncio.gather`:
+
+<$CodeSample path="python/workflows/executing.py" region="parallel" />
+
+### Inline steps
+
+`ctx.execute()` runs a function inside the workflow worker once and journals its result. On replay the function doesn't run again; the call returns the journaled value. It suits a quick, read-only lookup that doesn't need its own retry policy or worker:
+
+<$CodeSample path="python/workflows/executing.py" region="closure" />
+
+The function takes no arguments and its result must be JSON-serializable. A step that raises is not journaled, so it runs again on the next activation. Anything that needs retries, a timeout or a different worker belongs in a task.
+
+---
+
+## Timers
+
+`ctx.sleep()` starts a durable timer. It takes a `timedelta`; a bare number is rejected because its unit would be ambiguous:
+
+<$CodeSample path="python/workflows/timers.py" region="timers" />
+
+No worker is busy while a timer runs, so a workflow can wait for days or months.
+
+---
+
+## Child workflows
+
+`execute_child_workflow` starts another workflow by its type name and waits for its result. A failed, canceled or terminated child raises `WorkflowError` in the parent:
+
+<$CodeSample path="python/workflows/children.py" region="execute" />
+
+`start_child_workflow` returns a handle without waiting, so several children can run at once:
+
+<$CodeSample path="python/workflows/children.py" region="handles" />
+
+Children run on the parent's task queue unless you pass `task_queue=`. Without a `workflow_id` the SDK derives one from the step's position, which is the same on every replay; give one when you want to address the child yourself. A child's `args` follow the same rules as a workflow's [input](#inputs-and-results).
+
+A handle can also send the child an event or cancel it. Both are journaled, so a replay doesn't repeat them:
+
+<$CodeSample path="python/workflows/children.py" region="signal" />
+
+---
+
+## Events
+
+An event is a named message sent to a running workflow. `wait_for_event` waits until one with that name arrives and returns its payload:
+
+<$CodeSample path="python/workflows/events.py" region="wait" />
+
+`wait_for_event_with_timeout` takes a `timedelta` and raises `TimeoutError` if the deadline comes first. The deadline is a durable timer, so it holds while no worker is running the workflow:
+
+<$CodeSample path="python/workflows/events.py" region="timeout" />
+
+Events that arrive before the workflow waits for them are kept, and each wait takes the oldest. Send one from a client:
+
+<$CodeSample path="python/workflows/send_event.py" region="client" />
+
+Or from another workflow, journaled so a replay doesn't send it again:
+
+<$CodeSample path="python/workflows/events.py" region="send" />
+
+---
+
+## State, queries and updates
+
+`ctx.set_state()` and `ctx.get_state()` keep key-value state in the workflow's memory. It isn't stored separately: replay rebuilds it by running the workflow code again. Outside the workflow it can only be read through a query.
+
+### Queries
+
+A query handler returns a value computed from the workflow's state, without changing it. Register one from the workflow; it receives the context as its first argument:
+
+<$CodeSample path="python/workflows/state.py" region="query" />
+
+The `@query` decorator registers a handler under one name for every workflow the worker runs:
+
+<$CodeSample path="python/workflows/state.py" region="query-decorator" />
+
+Queries are answered by a worker running the workflow, so they work only while the run is open and a worker for its queue is up.
+
+### Updates
+
+An update handler receives arguments from a client and returns a result to it:
+
+<$CodeSample path="python/workflows/state.py" region="update" />
+
+<$CodeSample path="python/workflows/query_client.py" region="client" />
+
+<Admonition type="caution">
+
+State an update handler sets lasts only until the workflow's next activation, which rebuilds state by replaying the workflow code. To change what a workflow does, send it an [event](#events) and have the workflow act on it.
+
+</Admonition>
+
+---
+
+## Time and randomness
+
+`ctx.time` and `ctx.random` give the same answers on every replay:
+
+<$CodeSample path="python/workflows/determinism.py" region="helpers" />
+
+- `ctx.time.now()` is not the wall clock. It starts at the moment the engine journaled the workflow's start, and moves forward each time the workflow receives something it waited for (a task result, a fired timer, a child's outcome or an event) to when the engine journaled that. It doesn't move while the code runs between those points. `ctx.time.started_at()` never moves, and `ctx.time.elapsed()` is the difference.
+- `ctx.random` is seeded from the run's ids and offers `random()`, `randint(a, b)`, `choice(seq)`, `shuffle(seq)`, `sample(population, k)` and `uuid()` (a string).
+- `ctx.replaying` is `True` while the code is catching up with the journal. Use it to keep logs from repeating on every replay, never to change what the workflow does.
+
+---
+
+## Changing workflow code
+
+On replay the SDK checks the code against the journal. A run whose code no longer matches what it recorded is **held**: the activation is not applied, the error is reported, and the run is retried with backoff. Nothing is lost, and a run that was held because of a bad deploy continues once the code it needs is running again.
+
+What is caught:
+
+- code that no longer reaches a step the journal recorded, for example a task call that was removed; and
+- code that issues different work at a recorded position, for example a different task where another used to be.
+
+What is **not** caught (tracked in [sdk-core#14](https://github.com/orcher-io/sdk-core/issues/14)):
+
+- reordering steps of different kinds, such as moving a timer before a task; and
+- changing a timer's duration.
+
+Step ids come from each step's position in the code and its name (`charge_1`, `timer_2`, `child_3`), so the safe changes are ones that leave existing runs' recorded steps where they were. To change a workflow with runs in flight:
+
+- Give each worker a [`version_id`](/guides/sdk/python/worker#versions) for the code it runs. The engine binds an execution to the version of the worker that first claims it, so it keeps replaying against that code.
+- Or put the new logic under a new workflow name and start new runs there, leaving old runs on the old code.
+- Or [reset](#reset) affected runs to a point before the change.
+
+`ctx.version` returns the `version=` label from `@workflow`. It is not a replay mechanism: don't branch on it.
+
+---
+
+## Restart with fresh history
+
+A workflow that loops for a long time accumulates a long journal, which every replay reads. `ctx.restart_fresh()` ends the current run and starts a new one with an empty journal and the input you pass; nothing after the call runs:
+
+<$CodeSample path="python/workflows/restart.py" region="restart" />
+
+Pass `workflow_type=` or `task_queue=` to continue as a different workflow or on another queue.
+
+---
+
+## Reset
+
+Resetting rewinds a run to an event in its journal and runs it on from there with fresh decisions. It's done from a client:
+
+<$CodeSample path="python/workflows/reset.py" region="reset" />
+
+Find the event id with `orcher workflow history`:
+
+```bash
+orcher workflow history order-12345
+```
+
+---
+
+## Workflow metadata
+
+<$CodeSample path="python/workflows/metadata.py" region="metadata" />
+
+`ctx.info` also has `attempt` and `started_at`. `ctx.execution` returns the `workflow_id` and `run_id` as a `WorkflowExecution`.
+
+---
+
+## WorkflowContext reference
+
+| Method or property | Description |
+|---|---|
+| `await ctx.execute_task(fn, **kwargs)` | Run a task and return its result; raises `TaskError` if it fails for good |
+| `await ctx.execute(name, fn)` | Run a no-argument function once and journal its result |
+| `await ctx.sleep(timedelta)` | Durable timer |
+| `await ctx.sleep_with_id(id, timedelta)` | Durable timer with an id you choose |
+| `await ctx.execute_child_workflow(type, *, workflow_id=None, args=(), task_queue=None)` | Start a child workflow and return its result |
+| `await ctx.start_child_workflow(type, *, workflow_id=None, args=(), task_queue=None)` | Start a child workflow and return a `ChildWorkflowHandle` (`result()`, `send_event()`, `cancel()`) |
+| `await ctx.cancel_child(workflow_id)` | Cancel a child workflow |
+| `await ctx.wait_for_event(name)` | Wait for an event and return its payload |
+| `await ctx.wait_for_event_with_timeout(name, timedelta)` | The same, raising `TimeoutError` at the deadline |
+| `await ctx.send_event(workflow_id, name, data=None)` | Send an event to another workflow |
+| `ctx.set_state(key, value)` / `ctx.get_state(key, default=None)` | In-memory workflow state |
+| `ctx.register_query_handler(name, fn)` | Answer a query; `fn(ctx, ...)` |
+| `ctx.register_update_handler(name, fn)` | Accept an update; `fn(ctx, ...)` |
+| `await ctx.create_session(options=None)` | Pin tasks to one worker; see [Sessions](/guides/sdk/python/sessions) |
+| `ctx.restart_fresh(input=None, *, workflow_type=None, task_queue=None)` | End this run and start a new one with an empty journal |
+| `ctx.time` | Replay-safe clock: `now()`, `started_at()`, `elapsed()` |
+| `ctx.random` | Replay-safe random numbers |
+| `ctx.replaying` | Whether the code is catching up with the journal |
+| `ctx.info` / `ctx.execution` | `WorkflowInfo` / `WorkflowExecution` |
+| `ctx.version` | The `@workflow` version label |
+
+---
+
+## Next steps
+
+- [Tasks](/guides/sdk/python/tasks): retries, heartbeats and cancellation
+- [Client](/guides/sdk/python/client): start workflows and read their results
+- [Patterns](/guides/sdk/python/patterns): compensation, fan-out and approvals

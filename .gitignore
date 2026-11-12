@@ -1,0 +1,19 @@
+node_modules/
+.next/
+.turbo/
+dist/
+build/
+.DS_Store
+.env
+.env.local
+.env.*.local
+*.tsbuildinfo
+next-env.d.ts
+__generated__/
+
+# generated at build time
+public/search/
+samples/**/target/
+samples/**/node_modules/
+samples/**/.venv/
+__pycache__/

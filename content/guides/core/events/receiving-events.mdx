@@ -1,0 +1,562 @@
+---
+id: 'events-receiving'
+title: 'Receiving Events'
+description: 'Learn how to wait for events in Orcher workflows, use timeouts, and handle multi-step approval chains.'
+sidebar_label: 'Receiving'
+---
+
+## Waiting for Events
+
+Use `wait_for_event()` inside a workflow to suspend execution until an external caller delivers an event with the matching name. The workflow is released from the server while waiting — it consumes no resources until the event arrives.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct ApprovalData {
+    approved: bool,
+    approver: String,
+    reason: String,
+}
+
+#[task]
+pub async fn process_order(_ctx: TaskContext, order_id: String) -> Result<()> {
+    // ...
+}
+
+#[workflow]
+pub async fn order_approval(
+    ctx: WorkflowContext,
+    order_id: String,
+) -> Result<OrderResult> {
+    ctx.set_state("status", &"pending_approval")?;
+
+    // Suspend until an external caller sends the "approve" event
+    let approval: ApprovalData = ctx
+        .wait_for_event("approve")
+        .await?;
+
+    if approval.approved {
+        ctx.set_state("status", &"approved")?;
+        ctx.execute_task(process_order, order_id.clone()).await?;
+
+        Ok(OrderResult {
+            status: "completed".to_string(),
+            approver: Some(approval.approver),
+        })
+    } else {
+        ctx.set_state("status", &"rejected")?;
+
+        Ok(OrderResult {
+            status: "rejected".to_string(),
+            approver: None,
+        })
+    }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, WorkflowContext, TaskContext, createTaskRefs } from '@orcher/sdk';
+
+interface ApprovalData {
+  approved: boolean;
+  approver: string;
+  reason: string;
+}
+
+@Tasks({ taskQueue: 'orders' })
+class OrderTasks {
+  @Task()
+  async processOrder(ctx: TaskContext, orderId: string): Promise<void> { /* ... */ }
+}
+
+const tasks = createTaskRefs(OrderTasks);
+
+@Workflow()
+class OrderApproval {
+  async run(ctx: WorkflowContext, orderId: string): Promise<OrderResult> {
+    ctx.setState('status', 'pending_approval');
+
+    // Suspend until an external caller sends the "approve" event
+    const approval = await ctx.waitForEvent<ApprovalData>('approve');
+
+    if (approval.approved) {
+      ctx.setState('status', 'approved');
+      await ctx.executeTask(tasks.processOrder, orderId);
+
+      return { status: 'completed', approver: approval.approver };
+    } else {
+      ctx.setState('status', 'rejected');
+
+      return { status: 'rejected' };
+    }
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from dataclasses import dataclass
+from orcher import workflow, task, WorkflowContext, TaskContext
+
+
+@dataclass
+class OrderResult:
+    status: str
+    approver: str | None = None
+
+
+@task
+async def process_order(ctx: TaskContext, order_id: str) -> None:
+    ...
+
+
+@workflow
+async def order_approval(ctx: WorkflowContext, order_id: str) -> OrderResult:
+    ctx.set_state("status", "pending_approval")
+
+    # Suspend until an external caller sends the "approve" event
+    approval = await ctx.wait_for_event("approve")
+
+    if approval["approved"]:
+        ctx.set_state("status", "approved")
+        await ctx.execute_task(process_order, arg=order_id)
+
+        return OrderResult(status="completed", approver=approval["approver"])
+    else:
+        ctx.set_state("status", "rejected")
+
+        return OrderResult(status="rejected")
+```
+
+</TabPanel>
+
+</Tabs>
+
+### Sending Events from Client
+
+External systems send events using the workflow handle's `send_event()` method. The event is delivered to the workflow's journal as an `EventReceived` entry. If the workflow is currently waiting for that event name, it resumes immediately.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let client = OrcherClient::connect("http://localhost:50051").await?;
+
+    // Start the approval workflow
+    let handle = client
+        .start_workflow("order_approval", "order_123".to_string())
+        .await?;
+
+    println!("Workflow started: {}", handle.workflow_id());
+
+    // Later: Send approval event (e.g., from a REST API handler)
+    handle.send_event("approve", ApprovalData {
+        approved: true,
+        approver: "manager@company.com".to_string(),
+        reason: "Approved by manager".to_string(),
+    }).await?;
+
+    // Wait for workflow to complete
+    let result = handle.result::<OrderResult>().await?;
+    println!("Workflow completed: {:?}", result);
+
+    Ok(())
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { OrcherClient } from '@orcher/sdk';
+
+async function approveOrder() {
+  const client = new OrcherClient({ address: 'localhost:50051' });
+
+  // Start the approval workflow
+  const handle = await client.startWorkflow('orderApproval', 'order_123');
+
+  console.log('Workflow started:', handle.workflowId);
+
+  // Later: Send approval event (e.g., from a REST API handler)
+  await handle.sendEvent('approve', {
+    approved: true,
+    approver: 'manager@company.com',
+    reason: 'Approved by manager',
+  });
+
+  // Wait for workflow to complete
+  const result = await handle.result<OrderResult>();
+  console.log('Workflow completed:', result);
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import OrcherClient
+
+
+async def approve_order():
+    client = OrcherClient("localhost:50051")
+
+    # Start the approval workflow
+    handle = await client.start_workflow("order_approval", "order_123")
+
+    print(f"Workflow started: {handle.workflow_id}")
+
+    # Later: Send approval event (e.g., from a REST API handler)
+    await handle.send_event("approve", {
+        "approved": True,
+        "approver": "manager@company.com",
+        "reason": "Approved by manager",
+    })
+
+    # Wait for workflow to complete
+    result = await handle.result()
+    print(f"Workflow completed: {result}")
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Events with Timeout
+
+Use `wait_for_event_with_timeout()` to set a deadline on how long the workflow waits. If the event doesn't arrive before the timeout, the method returns `None` (Rust/TS) or raises a `TimeoutError` (Python), letting you implement fallback behavior like auto-approval or escalation.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use std::time::Duration;
+
+#[task]
+pub async fn process_order(_ctx: TaskContext, order_id: String) -> Result<()> { /* ... */ }
+
+#[workflow]
+pub async fn order_with_timeout(
+    ctx: WorkflowContext,
+    order_id: String,
+) -> Result<OrderResult> {
+    // Wait up to 1 hour for approval
+    let approval: Option<ApprovalData> = ctx
+        .wait_for_event_with_timeout("approve", Duration::from_secs(3600))
+        .await?;
+
+    match approval {
+        Some(data) if data.approved => {
+            ctx.execute_task(process_order, order_id).await?;
+
+            Ok(OrderResult {
+                status: "completed".to_string(),
+                approver: Some(data.approver),
+            })
+        }
+        Some(data) => {
+            Ok(OrderResult {
+                status: "rejected".to_string(),
+                approver: None,
+            })
+        }
+        None => {
+            // Timeout — auto-approve or escalate
+            ctx.set_state("status", &"auto_approved")?;
+            ctx.execute_task(process_order, order_id).await?;
+
+            Ok(OrderResult {
+                status: "auto_approved".to_string(),
+                approver: Some("system".to_string()),
+            })
+        }
+    }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, WorkflowContext, TaskContext, Duration, createTaskRefs } from '@orcher/sdk';
+
+@Tasks({ taskQueue: 'orders' })
+class OrderTasks {
+  @Task()
+  async processOrder(ctx: TaskContext, orderId: string): Promise<void> { /* ... */ }
+}
+
+const tasks = createTaskRefs(OrderTasks);
+
+@Workflow()
+class OrderWithTimeout {
+  async run(ctx: WorkflowContext, orderId: string): Promise<OrderResult> {
+    // Wait up to 1 hour for approval — returns null on timeout
+    const approval = await ctx.waitForEventWithTimeout<ApprovalData>(
+      'approve',
+      Duration.fromHours(1)
+    );
+
+    if (approval?.approved) {
+      await ctx.executeTask(tasks.processOrder, orderId);
+      return { status: 'completed', approver: approval.approver };
+    } else if (approval) {
+      return { status: 'rejected' };
+    } else {
+      // Timeout — auto-approve or escalate
+      ctx.setState('status', 'auto_approved');
+      await ctx.executeTask(tasks.processOrder, orderId);
+      return { status: 'auto_approved', approver: 'system' };
+    }
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from datetime import timedelta
+from orcher import workflow, task, WorkflowContext, TaskContext
+
+
+@task
+async def process_order(ctx: TaskContext, order_id: str) -> None:
+    ...
+
+
+@workflow
+async def order_with_timeout(ctx: WorkflowContext, order_id: str) -> OrderResult:
+    # Wait up to 1 hour for approval — returns None on timeout
+    approval = await ctx.wait_for_event_with_timeout("approve", timedelta(hours=1))
+
+    if approval is not None and approval["approved"]:
+        await ctx.execute_task(process_order, arg=order_id)
+
+        return OrderResult(status="completed", approver=approval["approver"])
+    elif approval is not None:
+        return OrderResult(status="rejected")
+    else:
+        # Timeout — auto-approve or escalate
+        ctx.set_state("status", "auto_approved")
+        await ctx.execute_task(process_order, arg=order_id)
+
+        return OrderResult(status="auto_approved", approver="system")
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Multiple Events
+
+Workflows can wait for multiple events in sequence to implement multi-step approval chains, staged gates, or phased processing. Each `wait_for_event()` call suspends independently — the workflow only proceeds when the specific named event arrives.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[task]
+pub async fn process_order(_ctx: TaskContext, order_id: String) -> Result<()> { /* ... */ }
+
+#[workflow]
+pub async fn multi_step_approval(
+    ctx: WorkflowContext,
+    order_id: String,
+) -> Result<OrderResult> {
+    // Step 1: Wait for manager approval
+    ctx.set_state("status", &"pending_manager")?;
+    let manager_approval: ApprovalData = ctx
+        .wait_for_event("manager_approve")
+        .await?;
+
+    if !manager_approval.approved {
+        return Ok(OrderResult { status: "rejected_by_manager".into(), approver: None });
+    }
+
+    // Step 2: Wait for finance approval
+    ctx.set_state("status", &"pending_finance")?;
+    let finance_approval: ApprovalData = ctx
+        .wait_for_event("finance_approve")
+        .await?;
+
+    if !finance_approval.approved {
+        return Ok(OrderResult { status: "rejected_by_finance".into(), approver: None });
+    }
+
+    // Step 3: Both approved — process order
+    ctx.set_state("status", &"approved")?;
+    ctx.execute_task(process_order, order_id).await?;
+
+    Ok(OrderResult {
+        status: "completed".to_string(),
+        approver: Some("manager+finance".to_string()),
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, WorkflowContext, TaskContext, createTaskRefs } from '@orcher/sdk';
+
+@Tasks({ taskQueue: 'orders' })
+class OrderTasks {
+  @Task()
+  async processOrder(ctx: TaskContext, orderId: string): Promise<void> { /* ... */ }
+}
+
+const tasks = createTaskRefs(OrderTasks);
+
+@Workflow()
+class MultiStepApproval {
+  async run(ctx: WorkflowContext, orderId: string): Promise<OrderResult> {
+    // Step 1: Wait for manager approval
+    ctx.setState('status', 'pending_manager');
+    const managerApproval = await ctx.waitForEvent<ApprovalData>('manager_approve');
+
+    if (!managerApproval.approved) {
+      return { status: 'rejected_by_manager' };
+    }
+
+    // Step 2: Wait for finance approval
+    ctx.setState('status', 'pending_finance');
+    const financeApproval = await ctx.waitForEvent<ApprovalData>('finance_approve');
+
+    if (!financeApproval.approved) {
+      return { status: 'rejected_by_finance' };
+    }
+
+    // Step 3: Both approved — process order
+    ctx.setState('status', 'approved');
+    await ctx.executeTask(tasks.processOrder, orderId);
+
+    return { status: 'completed', approver: 'manager+finance' };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext, TaskContext
+
+
+@task
+async def process_order(ctx: TaskContext, order_id: str) -> None:
+    ...
+
+
+@workflow
+async def multi_step_approval(ctx: WorkflowContext, order_id: str) -> OrderResult:
+    # Step 1: Wait for manager approval
+    ctx.set_state("status", "pending_manager")
+    manager_approval = await ctx.wait_for_event("manager_approve")
+
+    if not manager_approval["approved"]:
+        return OrderResult(status="rejected_by_manager")
+
+    # Step 2: Wait for finance approval
+    ctx.set_state("status", "pending_finance")
+    finance_approval = await ctx.wait_for_event("finance_approve")
+
+    if not finance_approval["approved"]:
+        return OrderResult(status="rejected_by_finance")
+
+    # Step 3: Both approved — process order
+    ctx.set_state("status", "approved")
+    await ctx.execute_task(process_order, arg=order_id)
+
+    return OrderResult(status="completed", approver="manager+finance")
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/events/sending-events" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Sending Events & Signals</h3>
+      <p className="text-sm text-foreground-light">
+        Send events between workflows and understand event buffering
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/events/patterns" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Event Patterns</h3>
+      <p className="text-sm text-foreground-light">
+        Human approval, webhook callbacks, and dynamic workflow control
+      </p>
+    </div>
+  </Link>
+</div>

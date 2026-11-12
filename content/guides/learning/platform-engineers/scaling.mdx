@@ -1,0 +1,506 @@
+---
+id: platform-engineers-scaling
+title: "Scaling and Performance"
+description: "Worker pool tuning, database performance optimization, connection pooling, and cost optimization"
+sidebar_label: 'Scaling'
+---
+
+Now that Orcher is deployed, let's understand how to scale it and optimize performance.
+
+## First, How the Pieces Fit
+
+Before tuning anything, it's essential to know which component does what — because it determines *where* each bottleneck lives:
+
+- **Clients** call the **orchestrator** over gRPC to start workflows and send events.
+- The **orchestrator** is the only component that talks to **PostgreSQL**. It owns the queue, the journal, and every read/write, using its own database connection pool.
+- **Workers** are **stateless gRPC clients**. They connect to the orchestrator, pull workflow/task work, execute your code, and report results back — all over gRPC. **A worker never opens a database connection.**
+
+That last point is the one people get wrong. When you "add workers," you are *not* adding database clients — you are adding execution capacity that talks to the orchestrator. Database connections are driven by the orchestrator, not by your worker count. Keep this in mind for every knob below.
+
+## Understanding Orcher's Scaling Model
+
+Orcher scales in two dimensions, and it's important to understand the difference:
+
+#### Dimension 1: Workflow Throughput (How Fast Can You Start Workflows?)
+
+**What it means**: How many workflows per second can you enqueue?
+
+**Limited by**: Orchestrator + PostgreSQL write capacity
+
+**Example**: Your API receives 1,000 POST requests per second to create orders. Each request calls the orchestrator (`start_workflow` over gRPC), and the orchestrator enqueues it with one INSERT into `workflow_queue`. Can the orchestrator + database sustain 1,000 starts/second?
+
+**How to scale** (all of this is the *orchestrator* tier — workers are not involved):
+1. **Vertical scale the database**: More CPU = more IOPS
+2. **Scale the orchestrator horizontally**: run multiple orchestrator nodes against the same database (see [Scaling the Orchestrator and Database](#scaling-the-orchestrator-and-database))
+3. **Use connection pooling**: put PgBouncer in front of PostgreSQL for the orchestrator's connections
+4. **Add read replicas**: offload analytics queries from the primary
+
+**Measure, don't guess.** Start throughput depends on your database, its storage and the workflow's shape, so size from a measurement: the [sdk-core benchmark suite](https://github.com/orcher-io/sdk-core/tree/main/bench) runs standard scenarios against any engine and reports runs per second.
+
+#### Dimension 2: Concurrent Workflow Execution (How Many Workflows Can Run Simultaneously?)
+
+**What it means**: How many workflows are actively being executed right now?
+
+**Limited by**: Worker pool size x concurrency per worker
+
+**Example**: You have 10 worker pods, each configured to run 10 workflows concurrently. Your maximum concurrency is 10 x 10 = 100 workflows.
+
+**How to scale**:
+1. **Horizontal scale workers**: Add more worker pods
+2. **Vertical scale workers**: Increase concurrency per worker (if tasks are I/O-bound)
+3. **Optimize slow tasks**: If a task takes 10 seconds, you can only process 6/minute per worker
+
+**Worked arithmetic** (assuming an average task duration of 500ms):
+- **5 workers x 10 concurrency** = 50 concurrent, ~6,000 workflows/minute
+- **10 workers x 10 concurrency** = 100 concurrent, ~12,000 workflows/minute
+- **20 workers x 20 concurrency** = 400 concurrent, ~48,000 workflows/minute
+
+**Real-world example**:
+- Payment processing with 3-second average workflow duration
+- Need to handle 100 workflows/second sustained = 300 concurrent workflows
+- Deploy 15 workers x 20 concurrency = 300 concurrent capacity
+
+**The Key Insight**: These dimensions are independent. You can start 10,000 workflows/second but only execute 100 concurrently (they queue up). Or you can execute 1,000 concurrently but only start 100/second (workers sit idle).
+
+## Worker Pool Configuration Deep Dive
+
+Workers are where the work happens. Let's understand how to tune them.
+
+#### The Worker Configuration Parameters
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // A worker is a stateless gRPC client of the orchestrator — no database here.
+    // Workflows and tasks are auto-registered from their decorators/macros.
+    WorkerBuilder::new()
+        .server_url("https://orchestrator.internal:50051") // gRPC endpoint of the orchestrator
+        .namespace("production")
+        .task_queue("default")
+        .max_concurrent_workflows(20)                // workflows executing at once in this process
+        .max_concurrent_tasks(40)                    // tasks executing at once in this process
+        .poll_interval(Duration::from_millis(100))   // how often to pull work when idle
+        .workflow_poller_count(2)                    // parallel pollers pulling workflow work
+        .task_poller_count(4)                        // parallel pollers pulling task work
+        .heartbeat_interval(Duration::from_secs(30)) // liveness reported to the orchestrator
+        .build()
+        .await?
+        .run()
+        .await?;
+
+    Ok(())
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Worker } from '@orcher/sdk';
+
+async function main() {
+  // A worker is a stateless gRPC client of the orchestrator — no database here.
+  const worker = new Worker({
+    serverUrl: 'https://orchestrator.internal:50051', // gRPC endpoint of the orchestrator
+    namespace: 'production',
+    taskQueue: 'default',
+    maxConcurrentWorkflows: 20,   // workflows executing at once in this process
+    maxConcurrentTasks: 40,       // tasks executing at once in this process
+    pollInterval: 100,            // ms — how often to pull work when idle
+    workflowPollerCount: 2,       // parallel pollers pulling workflow work
+    taskPollerCount: 4,           // parallel pollers pulling task work
+    heartbeatInterval: 30_000,    // ms — liveness reported to the orchestrator
+  });
+
+  await worker.run();
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import Worker
+
+async def main():
+    # A worker is a stateless gRPC client of the orchestrator — no database here.
+    worker = (
+        Worker.builder()
+        .server_url("https://orchestrator.internal:50051")  # gRPC endpoint of the orchestrator
+        .namespace("production")
+        .task_queue("default")
+        .max_concurrent_workflows(20)     # workflows executing at once in this process
+        .max_concurrent_tasks(40)         # tasks executing at once in this process
+        .workflow_poll_interval(100)      # ms — how often to pull workflow work when idle
+        .task_poll_interval(100)          # ms — how often to pull task work when idle
+        .workflow_poller_count(2)         # parallel pollers pulling workflow work
+        .task_poller_count(4)             # parallel pollers pulling task work
+        .build()
+    )
+
+    await worker.run()
+```
+
+</TabPanel>
+</Tabs>
+
+**Let's understand each parameter:**
+
+**1. Concurrency — `max_concurrent_workflows` / `max_concurrent_tasks`** (most important)
+
+This controls how many workflows (and tasks) execute simultaneously within one worker process.
+
+**Low concurrency (1-5)**:
+- **Use when**: Your tasks are CPU-intensive
+- **Example**: Image processing, video encoding, complex calculations
+- **Reasoning**: CPU-bound tasks don't benefit from parallelism (they're already using the CPU). More concurrency just causes context switching overhead.
+
+**Medium concurrency (10-20)**:
+- **Use when**: Your tasks are mixed I/O and CPU
+- **Example**: API calls with some local processing
+- **Reasoning**: While waiting for API responses, other workflows can execute. But not too many or you'll thrash.
+
+**High concurrency (30-50)**:
+- **Use when**: Your tasks are pure I/O (network calls, database queries)
+- **Example**: Webhooks that just call external services
+- **Reasoning**: You spend 95% of time waiting for I/O. High concurrency keeps workers busy.
+
+**Rule of thumb**: Start with 10. Monitor CPU utilization:
+- CPU under 50%? Increase concurrency (you're waiting on I/O)
+- CPU above 80%? Decrease concurrency (you're CPU-bound)
+
+**2. Poll Interval**
+
+How often an idle worker asks the orchestrator (over gRPC) for new work. This is a poll to the **orchestrator**, not to the database — the orchestrator is what touches PostgreSQL.
+
+**Fast (50-100ms)**:
+- **Pros**: Workflows start quickly (low latency)
+- **Cons**: More gRPC poll traffic to the orchestrator
+- **Use when**: You have real-time requirements, low volume
+
+**Moderate (100-500ms)**:
+- **Pros**: Balanced latency and orchestrator load
+- **Cons**: None really, this is the sweet spot
+- **Use when**: Most production workloads
+
+**Slow (1000ms+)**:
+- **Pros**: Minimal poll traffic
+- **Cons**: Workflows can wait up to 1 second to start
+- **Use when**: You have very high volume, batch-oriented workflows
+
+**Impact**: With 100 workers polling every 100ms, the orchestrator fields ~1,000 poll RPCs/sec. It's the orchestrator (and its database queries), not the workers, that absorbs this — another reason worker count is decoupled from database connections.
+
+**3. Execution timeouts** (set per workflow/task — not a worker knob)
+
+Runaway executions are bounded by **timeouts you set on the workflow or task**, which the orchestrator enforces. There is no worker-level "max duration" setting: pass an execution timeout when you start a workflow, or a task timeout in the task's options, and the engine fails the execution if it exceeds it — freeing the slot for other work.
+
+**Why it matters**: sometimes an execution gets stuck (an unbounded loop, a wedged external call). A timeout lets the orchestrator fail it instead of holding a slot forever.
+
+**How to set it**: take your longest normal duration and multiply by 3-5x for headroom. Example: a workflow that normally finishes in 5 minutes → a 20-minute execution timeout.
+
+**4. Heartbeat Interval**
+
+How often the worker reports "I'm still alive" to the orchestrator — a gRPC heartbeat, not a database write.
+
+**What it does**: workers periodically send a heartbeat RPC. If a worker stops heartbeating (crash, network partition), the orchestrator notices and re-dispatches that worker's in-flight work to a healthy worker.
+
+**Why it matters**: enables detection of silent failures (a worker dying mid-execution) so work isn't stranded in a slot that will never finish.
+
+**How to set it**: the default of 30 seconds is good. Don't go below 10 seconds (needless RPC traffic) or above 60 seconds (slower failure detection). *(In the Python SDK this interval isn't builder-configurable yet — a sensible default is used.)*
+
+#### Calculating the Right Worker Count
+
+Here's a formula to determine how many workers you need:
+
+```text
+Required Workers = (Peak Concurrent Workflows) / (Concurrency per Worker)
+
+Example:
+- Peak load: 500 workflows executing simultaneously
+- Concurrency per worker: 20
+- Required workers: 500 / 20 = 25 workers
+```
+
+**But add headroom**:
+- For auto-scaling: Deploy 50% of required, let HPA scale to 200%
+- For fixed capacity: Deploy 150% of required (for buffer)
+
+**Real-world sizing**:
+
+| Workload | Peak Concurrent | Concurrency | Workers | Reasoning |
+|----------|----------------|-------------|---------|-----------|
+| Low-volume SaaS | 50 | 10 | 5-10 | Mostly idle, low cost |
+| E-commerce (moderate) | 200 | 20 | 10-20 | Handle peak hours |
+| High-volume API | 1,000 | 20 | 50-100 | Consistent high load |
+| Batch processing | 5,000 | 50 | 100-200 | Long-running, I/O-heavy |
+
+## Scaling the Orchestrator and Database
+
+Everything below is the **orchestrator tier** — the only part of the system that touches PostgreSQL. This is where start-throughput and overall capacity are won or lost.
+
+**Scale it two ways:**
+
+- **Vertically** — a bigger PostgreSQL instance (more CPU/IOPS) and a larger orchestrator connection pool. The orchestrator's pool size is set via the `ORCHER_PG_MAX_CONNECTIONS` environment variable (default 80 per node; `ORCHER_PG_MIN_CONNECTIONS` sets the warm minimum, default 20), not in worker code.
+- **Horizontally** — run **multiple orchestrator nodes** against the **same** database. Nodes coordinate through cluster membership and claim work atomically with PostgreSQL `SELECT ... FOR UPDATE SKIP LOCKED`, so two nodes never hand out the same workflow. This is how you scale start-throughput and dispatch beyond a single orchestrator process, and it survives node failure without losing or duplicating a run — see [High Availability](/guides/operations/orchestrator/high-availability) for how to enable a cluster.
+
+The database is the shared foundation for all of this, so optimizing it matters most. Let's tune it.
+
+### Database Performance Tuning
+
+#### Essential Indexes (Orcher Creates These Automatically)
+
+These indexes are critical for performance:
+
+```sql
+-- For worker polling (finding pending workflows)
+CREATE INDEX idx_workflow_queue_status
+  ON workflow_queue(status, created_at);
+
+-- For retry logic (finding workflows ready to retry)
+CREATE INDEX idx_workflow_queue_retry
+  ON workflow_queue(next_retry_at)
+  WHERE status = 'pending';
+
+-- For journal lookups (checking completed steps)
+CREATE INDEX idx_workflow_execution_journal_lookup
+  ON workflow_execution_journal(workflow_id, step_id);
+
+-- For analytics (finding workflows by name)
+CREATE INDEX idx_workflow_queue_name
+  ON workflow_queue(workflow_name, created_at);
+```
+
+**Verify they exist**:
+
+```sql
+SELECT
+  schemaname,
+  tablename,
+  indexname,
+  indexdef
+FROM pg_indexes
+WHERE tablename LIKE 'workflow%'
+ORDER BY tablename, indexname;
+```
+
+If any are missing, create them immediately. Performance degrades significantly without proper indexes.
+
+#### PostgreSQL Configuration for Orcher Workloads
+
+Orcher has a specific access pattern: many small writes (INSERTs), many small reads (SELECTs), occasional large reads (journal replay).
+
+**Recommended settings** (adjust based on your database size):
+
+```conf
+# postgresql.conf
+
+# === Memory Settings ===
+# General rule: 25% of RAM for shared_buffers
+shared_buffers = 8GB              # For 32GB RAM instance
+
+# How much memory Postgres can use for sorting/joins
+# Rule: 10-20% of RAM
+effective_cache_size = 24GB       # Tells Postgres how much cache the OS has
+
+# Per-query memory for sorts/joins
+work_mem = 64MB                   # Increase if you see temp file warnings
+
+# Memory for maintenance operations (VACUUM, CREATE INDEX)
+maintenance_work_mem = 2GB
+
+# === Connection Settings ===
+# Only the orchestrator connects to PostgreSQL — workers never do.
+# Size for: (orchestrator nodes x ORCHER_PG_MAX_CONNECTIONS) + headroom for admin/CLI/analytics.
+# The per-node pool defaults to 80; lower ORCHER_PG_MAX_CONNECTIONS when running many nodes.
+# e.g. 8 nodes x 20 = 160, so 200 leaves comfortable headroom.
+max_connections = 200             # driven by orchestrator nodes x per-node pool, NOT worker count
+
+# === Write Performance ===
+# How often to write WAL to disk (trades durability for performance)
+# Keep default (1s) for durability, increase to 3s for more performance
+wal_writer_delay = 1000ms
+
+# When to trigger a checkpoint (write to disk)
+checkpoint_timeout = 15min
+checkpoint_completion_target = 0.9  # Spread checkpoint I/O over 90% of interval
+
+# Maximum WAL size before forcing checkpoint
+max_wal_size = 4GB
+
+# === Query Performance ===
+# Cost of random page access (lower for SSD)
+random_page_cost = 1.1            # Default is 4.0 for spinning disks
+
+# How many I/O operations can run in parallel
+effective_io_concurrency = 200    # For SSDs (spinning disks: 2)
+
+# === Autovacuum (Critical for Write-Heavy Workloads) ===
+# Orcher does lots of inserts, so vacuum must keep up
+autovacuum = on
+autovacuum_max_workers = 4
+autovacuum_naptime = 10s          # Check for vacuum work every 10 seconds
+
+# Trigger vacuum more aggressively
+autovacuum_vacuum_scale_factor = 0.05    # Default is 0.2
+autovacuum_analyze_scale_factor = 0.02   # Default is 0.1
+
+# === Logging (For Debugging) ===
+# Log slow queries
+log_min_duration_statement = 1000  # Log queries taking > 1 second
+
+# Detailed log format
+log_line_prefix = '%t [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h '
+
+# Log checkpoints (helps tune checkpoint settings)
+log_checkpoints = on
+```
+
+**How to apply**:
+
+For managed databases (RDS, Cloud SQL):
+1. Go to parameter groups
+2. Modify the parameters above
+3. Apply changes (may require restart)
+
+For self-managed:
+1. Edit `/var/lib/postgresql/data/postgresql.conf`
+2. Restart PostgreSQL: `sudo systemctl restart postgresql`
+
+**Verify**:
+
+```sql
+-- Check current settings
+SHOW shared_buffers;
+SHOW effective_cache_size;
+SHOW max_connections;
+
+-- Check if settings require restart
+SELECT name, setting, pending_restart
+FROM pg_settings
+WHERE pending_restart = true;
+```
+
+#### Vacuum Strategy (Critical!)
+
+Orcher generates many inserts. PostgreSQL needs VACUUM to reclaim space and update statistics.
+
+**The Problem**: Without regular vacuuming, tables bloat (dead tuples accumulate), queries slow down, and disk fills up.
+
+**The Solution**: Aggressive autovacuum configuration.
+
+```sql
+-- Set per-table autovacuum parameters (more aggressive than global)
+ALTER TABLE workflow_queue SET (
+  autovacuum_vacuum_scale_factor = 0.02,  -- Vacuum when 2% of rows are dead
+  autovacuum_analyze_scale_factor = 0.01, -- Analyze when 1% of rows change
+  autovacuum_vacuum_cost_delay = 2        -- Faster vacuuming
+);
+
+ALTER TABLE workflow_execution_journal SET (
+  autovacuum_vacuum_scale_factor = 0.05,  -- Journal is append-only, vacuum less often
+  autovacuum_analyze_scale_factor = 0.02,
+  autovacuum_vacuum_cost_delay = 5
+);
+```
+
+**Monitoring vacuum health:**
+
+```sql
+-- Check for table bloat
+SELECT
+  relname AS table_name,
+  n_live_tup AS live_rows,
+  n_dead_tup AS dead_rows,
+  ROUND(100.0 * n_dead_tup / NULLIF(n_live_tup + n_dead_tup, 0), 2) AS dead_pct,
+  last_autovacuum,
+  last_autoanalyze
+FROM pg_stat_user_tables
+WHERE relname LIKE 'workflow%'
+ORDER BY dead_pct DESC;
+```
+
+If `dead_pct` exceeds 10%, your autovacuum isn't keeping up. Consider increasing `autovacuum_max_workers` or reducing `autovacuum_vacuum_cost_delay`.
+
+#### Journal Retention and Cleanup
+
+The workflow journal grows continuously. You need a retention strategy:
+
+```sql
+-- Option 1: Delete completed workflow journals older than 30 days
+DELETE FROM workflow_execution_journal
+WHERE workflow_id IN (
+  SELECT id FROM workflow_executions
+  WHERE status = 'completed'
+    AND completed_at < NOW() - INTERVAL '30 days'
+);
+
+-- Option 2: Archive to a separate table first (recommended)
+INSERT INTO workflow_execution_journal_archive
+SELECT * FROM workflow_execution_journal
+WHERE workflow_id IN (
+  SELECT id FROM workflow_executions
+  WHERE status = 'completed'
+    AND completed_at < NOW() - INTERVAL '30 days'
+);
+
+-- Then delete the archived entries
+DELETE FROM workflow_execution_journal
+WHERE workflow_id IN (
+  SELECT id FROM workflow_executions
+  WHERE status = 'completed'
+    AND completed_at < NOW() - INTERVAL '30 days'
+);
+```
+
+**Recommended schedule**: Run cleanup weekly via `pg_cron` or an external scheduler. Choose a retention period based on your debugging and compliance needs.
+
+### Connection Pooling
+
+As you add orchestrator nodes (each with its own pool), the connections into PostgreSQL add up. PostgreSQL handles each connection as a separate process, and performance degrades above ~500 connections. A pooler in front of the database keeps this in check. (Workers are never part of this math — they hold no database connections.)
+
+**Use PgBouncer** (connection pooler), between the orchestrator(s) and PostgreSQL:
+
+```ini
+# pgbouncer.ini
+[databases]
+orcher = host=postgres port=5432 dbname=orcher
+
+[pgbouncer]
+listen_port = 6432
+listen_addr = 0.0.0.0
+
+# Pool mode: transaction (recommended for Orcher)
+pool_mode = transaction
+
+# Pool sizing
+default_pool_size = 25      # Connections per database per user
+max_client_conn = 2000      # Max client connections to PgBouncer
+max_db_connections = 100     # Max connections to PostgreSQL
+
+# Timeouts
+server_idle_timeout = 600
+client_idle_timeout = 0
+```
+
+**Why `transaction` mode**: Orcher uses short transactions (claim workflow, write journal entry, release claim). Transaction mode returns the connection to the pool after each transaction, maximizing reuse.
+
+**Deployment**: Run PgBouncer as a sidecar to each orchestrator node, or as a standalone service between the orchestrator and the database. Workers never connect to it — they reach the orchestrator over gRPC.
+
+---
+
+## Next Steps
+
+- [Operating in Production](/guides/learning/platform-engineers/operating) -- Monitoring, debugging, DR
+- [Back to Overview](/guides/learning/platform-engineers)

@@ -1,0 +1,383 @@
+---
+id: 'event-stream-aggregation'
+title: 'Windowed Stream Aggregation'
+sidebar_label: 'Stream Aggregation'
+---
+
+Processing high-volume event streams often requires aggregating data over time windows — counting page views per minute, summing transaction amounts per hour, or calculating average sensor readings per 5-minute interval. Orcher models this as a recurring workflow that collects events over a time window, aggregates them, and emits the result. The durable timer ensures the window fires on schedule even if the process restarts.
+
+## How it works
+
+Each turn of the loop closes one **tumbling window**: fetch the window's events, fold them into an aggregate, store it, fire an alert if a threshold trips, then sleep until the next window. The durable timer makes the cadence survive restarts; the journal records each window's result once, so recovery never folds a window twice.
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">One Window, Then the Next</div>
+  </div>
+  {[
+    { label: 'fetch_events_in_window', detail: '[10:00, 10:05) — 8,412 events', icon: '1' },
+    { label: 'compute_aggregation', detail: 'count · unique users · total · avg', icon: '2' },
+    { label: 'store_aggregation', detail: 'One row per window — journaled', icon: '3' },
+    { label: 'check_threshold_alert', detail: 'Fire only if the metric trips', icon: '4' },
+    { label: 'sleep(5 min)', detail: 'Durable timer → the [10:05, 10:10) window', icon: '⏱', state: 'suspend' },
+  ].map((row, i, arr) => (
+    <div key={i}>
+      <div className={`px-4 py-2 flex items-center gap-3 ${row.state === 'suspend' ? 'bg-surface-75' : ''}`}>
+        <span className={`w-5 h-5 flex items-center justify-center text-[10px] shrink-0 ${row.state === 'suspend' ? 'text-foreground-muted' : 'font-mono text-foreground-muted border border-default'}`}>{row.icon}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{row.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{row.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Consecutive windows should tile the timeline exactly — no gaps, no overlaps.</span>
+  </div>
+</div>
+
+## Example: a windowed aggregator
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="typescript"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use std::time::Duration;
+
+#[task]
+async fn fetch_events_in_window(input: WindowQuery) -> Result<Vec<AnalyticsEvent>> {
+    db::query_events(input.start, input.end, &input.event_type).await
+}
+
+#[task]
+async fn compute_aggregation(events: Vec<AnalyticsEvent>) -> Result<AggregationResult> {
+    let count = events.len();
+    let unique_users: HashSet<_> = events.iter().map(|e| &e.user_id).collect();
+    let total_value: f64 = events.iter().map(|e| e.value).sum();
+    Ok(AggregationResult {
+        count,
+        unique_users: unique_users.len(),
+        total_value,
+        avg_value: if count > 0 { total_value / count as f64 } else { 0.0 },
+    })
+}
+
+#[task]
+async fn store_aggregation(input: StoredAggregation) -> Result<()> {
+    db::insert_aggregation(input).await
+}
+
+#[task]
+async fn check_threshold_alert(input: AlertCheck) -> Result<Option<Alert>> {
+    if input.value > input.threshold {
+        Ok(Some(Alert { metric: input.metric, value: input.value }))
+    } else {
+        Ok(None)
+    }
+}
+
+#[task]
+async fn send_alert(alert: Alert) -> Result<()> {
+    alerting::send(alert).await
+}
+
+// Recurring 5-minute aggregation window
+#[workflow(name = "analytics_aggregator", version = "1.0.0")]
+async fn analytics_aggregator(
+    ctx: WorkflowContext,
+    config: AggregatorConfig,
+) -> Result<()> {
+    let window_duration = Duration::from_secs(300); // 5 minutes
+
+    loop {
+        let window_end = chrono::Utc::now();
+        let window_start = window_end - chrono::Duration::seconds(300);
+
+        // Fetch events in this window
+        let events = ctx.execute_task(fetch_events_in_window, WindowQuery {
+            start: window_start,
+            end: window_end,
+            event_type: config.event_type.clone(),
+        }).await?;
+
+        // Compute aggregation
+        let agg = ctx.execute_task(compute_aggregation, events).await?;
+
+        // Store result
+        ctx.execute_task(store_aggregation, StoredAggregation {
+            window_start,
+            window_end,
+            event_type: config.event_type.clone(),
+            result: agg.clone(),
+        }).await?;
+
+        // Check alert thresholds
+        if let Some(alert) = ctx.execute_task(check_threshold_alert, AlertCheck {
+            metric: config.event_type.clone(),
+            value: agg.count as f64,
+            threshold: config.alert_threshold,
+        }).await? {
+            ctx.execute_task(send_alert, alert).await?;
+        }
+
+        // Sleep until next window
+        ctx.sleep(window_duration).await?;
+    }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import {
+  Workflow,
+  Tasks,
+  Task,
+  WorkflowContext,
+  createTaskRefs,
+} from '@orcher/sdk';
+
+@Tasks()
+class AggregationTasks {
+  @Task()
+  async fetchEventsInWindow(input: WindowQuery): Promise<AnalyticsEvent[]> {
+    return await db.queryEvents(input.start, input.end, input.eventType);
+  }
+
+  @Task()
+  async computeAggregation(events: AnalyticsEvent[]): Promise<AggregationResult> {
+    const count = events.length;
+    const uniqueUsers = new Set(events.map((e) => e.userId)).size;
+    const totalValue = events.reduce((sum, e) => sum + e.value, 0);
+    return {
+      count,
+      uniqueUsers,
+      totalValue,
+      avgValue: count > 0 ? totalValue / count : 0,
+    };
+  }
+
+  @Task()
+  async storeAggregation(input: StoredAggregation): Promise<void> {
+    await db.insertAggregation(input);
+  }
+
+  @Task()
+  async checkThresholdAlert(input: AlertCheck): Promise<Alert | null> {
+    if (input.value > input.threshold) {
+      return { metric: input.metric, value: input.value };
+    }
+    return null;
+  }
+
+  @Task()
+  async sendAlert(alert: Alert): Promise<void> {
+    await alerting.send(alert);
+  }
+}
+
+const tasks = createTaskRefs(AggregationTasks);
+
+// Recurring 5-minute aggregation window
+@Workflow({ name: 'analytics_aggregator', version: '1.0.0' })
+class AnalyticsAggregator {
+  async run(ctx: WorkflowContext, config: AggregatorConfig): Promise<void> {
+    const windowMs = 5 * 60 * 1000; // 5 minutes
+
+    while (true) {
+      const windowEnd = new Date();
+      const windowStart = new Date(windowEnd.getTime() - windowMs);
+
+      // Fetch events in this window
+      const events = await ctx.executeTask(tasks.fetchEventsInWindow, {
+        start: windowStart.toISOString(),
+        end: windowEnd.toISOString(),
+        eventType: config.eventType,
+      });
+
+      // Compute aggregation
+      const agg = await ctx.executeTask(tasks.computeAggregation, events);
+
+      // Store result
+      await ctx.executeTask(tasks.storeAggregation, {
+        windowStart: windowStart.toISOString(),
+        windowEnd: windowEnd.toISOString(),
+        eventType: config.eventType,
+        result: agg,
+      });
+
+      // Check alert thresholds
+      const alert = await ctx.executeTask(tasks.checkThresholdAlert, {
+        metric: config.eventType,
+        value: agg.count,
+        threshold: config.alertThreshold,
+      });
+      if (alert) {
+        await ctx.executeTask(tasks.sendAlert, alert);
+      }
+
+      // Sleep until next window
+      await ctx.sleep(windowMs);
+    }
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from datetime import datetime, timedelta
+from orcher import workflow, task, WorkflowContext
+
+@task
+async def fetch_events_in_window(input: WindowQuery) -> list[AnalyticsEvent]:
+    return await db.query_events(input.start, input.end, input.event_type)
+
+@task
+async def compute_aggregation(events: list[AnalyticsEvent]) -> AggregationResult:
+    count = len(events)
+    unique_users = len(set(e.user_id for e in events))
+    total_value = sum(e.value for e in events)
+    return AggregationResult(
+        count=count,
+        unique_users=unique_users,
+        total_value=total_value,
+        avg_value=total_value / count if count > 0 else 0,
+    )
+
+@task
+async def store_aggregation(input: StoredAggregation) -> None:
+    await db.insert_aggregation(input)
+
+@task
+async def check_threshold_alert(input: AlertCheck) -> Alert | None:
+    if input.value > input.threshold:
+        return Alert(metric=input.metric, value=input.value)
+    return None
+
+@task
+async def send_alert(alert: Alert) -> None:
+    await alerting.send(alert)
+
+# Recurring 5-minute aggregation window
+@workflow(name="analytics_aggregator", version="1.0.0")
+async def analytics_aggregator(
+    ctx: WorkflowContext, config: AggregatorConfig
+) -> None:
+    window_seconds = 300  # 5 minutes
+
+    while True:
+        window_end = datetime.utcnow()
+        window_start = window_end - timedelta(seconds=window_seconds)
+
+        # Fetch events in this window
+        events = await ctx.execute_task(fetch_events_in_window, WindowQuery(
+            start=window_start, end=window_end, event_type=config.event_type,
+        ))
+
+        # Compute aggregation
+        agg = await ctx.execute_task(compute_aggregation, events)
+
+        # Store result
+        await ctx.execute_task(store_aggregation, StoredAggregation(
+            window_start=window_start,
+            window_end=window_end,
+            event_type=config.event_type,
+            result=agg,
+        ))
+
+        # Check alert thresholds
+        alert = await ctx.execute_task(check_threshold_alert, AlertCheck(
+            metric=config.event_type,
+            value=agg.count,
+            threshold=config.alert_threshold,
+        ))
+        if alert:
+            await ctx.execute_task(send_alert, alert)
+
+        # Sleep until next window
+        await ctx.sleep(window_seconds * 1000)
+```
+
+</TabPanel>
+
+</Tabs>
+
+Start this workflow once and it runs continuously, aggregating a new 5-minute window on each iteration. The durable timer at the end of each loop ensures the window fires reliably even across restarts. Each aggregation result is stored as a separate task, creating an audit trail of all computed metrics.
+
+---
+
+## Mind the gap: anchor windows to a grid
+
+The example computes each window from `now()` — `window_end = now()`, `window_start = now() - 5min` — and *then* sleeps 5 minutes. But the work between waking and sleeping takes time, so the next window starts a little later than the last one ended. Events that land in that sliver belong to no window at all.
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">now()-Anchored Windows Drift</div>
+  </div>
+  {[
+    { label: 'window 1', detail: '[10:00:00, 10:05:00) — anchored to now()', icon: '✓', state: 'done' },
+    { label: 'aggregate + store', detail: 'Takes ~800ms of wall-clock', icon: '⏱', state: 'suspend' },
+    { label: 'sleep(5 min)', detail: 'Fires at 10:10:00.8, not 10:10:00', icon: '⏱', state: 'suspend' },
+    { label: 'window 2', detail: '[10:05:00.8, 10:10:00.8) — starts 800ms late', icon: '✗', state: 'crash' },
+    { label: 'the gap', detail: 'Events in [10:05:00, 10:05:00.8) counted by neither window', icon: '✗', state: 'crash' },
+  ].map((row, i, arr) => (
+    <div key={i}>
+      <div className={`px-4 py-2 flex items-center gap-3 ${row.state === 'crash' ? 'bg-red-500/5' : ''} ${row.state === 'suspend' ? 'bg-surface-75' : ''}`}>
+        <span className={`w-5 h-5 flex items-center justify-center text-[10px] shrink-0 ${row.state === 'crash' ? 'text-red-400' : 'text-foreground-muted'}`}>{row.icon}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{row.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{row.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Fix: carry <code className="text-[9px]">window_end</code> forward as the next <code className="text-[9px]">window_start</code>. Windows tile a fixed grid, immune to processing time.</span>
+  </div>
+</div>
+
+Anchor windows to a grid, not to the wall clock at wake time: keep the previous `window_end` as state and use it as the next `window_start`. Because that boundary is journaled, it also survives crashes — a resume continues the same grid instead of restarting it at a fresh `now()`.
+
+## Design notes
+
+- **Grid boundaries beat `now()`.** The fix above is the difference between "roughly every 5 minutes" and "exactly the `[:00, :05)` buckets." Only wall-clock-anchored grids let you compare a window against the same window yesterday.
+- **Decide what to do about late events.** An event written just after its window closed is missed by a query that already ran. If completeness matters, aggregate a window a grace period *after* it closes (fetch `[10:00, 10:05)` at 10:06), trading freshness for correctness — a watermark, the same idea as [scheduled sync's watermark](/guides/use-cases/data-processing/scheduled-sync).
+- **Query-driven vs. accumulate-in-actor.** This workflow re-queries stored events each window — simple, and the DB is the source of truth. For very high volume, feed events into a per-key [actor](/guides/use-cases/event-driven/stateful-actors) that folds them incrementally, so no window ever re-scans raw rows.
+- **Bound the loop.** Like every recurring workflow, an unbounded aggregator grows its journal forever — stop after N windows and restart carrying the last boundary, the same reasoning as [scheduled jobs](/guides/use-cases/background-tasks/scheduled-jobs).
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-4 not-prose">
+  <Link href="/guides/use-cases/event-driven/pattern-detection" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Pattern Detection</h3>
+    <p className="text-sm text-foreground-light">Correlate multiple events over time for fraud detection, abandoned carts, and SLA monitoring.</p>
+  </Link>
+  <Link href="/guides/use-cases/event-driven/best-practices" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Best Practices</h3>
+    <p className="text-sm text-foreground-light">Design guidelines for event-driven systems and actors.</p>
+  </Link>
+</div>

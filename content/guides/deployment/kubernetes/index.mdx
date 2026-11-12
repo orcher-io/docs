@@ -1,0 +1,64 @@
+---
+id: 'kubernetes'
+title: 'Kubernetes Deployment'
+description: 'Deploy the Orcher orchestrator to Kubernetes with production-ready manifests, autoscaling, health checks, and monitoring'
+sidebar_label: 'Kubernetes'
+---
+
+Orcher includes production-ready Kubernetes manifests in `services/orchestrator/k8s/` that deploy the orchestrator as a scalable Deployment with health checks, autoscaling, pod disruption budgets, and Prometheus integration. Manifests are managed with Kustomize for easy customization.
+
+- **Kustomize-based** — Single `kubectl apply -k .` deploys all resources with consistent labels and namespace
+- **Autoscaling** — HorizontalPodAutoscaler scales from 3 to 10 replicas based on CPU and memory utilization
+- **High availability** — Pod anti-affinity spreads replicas across nodes, PodDisruptionBudget ensures minimum 2 pods
+- **Security** — Non-root container, RBAC with minimal permissions, secrets for database credentials
+- **Monitoring** — Prometheus scrape annotations on pods, health check endpoints for liveness and readiness
+
+---
+
+## Prerequisites
+
+- Kubernetes cluster v1.24+
+- `kubectl` configured to access your cluster
+- Container image built from the [Dockerfile](/guides/deployment/docker/production) and pushed to a registry
+
+---
+
+## Quick Start
+
+### 1. Create Namespace and Secrets
+
+```bash
+kubectl create namespace orcher
+
+kubectl create secret generic orcher-secrets \
+  --namespace=orcher \
+  --from-literal=database-url='postgresql://orcher:orcher@postgres:5432/orcher' \
+  --from-literal=redis-url='redis://redis:6379'
+```
+
+### 2. Deploy with Kustomize
+
+```bash
+cd services/orchestrator/k8s
+kubectl apply -k .
+```
+
+This creates all resources in the `orcher` namespace: Deployment, Services, ConfigMap, RBAC, HPA, and PDB.
+
+### 3. Verify
+
+```bash
+kubectl get pods -n orcher -l app=orchestrator
+kubectl get svc -n orcher -l app=orchestrator
+kubectl get hpa -n orcher
+```
+
+---
+
+## Next Steps
+
+- [Manifests](/guides/deployment/kubernetes/manifests) — Deployment, Service, ConfigMap, and RBAC manifests
+- [Autoscaling](/guides/deployment/kubernetes/autoscaling) — HPA, PDB, and Kustomize configuration
+- [Production](/guides/deployment/kubernetes/production) — Monitoring, scaling, security, and troubleshooting
+- [Docker](/guides/deployment/docker) — Docker Compose setup for backing services
+- [Configuration](/guides/deployment/configuration) — Full configuration reference

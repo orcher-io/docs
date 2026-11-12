@@ -1,0 +1,349 @@
+---
+id: 'fan-out-nested'
+title: 'Nested Fan-Out/Fan-In'
+description: 'Hierarchical parallel processing using nested fan-out with child workflows'
+sidebar_label: 'Nested'
+---
+
+## Nested Fan-Out/Fan-In
+
+For hierarchical data — such as regions containing stores, or categories containing products — you can nest fan-out operations. The parent workflow fans out across the top-level groups (e.g., regions), and each group is processed by a child workflow that itself fans out across its members (e.g., stores). Results bubble up through the hierarchy: stores report to regions, regions aggregate into the final report. Use child workflows for the outer fan-out so each group gets independent error handling and its own journal.
+
+<div className="not-prose my-8 max-w-lg mx-auto">
+  <div className="flex flex-col items-center">
+    {/* Parent workflow */}
+    <div className="border bg-surface-75 px-5 py-2 text-center">
+      <div className="text-xs font-medium text-foreground">Parent Workflow</div>
+      <div className="text-[10px] text-foreground-muted">generate_report</div>
+    </div>
+    <div className="w-px h-4 bg-border-strong" />
+    <div className="text-[10px] font-mono uppercase tracking-wider text-foreground-muted mb-1">fan-out by region</div>
+    {/* Outer fan-out: 3 regions */}
+    <div className="relative w-full">
+      <div className="absolute top-0 h-px bg-border-strong" style={{ left: 'calc(16.6% - 0.38rem)', right: 'calc(16.6% - 0.38rem)' }} />
+      <div className="grid grid-cols-3 gap-3">
+        {['Region A', 'Region B', 'Region C'].map((region) => (
+          <div key={region} className="flex flex-col items-center">
+            <div className="w-px h-4 bg-border-strong" />
+            {/* Child workflow */}
+            <div className="border border-dashed bg-background w-full p-2.5 flex flex-col items-center">
+              <div className="text-[10px] font-medium text-foreground mb-1">{region}</div>
+              <div className="text-[10px] text-foreground-muted mb-2">child workflow</div>
+              {/* Inner fan-out: stores */}
+              <div className="grid grid-cols-3 gap-1 w-full">
+                {[1, 2, 3].map((s) => (
+                  <div key={s} className="border bg-surface-75 py-1 text-center">
+                    <div className="text-[8px] text-foreground-muted">Store {s}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="w-px h-4 bg-border-strong" />
+          </div>
+        ))}
+      </div>
+      <div className="absolute bottom-0 h-px bg-border-strong" style={{ left: 'calc(16.6% - 0.38rem)', right: 'calc(16.6% - 0.38rem)' }} />
+    </div>
+    <div className="text-[10px] font-mono uppercase tracking-wider text-foreground-muted mt-1">fan-in</div>
+    <div className="w-px h-4 bg-border-strong" />
+    {/* Aggregate */}
+    <div className="border bg-surface-100 px-5 py-2 text-center">
+      <div className="text-xs font-medium text-foreground">Aggregate Report</div>
+    </div>
+  </div>
+</div>
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Region {
+    region_id: String,
+    stores: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RegionalData {
+    region_id: String,
+    store_count: usize,
+    total_sales: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReportResult {
+    total_regions: usize,
+    total_stores: usize,
+    total_sales: f64,
+}
+
+// Task to get a single store's sales
+#[task(name = "get_store_sales")]
+pub async fn get_store_sales(
+    _ctx: TaskContext,
+    store_id: String,
+) -> Result<f64> {
+    // Fetch sales data for this store
+    Ok(store_id.len() as f64 * 1000.0)
+}
+
+// Child workflow: Level 2 fan-out for stores in a region
+#[workflow(name = "process_region", version = "1.0.0")]
+pub async fn process_region(
+    ctx: WorkflowContext,
+    region: Region,
+) -> Result<RegionalData> {
+    // Level 2 Fan-Out: Process each store in parallel
+    let mut store_tasks = Vec::new();
+
+    for store in &region.stores {
+        let task = ctx.execute_task(get_store_sales, store.clone());
+        store_tasks.push(task);
+    }
+
+    // Level 2 Fan-In: Aggregate store sales
+    let mut total_sales = 0.0;
+
+    for task in store_tasks {
+        let sales: f64 = task.await?;
+        total_sales += sales;
+    }
+
+    Ok(RegionalData {
+        region_id: region.region_id,
+        store_count: region.stores.len(),
+        total_sales,
+    })
+}
+
+// Parent workflow: Level 1 fan-out across regions
+#[workflow(name = "regional_report", version = "1.0.0")]
+pub async fn regional_report(
+    ctx: WorkflowContext,
+    regions: Vec<Region>,
+) -> Result<ReportResult> {
+    println!("Generating report for {} regions", regions.len());
+
+    // Level 1 Fan-Out: Process each region as a child workflow
+    let mut region_handles = Vec::new();
+
+    for region in &regions {
+        let handle = ctx
+            .start_child_workflow("process_region", region.clone())
+            .await?;
+        region_handles.push(handle);
+    }
+
+    // Level 1 Fan-In: Collect regional results
+    let mut total_stores = 0;
+    let mut total_sales = 0.0;
+
+    for handle in region_handles {
+        let regional_data: RegionalData = handle.result().await?;
+        total_stores += regional_data.store_count;
+        total_sales += regional_data.total_sales;
+    }
+
+    println!("Report complete: {} regions, {} stores, ${:.2} total sales",
+        regions.len(), total_stores, total_sales);
+
+    Ok(ReportResult {
+        total_regions: regions.len(),
+        total_stores,
+        total_sales,
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import {
+  Workflow, Tasks, Task, WorkflowContext, TaskContext, createTaskRefs
+} from '@orcher/sdk';
+
+interface Region {
+  regionId: string;
+  stores: string[];
+}
+
+interface RegionalData {
+  regionId: string;
+  storeCount: number;
+  totalSales: number;
+}
+
+interface ReportResult {
+  totalRegions: number;
+  totalStores: number;
+  totalSales: number;
+}
+
+@Tasks()
+class SalesTasks {
+  @Task({ name: 'getStoreSales' })
+  async getStoreSales(ctx: TaskContext, storeId: string): Promise<number> {
+    return storeId.length * 1000;
+  }
+}
+
+const tasks = createTaskRefs(SalesTasks);
+
+// Child workflow: Level 2 fan-out for stores in a region
+@Workflow()
+class ProcessRegion {
+  async run(ctx: WorkflowContext, region: Region): Promise<RegionalData> {
+    // Level 2 Fan-Out: Process each store in parallel
+    const storePromises = region.stores.map((store) =>
+      ctx.executeTask(tasks.getStoreSales, store),
+    );
+
+    // Level 2 Fan-In: Aggregate store sales
+    const storeSales = await Promise.all(storePromises);
+    const totalSales = storeSales.reduce((sum, s) => sum + s, 0);
+
+    return {
+      regionId: region.regionId,
+      storeCount: region.stores.length,
+      totalSales,
+    };
+  }
+}
+
+// Parent workflow: Level 1 fan-out across regions
+@Workflow()
+class RegionalReport {
+  async run(ctx: WorkflowContext, regions: Region[]): Promise<ReportResult> {
+    console.log(`Generating report for ${regions.length} regions`);
+
+    // Level 1 Fan-Out: Process each region as a child workflow
+    const regionHandles = await Promise.all(
+      regions.map((region) =>
+        ctx.startChildWorkflow('process_region', region),
+      ),
+    );
+
+    // Level 1 Fan-In: Collect regional results
+    const regionalResults = await Promise.all(
+      regionHandles.map((handle) => handle.result<RegionalData>()),
+    );
+
+    const totalStores = regionalResults.reduce((sum, r) => sum + r.storeCount, 0);
+    const totalSales = regionalResults.reduce((sum, r) => sum + r.totalSales, 0);
+
+    console.log(
+      `Report complete: ${regions.length} regions, ${totalStores} stores, $${totalSales.toFixed(2)} total sales`,
+    );
+
+    return {
+      totalRegions: regions.length,
+      totalStores,
+      totalSales,
+    };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext, TaskContext
+
+@task(name="get_store_sales")
+async def get_store_sales(ctx: TaskContext, store_id: str) -> float:
+    return len(store_id) * 1000.0
+
+# Child workflow: Level 2 fan-out for stores in a region
+@workflow(name="process_region", version="1.0.0")
+async def process_region(ctx: WorkflowContext, region: dict) -> dict:
+    # Level 2 Fan-Out: Process each store in parallel
+    store_tasks = [
+        ctx.execute_task(get_store_sales, store)
+        for store in region["stores"]
+    ]
+
+    # Level 2 Fan-In: Aggregate store sales
+    total_sales = 0.0
+    for task_future in store_tasks:
+        sales = await task_future
+        total_sales += sales
+
+    return {
+        "region_id": region["region_id"],
+        "store_count": len(region["stores"]),
+        "total_sales": total_sales,
+    }
+
+# Parent workflow: Level 1 fan-out across regions
+@workflow(name="regional_report", version="1.0.0")
+async def regional_report(ctx: WorkflowContext, regions: list[dict]) -> dict:
+    print(f"Generating report for {len(regions)} regions")
+
+    # Level 1 Fan-Out: Process each region as a child workflow
+    region_handles = []
+    for region in regions:
+        handle = await ctx.start_child_workflow("process_region", region)
+        region_handles.append(handle)
+
+    # Level 1 Fan-In: Collect regional results
+    total_stores = 0
+    total_sales = 0.0
+
+    for handle in region_handles:
+        regional_data = await handle.result()
+        total_stores += regional_data["store_count"]
+        total_sales += regional_data["total_sales"]
+
+    print(
+        f"Report complete: {len(regions)} regions, "
+        f"{total_stores} stores, ${total_sales:.2f} total sales"
+    )
+
+    return {
+        "total_regions": len(regions),
+        "total_stores": total_stores,
+        "total_sales": total_sales,
+    }
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/patterns/fan-out-fan-in/dynamic" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Dynamic Fan-Out</h3>
+      <p className="text-sm text-foreground-light">
+        Determine parallelism from runtime data
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/fan-out-fan-in/best-practices" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Best Practices & Performance</h3>
+      <p className="text-sm text-foreground-light">
+        Guidelines, performance tuning, and real-world use cases
+      </p>
+    </div>
+  </Link>
+</div>

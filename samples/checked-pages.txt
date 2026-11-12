@@ -1,0 +1,37 @@
+# Guide pages whose code is fully checked. On these pages
+# scripts/check-samples.sh FAILS on any Rust/TypeScript/Python fence not taken
+# from samples/ via <$CodeSample> (and not opted out with a reason), and on any
+# `orcher ...` command in a shell block that the CLI does not accept. Every
+# other page is only counted.
+#
+# Add a page here in the same change that converts it. When every page under
+# content/guides is listed, CI switches to `check-samples.sh --strict` and this
+# file can go.
+content/guides/getting-started/quickstart.mdx
+content/guides/sdk/python/actors.mdx
+content/guides/sdk/python/client.mdx
+content/guides/sdk/python/index.mdx
+content/guides/sdk/python/patterns.mdx
+content/guides/sdk/python/sessions.mdx
+content/guides/sdk/python/tasks.mdx
+content/guides/sdk/python/testing.mdx
+content/guides/sdk/python/worker.mdx
+content/guides/sdk/python/workflows.mdx
+content/guides/sdk/rust/index.mdx
+content/guides/sdk/rust/workflows.mdx
+content/guides/sdk/rust/tasks.mdx
+content/guides/sdk/rust/client.mdx
+content/guides/sdk/rust/worker.mdx
+content/guides/sdk/rust/sessions.mdx
+content/guides/sdk/rust/actors.mdx
+content/guides/sdk/rust/testing.mdx
+content/guides/sdk/rust/patterns.mdx
+content/guides/sdk/typescript/actors.mdx
+content/guides/sdk/typescript/client.mdx
+content/guides/sdk/typescript/index.mdx
+content/guides/sdk/typescript/patterns.mdx
+content/guides/sdk/typescript/sessions.mdx
+content/guides/sdk/typescript/tasks.mdx
+content/guides/sdk/typescript/testing.mdx
+content/guides/sdk/typescript/worker.mdx
+content/guides/sdk/typescript/workflows.mdx

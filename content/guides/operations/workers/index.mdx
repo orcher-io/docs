@@ -1,0 +1,67 @@
+---
+id: workers
+title: Workers
+description: Understand how Orcher workers poll for work, execute workflows and tasks, scale horizontally, and shut down gracefully
+---
+
+A worker is an SDK **Worker** instance — your application process running the Orcher SDK. Workers are not separate infrastructure. You define workflows and tasks in code, build a Worker with the builder API, and call `worker.run()`. The Worker connects to the orchestrator via gRPC, polls for work, executes your handlers, and reports results.
+
+- **Stateless** — All workflow state lives in the orchestrator's PostgreSQL database, not in the worker
+- **Scalable** — Add or remove workers dynamically with no state migration
+- **Multi-language** — Same worker model across Rust, Python, and TypeScript SDKs
+- **Self-registering** — Workers register their capabilities on startup and deregister on shutdown
+
+---
+
+## Concepts
+
+### Worker
+
+A Worker is the top-level object you create from the SDK. It encapsulates everything needed to poll for and execute work: the gRPC connection, registered workflow and task handlers, concurrency limits, and poller threads. A single OS process runs one Worker.
+
+### Task Queue
+
+Each Worker polls a single **task queue** — a named channel through which the orchestrator routes work to workers. When a workflow dispatches a task, the orchestrator places it on the task queue specified in the workflow configuration. Only workers polling that queue will receive the work.
+
+Use separate task queues to isolate workloads with different resource requirements:
+
+```rust
+// CPU-intensive work — lower concurrency, deploy on compute-optimized instances
+let compute_worker = WorkerBuilder::new()
+    .task_queue("compute")
+    .max_concurrent_tasks(50)
+    .build().await?;
+
+// I/O-intensive work — higher concurrency, deploy on network-optimized instances
+let io_worker = WorkerBuilder::new()
+    .task_queue("io-tasks")
+    .max_concurrent_tasks(500)
+    .build().await?;
+```
+
+### Worker Identity
+
+Every Worker has an identity string used for logging, debugging, and correlating work back to specific processes. If you don't set one explicitly, each SDK generates a default:
+
+| SDK | Default Format | Example |
+|-----|---------------|---------|
+| Rust | `orcher-rust-{uuid}` | `orcher-rust-7e27ab5c-...` |
+| Python | `python-worker-{nanoseconds}` | `python-worker-1710532800000000000` |
+| TypeScript | `worker-{hostname}-{pid}-{timestamp}` | `worker-ip-10-0-1-42-1-1710532800000` |
+
+In containerized environments, the auto-generated identity may not be useful — containers often have PID 1 and random hostnames. Set an explicit identity that links back to your deployment context:
+
+```rust
+WorkerBuilder::new()
+    .identity(&format!("order-worker-{}", std::env::var("POD_NAME").unwrap_or_default()))
+    // ...
+```
+
+---
+
+## Next Steps
+
+- [Creating a Worker](/guides/operations/workers/creating-a-worker) — Builder API and configuration options
+- [Connectivity](/guides/operations/workers/connectivity) — Registration, polling, heartbeats, and eager dispatch
+- [Scaling](/guides/operations/workers/scaling) — Horizontal scaling, recovery, and performance tuning
+- [Operations](/guides/operations/workers/operations) — Graceful shutdown, monitoring, and troubleshooting

@@ -1,0 +1,69 @@
+---
+id: typescript-actors
+title: Actors
+description: Build virtual actors with the TypeScript SDK — operations, server-side state, operation modes and calling actors from a client
+sidebar_label: 'Actors'
+---
+
+An actor is an addressable piece of state with operations on it. Each actor has a type and a
+key; its state lives in the engine as named values, so any worker can run its operations.
+Operations on one key are processed one at a time, unless they are declared read-only.
+
+---
+
+## Defining an Actor
+
+<$CodeSample path="typescript/src/actors/cart.ts" region="actor" />
+
+- `@Actor({ name })` names the actor type; without `name`, the class name is used.
+- Each `@Operation()` method takes an `ActorContext` first and at most one input.
+- `ctx.state` reads and writes the actor's state in the engine: `get<T>(key)`, `set(key, value)`,
+  `delete(key)` and `listKeys(prefix?)`. Values are stored as JSON.
+- The actor class is built anew for each operation, by the worker's container, so constructor
+  parameters are injected as for [task classes](/guides/sdk/typescript/tasks#dependency-injection).
+  Keep state in `ctx.state`, not in fields.
+
+A worker polls for actor operations only when actors are registered in its process; register
+them by importing the module, as with workflows and tasks.
+
+---
+
+## Operation Modes
+
+| Mode | Behavior |
+|------|----------|
+| `'exclusive'` (default) | Runs alone: no other operation on the same key runs at the same time |
+| `'shared'` | May run alongside other shared operations on the same key; an exclusive operation waits for them |
+
+Declare an operation `shared` only if it does not change state.
+
+---
+
+## Calling an Actor
+
+`client.actorRef(ActorClass, key)` returns a typed reference. Each operation becomes a method
+that takes the operation's input, or nothing for an operation without one:
+
+<$CodeSample path="typescript/src/actors/client.ts" region="client" />
+
+There is no create step: the first operation on a key finds its state empty.
+
+---
+
+## ActorContext Reference
+
+| Member | Description |
+|--------|-------------|
+| `ctx.state` | The actor's state in the engine: `get`, `set`, `delete`, `listKeys` |
+| `ctx.actorName` / `ctx.key` | The actor type and key |
+| `ctx.operationName` / `ctx.operationId` | The operation being run |
+| `ctx.mode` | `'exclusive'` or `'shared'` |
+| `ctx.metadata` | Metadata sent with the operation |
+
+---
+
+## Next Steps
+
+- [Client](/guides/sdk/typescript/client): connecting a client
+- [Tasks](/guides/sdk/typescript/tasks): injection into task and actor classes
+- [Worker](/guides/sdk/typescript/worker): actor pollers and concurrency

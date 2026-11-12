@@ -1,0 +1,1217 @@
+---
+title: 'Configuration & Environment'
+description: 'Configure your Orcher workers with orcher.toml and environment variables. Learn worker settings, database connections, and multi-environment setup.'
+sidebar_label: 'Configuration'
+---
+
+Configure your Orcher workers and environment settings. Learn how to use `orcher.toml` for worker configuration and environment variables for runtime settings.
+
+## Choose Your SDK
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+**Configuration Files:**
+• `orcher.toml` - Worker configuration
+• `.env` - Environment variables
+• `Cargo.toml` - Dependencies and metadata
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+TypeScript configuration guide will be available when the SDK is released.
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+Python configuration guide will be available when the SDK is released.
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+Go configuration guide will be available when the SDK is released.
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Configuration File (orcher.toml)
+
+The `orcher.toml` file configures your worker. Place it in your project root directory.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+### Basic Configuration
+
+```toml
+# orcher.toml
+
+[service]
+name = "payment-service"
+version = "1.0.0"
+description = "Payment processing workflow service"
+
+[orchestrator]
+# URL of the Orcher orchestrator server
+url = "http://localhost:9090"
+
+# Connection timeout
+connect_timeout = "10s"
+
+# Request timeout
+request_timeout = "30s"
+
+# Keep-alive interval
+keep_alive = "60s"
+
+[worker]
+# Port for the worker to listen on
+port = 9080
+
+# Maximum concurrent workflow executions
+concurrency = 10
+
+# Graceful shutdown timeout
+shutdown_timeout = "30s"
+
+# Heartbeat interval
+heartbeat_interval = "30s"
+
+[database]
+# PostgreSQL connection URL
+# Can be overridden by DATABASE_URL env var
+url = "postgresql://postgres:postgres@localhost:5432/orcher_dev"
+
+# Maximum database connections
+max_connections = 20
+
+# Minimum idle connections
+min_connections = 5
+
+# Connection timeout
+connect_timeout = "10s"
+
+[logging]
+# Log level: trace, debug, info, warn, error
+level = "info"
+
+# Log format: json, pretty
+format = "pretty"
+
+# Log to file
+file = "logs/orcher.log"
+
+# Enable structured logging
+structured = true
+
+[metrics]
+# Enable metrics collection
+enabled = true
+
+# Prometheus metrics endpoint port
+port = 9091
+
+# Metrics path
+path = "/metrics"
+
+[retry]
+# Default retry configuration for tasks
+max_retries = 3
+initial_delay = "5s"
+max_delay = "5m"
+backoff_multiplier = 2.0
+
+[timeouts]
+# Default workflow execution timeout
+workflow_timeout = "1h"
+
+# Default task execution timeout
+task_timeout = "5m"
+```
+
+### Production Configuration
+
+```toml
+# orcher.production.toml
+
+[service]
+name = "payment-service"
+version = "1.0.0"
+environment = "production"
+
+[orchestrator]
+url = "https://orcher.mycompany.com:9090"
+connect_timeout = "30s"
+request_timeout = "60s"
+
+# TLS configuration
+[orchestrator.tls]
+enabled = true
+cert_path = "/etc/ssl/certs/orcher-client.crt"
+key_path = "/etc/ssl/private/orcher-client.key"
+ca_path = "/etc/ssl/certs/ca.crt"
+
+[worker]
+port = 9080
+concurrency = 50
+
+# Health check endpoint
+[worker.health]
+enabled = true
+port = 8080
+path = "/health"
+
+[database]
+url = "postgresql://orcher_user:secure_password@db.mycompany.com:5432/orcher_prod"
+max_connections = 100
+min_connections = 10
+
+# Connection pooling
+[database.pool]
+max_lifetime = "30m"
+idle_timeout = "10m"
+
+[logging]
+level = "warn"
+format = "json"
+file = "/var/log/orcher/service.log"
+
+# Send logs to external service
+[logging.remote]
+enabled = true
+endpoint = "https://logs.mycompany.com"
+api_key_env = "LOGGING_API_KEY"
+
+[metrics]
+enabled = true
+port = 9091
+
+# Export to Prometheus
+[metrics.prometheus]
+enabled = true
+push_gateway = "https://prometheus.mycompany.com"
+push_interval = "30s"
+
+[security]
+# Enable authentication
+auth_enabled = true
+auth_token_env = "ORCHER_AUTH_TOKEN"
+
+# Rate limiting
+[security.rate_limit]
+enabled = true
+requests_per_second = 100
+burst = 200
+```
+
+### Load Configuration
+
+```rust
+use orcher::config::Config;
+
+#[tokio::main]
+async fn main() -> orcher::Result<()> {
+    // Load from default location (orcher.toml)
+    let config = Config::from_file("orcher.toml")?;
+    
+    // Or load from custom location
+    let config = Config::from_file("config/production.toml")?;
+    
+    // Or load with environment override
+    let config = Config::from_file("orcher.toml")?
+        .with_env_override()?;
+    
+    // Use configuration
+    let worker = WorkerBuilder::new()
+        .config(config)
+        .build()
+        .await?;
+    
+    worker.run().await
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Environment Variables
+
+Environment variables override configuration file settings and are useful for secrets and deployment-specific values.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+### Core Environment Variables
+
+```bash
+# Orchestrator Connection
+ORCHER_ORCHESTRATOR_URL="http://localhost:9090"
+
+# Database
+DATABASE_URL="postgresql://postgres:postgres@localhost:5432/orcher_dev"
+
+# Worker Settings
+ORCHER_WORKER_PORT=9080
+ORCHER_WORKER_CONCURRENCY=10
+
+# Logging
+RUST_LOG=info
+ORCHER_LOG_FORMAT=json
+ORCHER_LOG_FILE=/var/log/orcher/service.log
+
+# Metrics
+ORCHER_METRICS_ENABLED=true
+ORCHER_METRICS_PORT=9091
+
+# Authentication
+ORCHER_AUTH_TOKEN=your-secret-token
+
+# Timeouts
+ORCHER_WORKFLOW_TIMEOUT=3600
+ORCHER_TASK_TIMEOUT=300
+```
+
+### Using .env File
+
+Create a `.env` file in your project root:
+
+```bash
+# .env (for local development)
+
+# Orchestrator
+ORCHER_ORCHESTRATOR_URL=http://localhost:9090
+
+# Database
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/orcher_dev
+
+# Worker
+ORCHER_WORKER_PORT=9080
+ORCHER_WORKER_CONCURRENCY=10
+
+# Logging
+RUST_LOG=debug
+ORCHER_LOG_FORMAT=pretty
+
+# External Services
+STRIPE_API_KEY=sk_test_...
+SENDGRID_API_KEY=SG...
+AWS_REGION=us-east-1
+```
+
+Load in your application:
+
+```rust
+use dotenv::dotenv;
+
+#[tokio::main]
+async fn main() -> orcher::Result<()> {
+    // Load .env file
+    dotenv().ok();
+    
+    // Environment variables are now available
+    let orchestrator_url = std::env::var("ORCHER_ORCHESTRATOR_URL")
+        .unwrap_or_else(|_| "http://localhost:9090".to_string());
+    
+    let worker = WorkerBuilder::new()
+        .server_url(&orchestrator_url)
+        .task_queue("default")
+        .build()
+        .await?;
+    
+    worker.run().await
+}
+```
+
+### Environment-Specific Files
+
+```bash
+# .env.development
+ORCHER_ORCHESTRATOR_URL=http://localhost:9090
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/orcher_dev
+RUST_LOG=debug
+
+# .env.staging
+ORCHER_ORCHESTRATOR_URL=https://orcher-staging.mycompany.com:9090
+DATABASE_URL=postgresql://orcher_user:password@staging-db:5432/orcher_staging
+RUST_LOG=info
+
+# .env.production
+ORCHER_ORCHESTRATOR_URL=https://orcher.mycompany.com:9090
+DATABASE_URL=postgresql://orcher_user:password@prod-db:5432/orcher_prod
+RUST_LOG=warn
+```
+
+Load based on environment:
+
+```rust
+use dotenv::dotenv;
+use std::env;
+
+#[tokio::main]
+async fn main() -> orcher::Result<()> {
+    let environment = env::var("ENVIRONMENT")
+        .unwrap_or_else(|_| "development".to_string());
+    
+    // Load environment-specific file
+    let env_file = format!(".env.{}", environment);
+    dotenv::from_filename(&env_file).ok();
+    
+    // Continue with setup
+    // ...
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Multi-Environment Setup
+
+### Development Environment
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```toml
+# config/development.toml
+
+[service]
+name = "payment-service"
+environment = "development"
+
+[orchestrator]
+url = "http://localhost:9090"
+
+[worker]
+port = 9080
+concurrency = 5
+
+[database]
+url = "postgresql://postgres:postgres@localhost:5432/orcher_dev"
+max_connections = 10
+
+[logging]
+level = "debug"
+format = "pretty"
+
+[metrics]
+enabled = true
+port = 9091
+```
+
+**Run:**
+
+```bash
+# Set environment
+export ENVIRONMENT=development
+
+# Run with dev config
+cargo run --bin payment-service
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+</TabPanel>
+
+</Tabs>
+
+### Staging Environment
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```toml
+# config/staging.toml
+
+[service]
+name = "payment-service"
+environment = "staging"
+
+[orchestrator]
+url = "https://orcher-staging.mycompany.com:9090"
+
+[worker]
+port = 9080
+concurrency = 20
+
+[database]
+url = "postgresql://orcher_user:${DB_PASSWORD}@staging-db:5432/orcher_staging"
+max_connections = 50
+
+[logging]
+level = "info"
+format = "json"
+file = "/var/log/orcher/service.log"
+
+[metrics]
+enabled = true
+port = 9091
+```
+
+**Deploy:**
+
+```bash
+# Set environment
+export ENVIRONMENT=staging
+export DB_PASSWORD=staging_password
+export ORCHER_AUTH_TOKEN=staging_token
+
+# Run
+./payment-service --config config/staging.toml
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+</TabPanel>
+
+</Tabs>
+
+### Production Environment
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```toml
+# config/production.toml
+
+[service]
+name = "payment-service"
+environment = "production"
+
+[orchestrator]
+url = "https://orcher.mycompany.com:9090"
+connect_timeout = "30s"
+request_timeout = "60s"
+
+[orchestrator.tls]
+enabled = true
+cert_path = "/etc/ssl/certs/orcher.crt"
+key_path = "/etc/ssl/private/orcher.key"
+ca_path = "/etc/ssl/certs/ca.crt"
+
+[worker]
+port = 9080
+concurrency = 100
+shutdown_timeout = "60s"
+
+[database]
+url = "postgresql://orcher_user:${DB_PASSWORD}@prod-db:5432/orcher_prod"
+max_connections = 200
+min_connections = 20
+
+[logging]
+level = "warn"
+format = "json"
+file = "/var/log/orcher/service.log"
+
+[logging.remote]
+enabled = true
+endpoint = "https://logs.mycompany.com"
+api_key_env = "LOGGING_API_KEY"
+
+[metrics]
+enabled = true
+port = 9091
+
+[metrics.prometheus]
+enabled = true
+push_gateway = "https://prometheus.mycompany.com"
+
+[security]
+auth_enabled = true
+auth_token_env = "ORCHER_AUTH_TOKEN"
+
+[security.rate_limit]
+enabled = true
+requests_per_second = 1000
+```
+
+**Deploy with Docker:**
+
+```dockerfile
+# Dockerfile
+FROM rust:1.70 as builder
+WORKDIR /app
+COPY . .
+RUN cargo build --release
+
+FROM debian:bullseye-slim
+COPY --from=builder /app/target/release/payment-service /usr/local/bin/
+COPY config/production.toml /etc/orcher/config.toml
+
+# Install CA certificates
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+
+CMD ["payment-service", "--config", "/etc/orcher/config.toml"]
+```
+
+**Docker Compose:**
+
+```yaml
+version: '3.8'
+
+services:
+  payment-service:
+    build: .
+    environment:
+      - ENVIRONMENT=production
+      - DATABASE_URL=${DATABASE_URL}
+      - ORCHER_AUTH_TOKEN=${ORCHER_AUTH_TOKEN}
+      - LOGGING_API_KEY=${LOGGING_API_KEY}
+    ports:
+      - "9080:9080"
+      - "9091:9091"
+    volumes:
+      - ./logs:/var/log/orcher
+      - ./certs:/etc/ssl/certs
+    restart: unless-stopped
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Secrets Management
+
+### Using Environment Variables
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use std::env;
+
+#[tokio::main]
+async fn main() -> orcher::Result<()> {
+    // Load secrets from environment
+    let db_password = env::var("DATABASE_PASSWORD")
+        .expect("DATABASE_PASSWORD must be set");
+    
+    let auth_token = env::var("ORCHER_AUTH_TOKEN")
+        .expect("ORCHER_AUTH_TOKEN must be set");
+    
+    let stripe_key = env::var("STRIPE_API_KEY")
+        .expect("STRIPE_API_KEY must be set");
+    
+    // Build database URL with password
+    let database_url = format!(
+        "postgresql://orcher_user:{}@db:5432/orcher_prod",
+        db_password
+    );
+    
+    // Secrets like `db_password` and `stripe_key` are used by your task
+    // implementations (which own the side effects); the worker itself only
+    // needs the orchestrator URL and, optionally, an API key.
+    let _ = &database_url;
+    let worker = WorkerBuilder::new()
+        .server_url("http://localhost:50051")
+        .task_queue("default")
+        .api_key(&auth_token)
+        .build()
+        .await?;
+    
+    worker.run().await
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+</TabPanel>
+
+</Tabs>
+
+### Using HashiCorp Vault
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use vaultrs::client::{VaultClient, VaultClientSettingsBuilder};
+
+async fn load_secrets_from_vault() -> Result<Secrets> {
+    // Connect to Vault
+    let client = VaultClient::new(
+        VaultClientSettingsBuilder::default()
+            .address("https://vault.mycompany.com")
+            .token(env::var("VAULT_TOKEN")?)
+            .build()?
+    )?;
+    
+    // Read secrets
+    let db_secret = client
+        .kv2("secret/orcher")
+        .read("database")
+        .await?;
+    
+    let api_secret = client
+        .kv2("secret/orcher")
+        .read("api-keys")
+        .await?;
+    
+    Ok(Secrets {
+        database_url: db_secret.data["url"].clone(),
+        stripe_key: api_secret.data["stripe"].clone(),
+    })
+}
+
+#[tokio::main]
+async fn main() -> orcher::Result<()> {
+    let secrets = load_secrets_from_vault().await?;
+    
+    let worker = WorkerBuilder::new()
+        .database_url(&secrets.database_url)
+        .build()
+        .await?;
+    
+    worker.run().await
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+</TabPanel>
+
+</Tabs>
+
+### Using AWS Secrets Manager
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use aws_sdk_secretsmanager::Client;
+
+async fn load_secrets_from_aws() -> Result<Secrets> {
+    let config = aws_config::load_from_env().await;
+    let client = Client::new(&config);
+    
+    // Get database credentials
+    let db_secret = client
+        .get_secret_value()
+        .secret_id("orcher/database")
+        .send()
+        .await?;
+    
+    let db_creds: DbCredentials = serde_json::from_str(
+        db_secret.secret_string().unwrap()
+    )?;
+    
+    // Get API keys
+    let api_secret = client
+        .get_secret_value()
+        .secret_id("orcher/api-keys")
+        .send()
+        .await?;
+    
+    let api_keys: ApiKeys = serde_json::from_str(
+        api_secret.secret_string().unwrap()
+    )?;
+    
+    Ok(Secrets {
+        database_url: format!(
+            "postgresql://{}:{}@{}:{}/{}",
+            db_creds.username,
+            db_creds.password,
+            db_creds.host,
+            db_creds.port,
+            db_creds.database
+        ),
+        stripe_key: api_keys.stripe,
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Configuration Validation
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::config::Config;
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+struct ValidatedConfig {
+    #[serde(deserialize_with = "validate_url")]
+    orchestrator_url: String,
+    
+    #[serde(deserialize_with = "validate_port")]
+    worker_port: u16,
+    
+    #[serde(deserialize_with = "validate_concurrency")]
+    concurrency: usize,
+}
+
+fn validate_url<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let url = String::deserialize(deserializer)?;
+    url::Url::parse(&url)
+        .map_err(serde::de::Error::custom)?;
+    Ok(url)
+}
+
+fn validate_port<'de, D>(deserializer: D) -> Result<u16, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let port = u16::deserialize(deserializer)?;
+    if port < 1024 {
+        return Err(serde::de::Error::custom("Port must be >= 1024"));
+    }
+    Ok(port)
+}
+
+fn validate_concurrency<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let concurrency = usize::deserialize(deserializer)?;
+    if concurrency == 0 || concurrency > 1000 {
+        return Err(serde::de::Error::custom(
+            "Concurrency must be between 1 and 1000"
+        ));
+    }
+    Ok(concurrency)
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Best Practices
+
+### 1. Never Commit Secrets
+
+```bash
+# .gitignore
+.env
+.env.*
+!.env.example
+config/**/secrets.toml
+*.key
+*.pem
+```
+
+### 2. Use Environment-Specific Configs
+
+```
+config/
+├── base.toml           # Shared configuration
+├── development.toml    # Dev overrides
+├── staging.toml        # Staging overrides
+└── production.toml     # Production overrides
+```
+
+### 3. Document Required Variables
+
+```bash
+# .env.example
+# Copy to .env and fill in values
+
+# Orchestrator Connection
+ORCHER_ORCHESTRATOR_URL=http://localhost:9090
+
+# Database
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/orcher_dev
+
+# External Services (get from your dashboard)
+STRIPE_API_KEY=sk_test_...
+SENDGRID_API_KEY=SG...
+
+# Optional: Monitoring
+SENTRY_DSN=
+DATADOG_API_KEY=
+```
+
+### 4. Validate Configuration on Startup
+
+```rust
+#[tokio::main]
+async fn main() -> orcher::Result<()> {
+    // Load and validate config
+    let config = Config::from_file("orcher.toml")?
+        .with_env_override()?
+        .validate()?;
+    
+    // Log configuration (without secrets)
+    tracing::info!("Starting with configuration: {:?}", config.safe_debug());
+    
+    // Continue startup
+    // ...
+}
+```
+
+### 5. Use Type-Safe Configuration
+
+```rust
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+struct AppConfig {
+    worker: WorkerConfig,
+    orchestrator: OrchestratorConfig,
+    database: DatabaseConfig,
+}
+
+impl AppConfig {
+    fn load() -> Result<Self> {
+        let config_path = env::var("CONFIG_PATH")
+            .unwrap_or_else(|_| "orcher.toml".to_string());
+        
+        let contents = std::fs::read_to_string(config_path)?;
+        let mut config: AppConfig = toml::from_str(&contents)?;
+        
+        // Override with env vars
+        config.apply_env_overrides()?;
+        
+        Ok(config)
+    }
+}
+```
+
+---
+
+## Troubleshooting
+
+### Configuration Not Loading
+
+```bash
+# Check file exists
+ls -la orcher.toml
+
+# Check file permissions
+chmod 644 orcher.toml
+
+# Verify TOML syntax
+toml-check orcher.toml
+
+# Enable debug logging
+RUST_LOG=orcher::config=debug cargo run
+```
+
+### Environment Variables Not Working
+
+```bash
+# Check variable is set
+echo $ORCHER_ORCHESTRATOR_URL
+
+# List all Orcher variables
+env | grep ORCHER
+
+# Source .env file manually
+set -a && source .env && set +a
+```
+
+### Database Connection Issues
+
+```bash
+# Test database connection
+psql $DATABASE_URL -c "SELECT 1"
+
+# Check connection string format
+# postgresql://[user[:password]@][host][:port][/dbname][?param1=value1&...]
+
+# Common issues:
+# - Wrong password
+# - Database doesn't exist
+# - Host not reachable
+# - Port blocked by firewall
+```
+
+---
+
+## Next Steps
+
+<div className="grid lg:grid-cols-12 gap-6 not-prose">
+  {[
+    {
+      title: 'Workflow Development',
+      href: '/guides/local-development/workflow-development',
+      description: 'Start building workflows with the configured environment.',
+    },
+    {
+      title: 'Debugging Workflows',
+      href: '/guides/local-development/debugging-workflows',
+      description: 'Learn how to debug configuration and runtime issues.',
+    },
+    {
+      title: 'Production Deployment',
+      href: '/guides/deployment/docker',
+      description: 'Deploy your configured services to production.',
+    },
+  ].map((item) => {
+    return (
+      <Link href={`${item.href}`} key={item.title} passHref className={'col-span-4'}>
+        <GlassPanel
+          title={item.title}
+          span="col-span-6"
+          background={false}
+        >
+          {item.description}
+        </GlassPanel>
+      </Link>
+    )
+  })}
+</div>
+
+---
+
+## Learn More
+
+• [CLI Reference](/guides/sdk/cli) - Complete CLI commands and options
+• [Security Best Practices](/guides/security) - Secure your configuration
+• [Quickstart Repository](https://github.com/orcher-io/quickstart) - See configuration in action

@@ -1,0 +1,263 @@
+---
+id: typescript-workflows
+title: Workflows
+description: Define durable workflows with the TypeScript SDK — tasks, inline steps, timers, child workflows, events, queries, deterministic helpers and determinism checks
+sidebar_label: 'Workflows'
+---
+
+A workflow orchestrates tasks, timers, events and child workflows. Its progress is kept in a
+journal in the engine. After a crash, a restart or simply a wait, the workflow's code runs
+again from the top and every step it already took returns its journaled result, so the code
+carries on from where it was. That only works if the code is **deterministic**: given the same
+input and the same step results, it makes the same calls in the same order.
+
+- **No I/O in workflow code.** Calls to the outside world go in tasks, or in `ctx.execute()`.
+- **No `Math.random()`, `Date.now()` or `new Date()`.** Use `ctx.random` and `ctx.time`.
+- **No injected dependencies.** Workflow classes are constructed with no arguments; put
+  services in tasks.
+
+---
+
+## Defining a Workflow
+
+### Functional
+
+<$CodeSample path="typescript/src/workflows/define.ts" region="functional" />
+
+### Class-Based
+
+`@Workflow()` requires a `name`, and the class must have a `run(ctx, input)` method. Both are
+checked when the class is defined.
+
+<$CodeSample path="typescript/src/workflows/define.ts" region="class" />
+
+Both forms register the workflow under its name, which is the `workflowType` clients start it
+by. A workflow takes one input: an object, or a single string, number or boolean. A top-level
+array is not delivered intact in `@orcher/sdk` 0.5.4, so wrap lists in an object.
+
+The other `workflow()` and `@Workflow()` options (`version`, `description`, `timeout`,
+`cronSchedule`) are recorded but have no effect on how the workflow runs. Set timeouts and
+schedules when you start the workflow; see [Client](/guides/sdk/typescript/client#starting-workflows).
+`ctx.version()` returns the `version` label (default `'1.0'`); the engine does not route or
+replay by it.
+
+---
+
+## Running Tasks
+
+### Task References
+
+`ctx.executeTask()` takes a reference from `task({ ... })` or from `createTaskRefs()` on a
+`@Tasks()` class, and the task's input. The input and result types come from the task's
+definition.
+
+<$CodeSample path="typescript/src/workflows/steps.ts" region="execute-task" />
+
+The task runs on whichever worker polls the queue, not inside the workflow. The first time the
+workflow reaches the call, it schedules the task and waits; when the task completes, the
+workflow runs again and the call returns the journaled result.
+
+### Per-Call Options
+
+<$CodeSample path="typescript/src/workflows/steps.ts" region="task-options" />
+
+| Option | Description |
+|--------|-------------|
+| `timeout` | How long one attempt may run. Overrides the task's own `timeout`; with neither, 5 minutes. |
+| `heartbeatTimeout` | How long an attempt may go without a heartbeat. Overrides the task's own; with neither, the engine's default applies. |
+| `queueTimeout` | How long the task may wait for a worker to start it. Unbounded when omitted. |
+
+Each takes a `Duration` or a number of milliseconds.
+
+### Inline Steps
+
+`ctx.execute(name, fn)` runs a closure inside the workflow worker and journals its result under
+the name. On replay it returns the journaled result without running the closure again. Use it
+for a small call that doesn't warrant a task; it has no retry policy or timeout of its own, and
+a closure that throws is not journaled.
+
+<$CodeSample path="typescript/src/workflows/steps.ts" region="closure" />
+
+| Scenario | Use |
+|----------|-----|
+| A step reused across workflows, or needing injected services | `ctx.executeTask(ref, input)` |
+| A step that needs retries, timeouts or heartbeats | `ctx.executeTask(ref, input)` |
+| A small one-off call | `ctx.execute('name', closure)` |
+
+---
+
+## Timers
+
+`ctx.sleep()` takes a `Duration`. The timer is held by the engine, so a worker restart does not
+reset it, and no worker needs to be running while it waits.
+
+<$CodeSample path="typescript/src/workflows/timers.ts" region="timers" />
+
+---
+
+## Child Workflows
+
+`ctx.executeChildWorkflow()` starts a workflow by name and waits for its result:
+
+<$CodeSample path="typescript/src/workflows/children.ts" region="execute-child" />
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `workflowId` | derived from the parent's step | The child's workflow id |
+| `taskQueue` | the parent's queue | The queue whose workers run the child |
+| `timeout` | none | The child's execution timeout, as a `Duration` |
+| `parentClosePolicy` | `ParentClosePolicy.REQUEST_CANCEL` | What happens to the child when the parent closes: `REQUEST_CANCEL`, `TERMINATE` or `ABANDON` |
+
+`ctx.startChildWorkflow()` starts the child without waiting and returns a handle, so you can
+start several and wait for them together:
+
+<$CodeSample path="typescript/src/workflows/children.ts" region="start-child" />
+
+A child that fails throws a `ChildWorkflowFailedError` in the parent, with the child's
+`workflowType`, `workflowId` and failure `reason`:
+
+<$CodeSample path="typescript/src/workflows/children.ts" region="child-failure" />
+
+---
+
+## Events
+
+A workflow can wait for an event that a client sends with `handle.sendEvent(name, payload)`.
+
+<$CodeSample path="typescript/src/workflows/events.ts" region="wait" />
+
+`waitForEventWithTimeout()` returns `null` when the timeout passes first; it does not throw. The
+timeout is a durable timer, like `ctx.sleep()`:
+
+<$CodeSample path="typescript/src/workflows/events.ts" region="wait-timeout" />
+
+An event that arrives before the workflow waits for it is kept, and the next wait for that name
+returns it.
+
+---
+
+## Queries and State
+
+`ctx.registerQueryHandler(name, fn)` answers `handle.query(name)` from a client. The handler
+should only read; it is called with the workflow's state as of its latest step.
+
+<$CodeSample path="typescript/src/workflows/queries.ts" region="queries" />
+
+`ctx.setState(key, value)` and `ctx.getState(key)` keep named values for the current run of the
+code. They are not journaled: like local variables, they are rebuilt when the code runs again,
+so set them only from the input and step results.
+
+---
+
+## Deterministic Helpers
+
+`ctx.random` returns the same values in the same order every time the code runs, seeded by the
+workflow id. `ctx.time` is the workflow's clock, read from its journal: it starts at the moment
+the engine journaled the workflow's start, and moves forward to when each task result, fired
+timer, child outcome or event the workflow receives was journaled. A run of the code reads the
+same time at the same point as every earlier run. A closure run with `ctx.execute()` does not
+move it.
+
+<$CodeSample path="typescript/src/workflows/deterministic.ts" region="deterministic" />
+
+| Helper | Returns |
+|--------|---------|
+| `ctx.random.uuid()` | A UUID string |
+| `ctx.random.random()` | A number in [0, 1) |
+| `ctx.random.randomRange(min, max)` | An integer in [min, max], both included |
+| `ctx.random.choose(items)` / `shuffle(items)` / `weightedChoose(pairs)` | A pick, a shuffled copy, a weighted pick |
+| `ctx.time.now()` | The workflow's current time, as a `Date` |
+| `ctx.time.startedAt()` | When the workflow started |
+| `ctx.time.elapsed()` / `elapsedSecs()` | Time since the start, in milliseconds or whole seconds |
+| `ctx.time.hasElapsed(ms)` | Whether at least `ms` milliseconds have passed since the start |
+
+### What Is Checked on Replay
+
+On replay the SDK checks the code against the journal. A run whose code no longer matches what
+it recorded is **held**: the activation is not applied, the run stays open with its journal
+unchanged, the worker logs an error naming the workflow and run, and the activation is tried
+again after a pause that grows with each attempt. Nothing is lost, and a run held because of a
+bad deploy continues once code that replays it is running again.
+
+What is caught:
+
+- code that no longer reaches a step the journal recorded, and then issues new work or
+  finishes; and
+- code that issues different work at a recorded position, for example a different task where
+  another used to be.
+
+What is **not** caught (tracked in [sdk-core#14](https://github.com/orcher-io/sdk-core/issues/14)):
+
+- reordering steps of different kinds, such as moving a timer before a task; and
+- changing a timer's duration.
+
+To change a workflow with runs in flight, let those runs finish before deploying an
+incompatible change, or put the new code under a new workflow name and start new runs there.
+Give each worker a [`versionId`](/guides/sdk/typescript/worker#configuration) for the code it
+runs; the engine records it on each execution.
+
+---
+
+## Handling Failures in a Workflow
+
+A task that fails after its retries makes `ctx.executeTask()` throw a `WorkflowError` with code
+`TASK_EXECUTION_FAILED`. Uncaught, it fails the workflow.
+
+To catch it, know one thing about how waiting works: when the workflow reaches a step whose
+result isn't in the journal yet, `ctx.executeTask()` (and `sleep`, `waitForEvent`, child
+workflows and sessions) **throws** a suspension to stop the run until the result
+arrives. A `catch` around those calls sees that suspension too. Re-throw it first, with
+`isWorkflowSuspension()`, or the `catch` treats every wait as a failure:
+
+<$CodeSample path="typescript/src/workflows/errors.ts" region="catch" />
+
+The same applies to `finally`: it runs on every suspension, so don't put steps in it.
+
+---
+
+## Restarting with a Fresh Journal
+
+A workflow that loops for a long time grows its journal with every step. `ctx.restartFresh(input)`
+ends the current run and starts a new run of the same workflow with an empty journal and the
+given input. Call it once, then return.
+
+<$CodeSample path="typescript/src/workflows/restart.ts" region="restart" />
+
+Everything the next run needs must be in that input: nothing else carries over. `options` can
+set a different `workflowType`, `taskQueue` or `timeout` for the new run.
+
+---
+
+## Workflow Metadata
+
+<$CodeSample path="typescript/src/workflows/metadata.ts" region="metadata" />
+
+---
+
+## WorkflowContext Reference
+
+| Method | Description |
+|--------|-------------|
+| `ctx.executeTask(ref, input, options?)` | Run a task and wait for its result |
+| `ctx.execute(name, closure)` | Run a closure once and journal its result |
+| `ctx.sleep(duration)` | Durable timer, for a `Duration` |
+| `ctx.sleepWithId(id, duration)` | Durable timer with an id you choose |
+| `ctx.waitForEvent<T>(name)` | Wait for an event |
+| `ctx.waitForEventWithTimeout<T>(name, timeout)` | Wait for an event; `null` on timeout |
+| `ctx.executeChildWorkflow<T>(type, input, options?)` | Start a child workflow and wait for its result |
+| `ctx.startChildWorkflow<T>(type, input, options?)` | Start a child workflow; returns a handle |
+| `ctx.createSession()` | Pin tasks to one worker; see [Sessions](/guides/sdk/typescript/sessions) |
+| `ctx.registerQueryHandler(name, handler)` | Answer client queries |
+| `ctx.setState(key, value)` / `ctx.getState(key)` | Named values for the current run of the code |
+| `ctx.random` | Deterministic random values |
+| `ctx.time` | The workflow's clock |
+| `ctx.restartFresh(input, options?)` | End this run and start a new one with an empty journal |
+| `ctx.workflowId()` / `runId()` / `workflowType()` / `namespace()` / `taskQueue()` / `attempt()` / `isReplaying()` | Metadata |
+
+---
+
+## Next Steps
+
+- [Tasks](/guides/sdk/typescript/tasks): task options, retries, heartbeats
+- [Client](/guides/sdk/typescript/client): starting workflows, sending events, queries
+- [Patterns](/guides/sdk/typescript/patterns): sagas, fan-out, approvals

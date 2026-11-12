@@ -1,0 +1,123 @@
+---
+id: worker-operations
+title: Worker Operations
+description: Graceful shutdown, monitoring, and troubleshooting for Orcher workers
+---
+
+## Graceful Shutdown
+
+### Rust
+
+Call `worker.shutdown()` to initiate graceful shutdown:
+
+1. Broadcast shutdown signal to all drivers
+2. Stop all pollers (no new work accepted)
+3. In-flight workflows and tasks complete naturally
+4. Send `DeregisterWorker` RPC to orchestrator
+5. Worker removed from registry
+
+There is no explicit timeout — in-flight work is allowed to complete. Handle SIGINT/SIGTERM to trigger shutdown.
+
+### Python
+
+Shutdown is handled via signal handling. In-flight work completes within the Python event loop's shutdown sequence.
+
+### TypeScript
+
+TypeScript provides two-stage shutdown with configurable timeouts:
+
+```typescript
+const worker = new Worker({
+  serverUrl: 'http://localhost:50051',
+  taskQueue: 'orders',
+  shutdownGraceTime: 30000,      // 30s to finish in-flight work
+  forceShutdownTimeout: 60000,   // 60s hard cutoff
+});
+
+// Later:
+await worker.shutdown();
+```
+
+After the grace period, running tasks are cancelled. After the force timeout, the process exits.
+
+### Container Signal Handling
+
+In Docker/Kubernetes, ensure the container receives signals directly:
+
+```dockerfile
+# Use exec form so SIGTERM reaches the process
+CMD ["./order-worker"]
+
+# NOT shell form — signals go to the shell, not your process
+# CMD ./order-worker
+```
+
+---
+
+## Monitoring
+
+### Connected Workers
+
+Check which workers are polling a queue:
+
+```bash
+orcher queue pollers orders
+```
+
+### Queue Health
+
+Monitor whether workers are keeping up:
+
+```bash
+orcher queue depth
+orcher queue stats orders
+```
+
+### Key Metrics
+
+| Metric | What It Tells You |
+|--------|------------------|
+| `orcher_queue_depth` | Pending work per queue — growing means workers can't keep up |
+| `orcher_tasks_running` | Currently executing tasks across all workers |
+| `orcher_task_duration_seconds` | How long tasks take — watch for regressions |
+| `orcher_poll_success_total` | Polls that returned work — low ratio means workers are idle |
+| `orcher_poll_timeout_total` | Polls that timed out — high count is normal when idle |
+
+---
+
+## Troubleshooting
+
+### Worker Can't Connect
+
+```bash
+# Verify orchestrator is running and reachable
+grpcurl -plaintext localhost:50051 list
+
+# Common mistake: using the REST port (8080) instead of the gRPC port (50051)
+```
+
+### Tasks Not Being Picked Up
+
+1. **Wrong task queue** — The worker's `task_queue` must match what the workflow dispatches to
+2. **Wrong namespace** — Worker namespace must match the workflow's namespace
+3. **Handler not registered** — In Rust, ensure `#[workflow]` and `#[task]` macros are applied. In TypeScript, ensure workflow and task classes are passed to the Worker builder.
+
+### High Task Latency
+
+1. **Not enough concurrency** — Increase `max_concurrent_tasks` if tasks are I/O-bound
+2. **Not enough workers** — Check queue depth; scale out if it's growing
+3. **Not enough pollers** — Increase `task_poller_count` if work is available but not being claimed fast enough
+
+---
+
+## Next Steps
+
+- [Workers Overview](/guides/operations/workers) — Concepts and architecture
+- [Creating a Worker](/guides/operations/workers/creating-a-worker) — Builder API and configuration options
+- [Connectivity](/guides/operations/workers/connectivity) — Registration, polling, heartbeats, and eager dispatch
+- [Scaling](/guides/operations/workers/scaling) — Horizontal scaling, recovery, and performance tuning
+- [Queue Configuration](/guides/operations/queue) — Task queue architecture and dispatch modes
+- [Orchestrator Server](/guides/operations/orchestrator) — Server-side configuration
+- [Rust SDK](/guides/sdk/rust) — Full Rust SDK reference
+- [Python SDK](/guides/sdk/python) — Full Python SDK reference
+- [TypeScript SDK](/guides/sdk/typescript) — Full TypeScript SDK reference

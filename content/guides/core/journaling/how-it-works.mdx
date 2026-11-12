@@ -1,0 +1,448 @@
+---
+id: 'journaling-how'
+title: 'How Journaling Works'
+description: 'Understand how Orcher journals workflow executions — first execution vs replay, storage layers, journal entry structure, and entry types.'
+sidebar_label: 'How It Works'
+---
+
+The best way to understand journaling is to see it in action. The examples below show a payment workflow with three steps. On first execution, each step runs normally and its result is journaled. If the workflow crashes and replays, completed steps return their journaled result instantly — the external API calls never happen again.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[task]
+pub async fn charge_card(_ctx: TaskContext, input: PaymentInput) -> Result<ChargeResult> {
+    // Call Stripe API...
+}
+
+#[task]
+pub async fn reserve_inventory(_ctx: TaskContext, order_id: String) -> Result<InventoryResult> {
+    // Reserve stock...
+}
+
+#[task]
+pub async fn send_confirmation(_ctx: TaskContext, charge_id: String) -> Result<()> {
+    // Send email...
+}
+
+#[workflow]
+pub async fn payment_workflow(
+    ctx: WorkflowContext,
+    order: OrderInput,
+) -> Result<PaymentResult> {
+    // Step 1: Charge card
+    // First execution: Executes and journals result
+    // Replay: Returns journaled result without re-executing
+    let charge: ChargeResult = ctx
+        .execute_task(charge_card, order.clone())
+        .await?;
+
+    // If crash happens here, step 1 is already journaled
+
+    // Step 2: Reserve inventory
+    // First execution: Executes and journals result
+    // Replay: Returns journaled result
+    let inventory: InventoryResult = ctx
+        .execute_task(reserve_inventory, order.id.clone())
+        .await?;
+
+    // Step 3: Send confirmation
+    // Always executes (not in journal yet)
+    ctx.execute_task(send_confirmation, charge.id.clone()).await?;
+
+    Ok(PaymentResult {
+        charge_id: charge.id,
+        reserved: inventory.reserved,
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, WorkflowContext, TaskContext, createTaskRefs } from '@orcher/sdk';
+
+@Tasks({ taskQueue: 'payments' })
+class PaymentTasks {
+  @Task()
+  async chargeCard(ctx: TaskContext, input: PaymentInput): Promise<ChargeResult> {
+    // Call Stripe API...
+  }
+
+  @Task()
+  async reserveInventory(ctx: TaskContext, orderId: string): Promise<InventoryResult> {
+    // Reserve stock...
+  }
+
+  @Task()
+  async sendConfirmation(ctx: TaskContext, chargeId: string): Promise<void> {
+    // Send email...
+  }
+}
+
+const taskRefs = createTaskRefs(PaymentTasks);
+
+@Workflow()
+class PaymentWorkflow {
+  async run(ctx: WorkflowContext, order: OrderInput): Promise<PaymentResult> {
+    // Step 1: Charge card
+    // First execution: Executes and journals result
+    // Replay: Returns journaled result without re-executing
+    const charge = await ctx.executeTask(taskRefs.chargeCard, order);
+
+    // If crash happens here, step 1 is already journaled
+
+    // Step 2: Reserve inventory
+    // First execution: Executes and journals result
+    // Replay: Returns journaled result
+    const inventory = await ctx.executeTask(taskRefs.reserveInventory, order.id);
+
+    // Step 3: Send confirmation
+    // Always executes (not in journal yet)
+    await ctx.executeTask(taskRefs.sendConfirmation, charge.id);
+
+    return {
+      chargeId: charge.id,
+      reserved: inventory.reserved,
+    };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext, TaskContext
+from dataclasses import dataclass
+
+
+@dataclass
+class PaymentResult:
+    charge_id: str
+    reserved: bool
+
+
+@task
+async def charge_card(ctx: TaskContext, input: PaymentInput) -> ChargeResult:
+    # Call Stripe API...
+
+@task
+async def reserve_inventory(ctx: TaskContext, order_id: str) -> InventoryResult:
+    # Reserve stock...
+
+@task
+async def send_confirmation(ctx: TaskContext, charge_id: str) -> None:
+    # Send email...
+
+
+@workflow
+async def payment_workflow(ctx: WorkflowContext, order: OrderInput) -> PaymentResult:
+    # Step 1: Charge card
+    # First execution: Executes and journals result
+    # Replay: Returns journaled result without re-executing
+    charge = await ctx.execute_task(charge_card, input=order)
+
+    # If crash happens here, step 1 is already journaled
+
+    # Step 2: Reserve inventory
+    # First execution: Executes and journals result
+    # Replay: Returns journaled result
+    inventory = await ctx.execute_task(reserve_inventory, order_id=order.id)
+
+    # Step 3: Send confirmation
+    # Always executes (not in journal yet)
+    await ctx.execute_task(send_confirmation, charge_id=charge.id)
+
+    return PaymentResult(
+        charge_id=charge.id,
+        reserved=inventory.reserved,
+    )
+```
+
+</TabPanel>
+
+</Tabs>
+
+## Execution vs Replay
+
+The diagram below contrasts what happens during a workflow's first execution versus a replay after a crash. On first execution, each step runs its real logic and the result is journaled. On replay, the SDK loads the journal and returns cached results — the original code is never re-invoked.
+
+<div className="not-prose my-8 max-w-2xl mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b">
+    <div className="text-[10px] font-mono uppercase tracking-wide text-foreground-muted">First execution · normal flow</div>
+  </div>
+  <div className="p-4 space-y-1">
+    <div className="flex gap-3">
+      <div className="w-6 h-6 shrink-0 border bg-surface-75 flex items-center justify-center text-[10px] font-mono text-foreground-muted">1</div>
+      <div className="pt-0.5">
+        <div className="text-xs font-medium text-foreground">charge_card</div>
+        <div className="text-[11px] text-foreground-muted">Call Stripe API · journal <span className="font-mono">StepCompleted → ch_123</span> · execution log → completed</div>
+      </div>
+    </div>
+    <div className="pl-3"><div className="w-px h-3 bg-border-strong" /></div>
+    <div className="flex gap-3">
+      <div className="w-6 h-6 shrink-0 border bg-surface-75 flex items-center justify-center text-[10px] font-mono text-foreground-muted">2</div>
+      <div className="pt-0.5">
+        <div className="text-xs font-medium text-foreground">reserve_inventory</div>
+        <div className="text-[11px] text-foreground-muted">Update database · journal <span className="font-mono">StepCompleted → ok</span> · execution log → completed</div>
+      </div>
+    </div>
+  </div>
+  <div className="bg-red-500/5 border-y px-4 py-2 text-[11px] font-mono text-red-400">💥 Crash — server restart, network failure, etc.</div>
+  <div className="bg-surface-75 px-4 py-2 border-b">
+    <div className="text-[10px] font-mono uppercase tracking-wide text-foreground-muted">Replay after crash</div>
+    <div className="text-[11px] text-foreground-muted mt-1 font-sans normal-case tracking-normal">Server loads the journal → the SDK bridge converts entries to RequestJobs → <span className="font-mono">inject_step_results()</span> populates the in-memory cache before the handler runs.</div>
+  </div>
+  <div className="p-4 space-y-1">
+    <div className="flex gap-3">
+      <div className="w-6 h-6 shrink-0 border bg-surface-75 flex items-center justify-center text-[10px] font-mono text-foreground-muted">1</div>
+      <div className="pt-0.5">
+        <div className="text-xs font-medium text-foreground">charge_card <span className="text-[10px] font-mono text-foreground-muted">cache HIT</span></div>
+        <div className="text-[11px] text-foreground-muted">Returns <span className="font-mono">ch_123</span> from cache — Stripe API is <span className="text-foreground">not</span> called again</div>
+      </div>
+    </div>
+    <div className="pl-3"><div className="w-px h-3 bg-border-strong" /></div>
+    <div className="flex gap-3">
+      <div className="w-6 h-6 shrink-0 border bg-surface-75 flex items-center justify-center text-[10px] font-mono text-foreground-muted">2</div>
+      <div className="pt-0.5">
+        <div className="text-xs font-medium text-foreground">reserve_inventory <span className="text-[10px] font-mono text-foreground-muted">cache HIT</span></div>
+        <div className="text-[11px] text-foreground-muted">Returns <span className="font-mono">ok</span> from cache — the database is <span className="text-foreground">not</span> updated again</div>
+      </div>
+    </div>
+    <div className="pl-3"><div className="w-px h-3 bg-border-strong" /></div>
+    <div className="flex gap-3">
+      <div className="w-6 h-6 shrink-0 border bg-background flex items-center justify-center text-[10px] font-mono text-foreground-muted">3</div>
+      <div className="pt-0.5">
+        <div className="text-xs font-medium text-foreground">send_confirmation <span className="text-[10px] font-mono text-foreground">cache MISS</span></div>
+        <div className="text-[11px] text-foreground-muted">No journal entry → executes for the first time (send email) · journal <span className="font-mono">StepCompleted → sent</span></div>
+      </div>
+    </div>
+  </div>
+  <div className="bg-surface-75 px-4 py-2 border-t text-[11px] font-mono text-foreground-muted">Workflow completed — no committed step ran again</div>
+</div>
+
+---
+
+## Under the Hood
+
+This section traces the full path a step takes — from your SDK call, through the server's command processor, into PostgreSQL, and back out during replay. Understanding this flow helps you reason about what happens when things go wrong.
+
+<div className="not-prose my-8 max-w-2xl mx-auto">
+  <div className="border bg-surface-75 p-4">
+    <div className="text-xs font-medium text-foreground">SDK <span className="text-[10px] font-mono text-foreground-muted">Rust · Python · TypeScript</span></div>
+    <div className="mt-2 space-y-1 text-[11px] text-foreground-muted">
+      <div><span className="font-mono text-foreground">ctx.execute_task(charge_card, input)</span></div>
+      <div className="pl-3"><span className="font-mono">is_replaying?</span> → check pendingTaskResults cache</div>
+      <div className="pl-6">HIT → return cached result (no command emitted)</div>
+      <div className="pl-6">MISS → emit <span className="font-mono">ScheduleTaskCommand</span>, suspend</div>
+      <div className="pl-3"><span className="font-mono">ctx.execute("step_name", closure)</span></div>
+      <div className="pl-6">HIT → return cached result</div>
+      <div className="pl-6">MISS → run closure, emit <span className="font-mono">RecordStepResult</span></div>
+    </div>
+  </div>
+  <div className="flex flex-col items-center">
+    <div className="w-px h-3 bg-border-strong" />
+    <span className="text-[10px] font-mono text-foreground-muted py-0.5">commands · protobuf</span>
+    <div className="w-px h-3 bg-border-strong" />
+  </div>
+  <div className="border bg-surface-100 p-4">
+    <div className="text-xs font-medium text-foreground">Server <span className="text-[10px] font-mono text-foreground-muted">CommandProcessor</span></div>
+    <div className="mt-2 space-y-1 text-[11px] text-foreground-muted">
+      <div><span className="font-mono text-foreground">ScheduleTaskCommand</span></div>
+      <div className="pl-3">create TaskExecution (scheduled) · dispatch to outbox queue · append <span className="font-mono">TaskScheduled</span></div>
+      <div className="pt-1"><span className="font-mono text-foreground">RecordStepResultCommand</span></div>
+      <div className="pl-3">upsert <span className="font-mono">execution_log</span> · append <span className="font-mono">StepCompleted</span></div>
+    </div>
+  </div>
+  <div className="flex flex-col items-center">
+    <div className="w-px h-3 bg-border-strong" />
+    <span className="text-[10px] font-mono text-foreground-muted py-0.5">persisted · PostgreSQL</span>
+    <div className="w-px h-3 bg-border-strong" />
+  </div>
+  <div className="border bg-background p-4">
+    <div className="text-xs font-medium text-foreground">On next poll <span className="text-[10px] font-mono text-foreground-muted">replay</span></div>
+    <div className="mt-2 space-y-1 text-[11px] text-foreground-muted">
+      <div>1 · load journal (HighPerfCache → DB fallback)</div>
+      <div>2 · sdk-core bridge <span className="font-mono">journal_to_jobs()</span>: StepCompleted → CompleteStep · EventReceived → HandleEvent · TimerFired → FireTimer</div>
+      <div>3 · set <span className="font-mono">is_replaying = true</span></div>
+      <div>4 · <span className="font-mono">inject_step_results()</span> → populate cache</div>
+      <div>5 · run workflow handler (cache hits skip re-execution)</div>
+    </div>
+  </div>
+</div>
+
+### Two Storage Layers
+
+| Layer | Table | Key | Purpose |
+|-------|-------|-----|---------|
+| **Execution Log** | `execution_log` | `(workflow_id, step_name)` | Step-level idempotency cache. Stores result, status, attempt count. Used for `ctx.execute()` replay protection. |
+| **Journal** | `workflow_execution_journal` | `(workflow_id, execution_id, event_id)` | Append-only event history. Full audit trail. Provides the entries that drive replay via `journal_to_jobs()`. |
+
+### In-Memory Cache (HighPerfCache)
+
+Orcher uses a [Moka](https://github.com/moka-rs/moka)-based cache to avoid hitting PostgreSQL on every replay:
+
+- **TTL**: 60 seconds per entry
+- **Max entries**: 5,000 cached journals
+- **Incremental loading**: On cache hit, only loads entries with `event_id > max_cached_event_id` (partial DB query instead of full reload)
+- **Optimistic append**: When a new entry is written, it's appended to the in-memory cache immediately (no DB roundtrip to refresh)
+- **Metrics**: `journal_hits`, `journal_misses`, `journal_hit_rate()` tracked for observability
+
+---
+
+## Journal Entry Structure
+
+Each entry in the `workflow_execution_journal` table:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="structure"
+  queryGroup="content"
+>
+
+<TabPanel id="structure" label="Example Entry">
+
+```json
+{
+  "id": 12345,
+  "workflow_id": "order-processing-abc123",
+  "execution_id": "exec_xyz789",
+  "event_id": 3,
+  "event_type": "StepCompleted",
+  "timestamp": "2024-01-15T10:30:45.123Z",
+  "payload": {
+    "step_name": "charge_card",
+    "result": {
+      "charge_id": "ch_abc123",
+      "status": "succeeded"
+    }
+  },
+  "version": 0,
+  "task_id": 456,
+  "organization_id": "org_123",
+  "shard_id": 0,
+  "created_at": "2024-01-15T10:30:45.123Z"
+}
+```
+
+</TabPanel>
+
+<TabPanel id="fields" label="Field Reference">
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | `BIGSERIAL` | Database primary key (auto-increment) |
+| `workflow_id` | `VARCHAR` | User-facing workflow identifier |
+| `execution_id` | `VARCHAR` | Unique execution/run identifier |
+| `event_id` | `BIGINT` | Monotonically increasing sequence within the execution — determines replay order |
+| `event_type` | `VARCHAR` | Event type (`StepCompleted`, `EventReceived`, `TimerFired`, etc.) |
+| `timestamp` | `TIMESTAMPTZ` | When the event occurred |
+| `payload` | `JSONB` | Event payload — step results, failure details, event data |
+| `version` | `INTEGER` | Schema version for evolution |
+| `task_id` | `BIGINT` | Associated task ID (0 if not task-related) |
+| `organization_id` | `UUID` | Multi-tenancy support |
+| `shard_id` | `INTEGER` | Horizontal sharding partition |
+| `created_at` | `TIMESTAMPTZ` | When journal entry was inserted |
+
+**Uniqueness constraint**: `(workflow_id, execution_id, event_id)` — prevents duplicate events within an execution.
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Journal Entry Types
+
+Orcher records different types of entries throughout workflow execution:
+
+### Step Events
+
+Step events track the completion of individual operations within a workflow. These are the most common entry type and drive the replay mechanism.
+
+- `StepCompleted` — A step finished (inline closure, distributed task, child workflow, or side effect). This is the primary entry type that drives replay.
+
+### Workflow Lifecycle
+
+These events mark the major state transitions of a workflow execution — from start through completion, failure, cancellation, or timeout.
+
+- `WorkflowExecutionStarted` — Workflow begins execution
+- `WorkflowExecutionCompleted` — Workflow completes successfully
+- `WorkflowExecutionFailed` — Workflow fails with error
+- `WorkflowExecutionCanceled` — Workflow is cancelled
+- `WorkflowExecutionTimedOut` — Workflow exceeds timeout
+- `WorkflowExecutionRestartedFresh` — Workflow restarted with clean state
+
+### Task Events
+
+Task events track the lifecycle of distributed tasks dispatched to task queues. These entries record when a task is scheduled, completes, fails, or is cancelled.
+
+- `TaskScheduled` — Task dispatched to task queue
+- `TaskCompleted` — Task completes successfully
+- `TaskFailed` — Task fails with error
+- `TaskCanceled` — Task is cancelled
+
+### Signal and Event Events
+
+Signal events record inter-workflow communication. These track when external events are delivered to a workflow or when a workflow sends a signal to another workflow.
+
+- `EventReceived` — External signal/event delivered to workflow (data is base64-encoded in the payload field)
+- `ExternalEventSent` — Workflow sent a signal to another workflow
+
+### Child Workflow Events
+
+Child workflow events track the full lifecycle of workflows spawned by a parent. These entries enable the parent to monitor and replay child workflow results.
+
+- `ChildWorkflowExecutionInitiated` — Child workflow created
+- `ChildWorkflowExecutionStarted` — Child workflow begins running
+- `ChildWorkflowExecutionCompleted` — Child workflow completes
+- `ChildWorkflowExecutionFailed` — Child workflow fails
+- `ChildWorkflowExecutionTimedOut` — Child workflow exceeds timeout
+- `ChildWorkflowExecutionCanceled` — Child workflow is cancelled
+
+### Timer Events
+
+Timer events record durable sleeps and delays within a workflow.
+
+- `TimerFired` — Timer/sleep completes
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/journaling/replay-safety" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Replay Safety Rules</h3>
+      <p className="text-sm text-foreground-light">
+        Learn which operations are safe inside workflows and how to wrap non-deterministic code
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/journaling/best-practices" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Best Practices and Performance</h3>
+      <p className="text-sm text-foreground-light">
+        Optimize journal performance, monitor storage growth, and troubleshoot common issues
+      </p>
+    </div>
+  </Link>
+</div>

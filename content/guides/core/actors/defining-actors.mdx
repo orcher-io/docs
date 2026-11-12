@@ -1,0 +1,458 @@
+---
+id: 'actors-defining'
+title: 'Defining Actors & Operations'
+description: 'Learn how to define actors, operations, manage actor state, and use the ActorContext API in Orcher.'
+sidebar_label: 'Defining Actors'
+---
+
+## Defining an Actor
+
+An actor is a class (or struct) with operation methods. Use the `@Actor()` decorator (TypeScript), `@actor` decorator (Python), or `#[actor]` attribute (Rust) to register it.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="typescript"
+  queryGroup="language"
+>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Actor, Operation, ActorContext } from '@orcher/sdk';
+
+interface CartItem {
+  name: string;
+  price: number;
+  quantity: number;
+}
+
+interface Cart {
+  items: CartItem[];
+  updatedAt: string;
+}
+
+@Actor()
+export class ShoppingCart {
+  @Operation()
+  async addItem(ctx: ActorContext, item: CartItem): Promise<Cart> {
+    const cart = await ctx.state.get<Cart>('cart') ?? { items: [], updatedAt: '' };
+    const existing = cart.items.find(i => i.name === item.name);
+    if (existing) {
+      existing.quantity += item.quantity;
+    } else {
+      cart.items.push(item);
+    }
+    cart.updatedAt = new Date().toISOString();
+    await ctx.state.set('cart', cart);
+    return cart;
+  }
+
+  @Operation()
+  async removeItem(ctx: ActorContext, itemName: string): Promise<Cart> {
+    const cart = await ctx.state.get<Cart>('cart') ?? { items: [], updatedAt: '' };
+    cart.items = cart.items.filter(i => i.name !== itemName);
+    cart.updatedAt = new Date().toISOString();
+    await ctx.state.set('cart', cart);
+    return cart;
+  }
+
+  @Operation({ mode: 'shared' })
+  async getTotal(ctx: ActorContext): Promise<number> {
+    const cart = await ctx.state.get<Cart>('cart') ?? { items: [] };
+    return cart.items.reduce((sum, i) => i.price * i.quantity + sum, 0);
+  }
+
+  @Operation({ mode: 'shared' })
+  async getCart(ctx: ActorContext): Promise<Cart> {
+    return await ctx.state.get<Cart>('cart') ?? { items: [], updatedAt: '' };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::actor::{ActorContext, SharedActorContext};
+use orcher::error::Result;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize, Clone)]
+struct CartItem {
+    name: String,
+    price: f64,
+    quantity: u32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct Cart {
+    items: Vec<CartItem>,
+    updated_at: String,
+}
+
+#[actor(name = "ShoppingCart")]
+pub struct ShoppingCart;
+
+#[operations]
+impl ShoppingCart {
+    #[operation(exclusive)]
+    pub async fn add_item(ctx: ActorContext, item: CartItem) -> Result<Cart> {
+        let mut cart: Cart = ctx.state()
+            .get("cart")
+            .await?
+            .unwrap_or_default();
+
+        if let Some(existing) = cart.items.iter_mut().find(|i| i.name == item.name) {
+            existing.quantity += item.quantity;
+        } else {
+            cart.items.push(item);
+        }
+        cart.updated_at = chrono::Utc::now().to_rfc3339();
+        ctx.state().set("cart", &cart).await?;
+        Ok(cart)
+    }
+
+    #[operation(exclusive)]
+    pub async fn remove_item(ctx: ActorContext, item_name: String) -> Result<Cart> {
+        let mut cart: Cart = ctx.state()
+            .get("cart")
+            .await?
+            .unwrap_or_default();
+
+        cart.items.retain(|i| i.name != item_name);
+        cart.updated_at = chrono::Utc::now().to_rfc3339();
+        ctx.state().set("cart", &cart).await?;
+        Ok(cart)
+    }
+
+    #[operation(shared)]
+    pub async fn get_total(ctx: SharedActorContext) -> Result<f64> {
+        let cart: Cart = ctx.state()
+            .get("cart")
+            .await?
+            .unwrap_or_default();
+
+        Ok(cart.items.iter().map(|i| i.price * i.quantity as f64).sum())
+    }
+
+    #[operation(shared)]
+    pub async fn get_cart(ctx: SharedActorContext) -> Result<Cart> {
+        Ok(ctx.state()
+            .get("cart")
+            .await?
+            .unwrap_or_default())
+    }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import actor, operation
+from orcher.actor import ActorContext, SharedActorContext, OperationMode
+from dataclasses import dataclass
+from datetime import datetime
+
+@dataclass
+class CartItem:
+    name: str
+    price: float
+    quantity: int
+
+@actor(name="ShoppingCart")
+class ShoppingCart:
+    @operation(mode=OperationMode.EXCLUSIVE)
+    async def add_item(self, ctx: ActorContext, item: dict) -> dict:
+        cart = await ctx.state.get("cart") or {"items": [], "updated_at": ""}
+        existing = next((i for i in cart["items"] if i["name"] == item["name"]), None)
+        if existing:
+            existing["quantity"] += item["quantity"]
+        else:
+            cart["items"].append(item)
+        cart["updated_at"] = datetime.utcnow().isoformat()
+        await ctx.state.set("cart", cart)
+        return cart
+
+    @operation(mode=OperationMode.EXCLUSIVE)
+    async def remove_item(self, ctx: ActorContext, item_name: str) -> dict:
+        cart = await ctx.state.get("cart") or {"items": [], "updated_at": ""}
+        cart["items"] = [i for i in cart["items"] if i["name"] != item_name]
+        cart["updated_at"] = datetime.utcnow().isoformat()
+        await ctx.state.set("cart", cart)
+        return cart
+
+    @operation(mode=OperationMode.SHARED)
+    async def get_total(self, ctx: SharedActorContext) -> float:
+        cart = await ctx.state.get("cart") or {"items": []}
+        return sum(i["price"] * i["quantity"] for i in cart["items"])
+
+    @operation(mode=OperationMode.SHARED)
+    async def get_cart(self, ctx: SharedActorContext) -> dict:
+        return await ctx.state.get("cart") or {"items": [], "updated_at": ""}
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Operations
+
+Operations are the methods that callers invoke on an actor. Each operation receives an `ActorContext` as its first parameter, which provides access to the actor's identity, metadata, and state.
+
+### Exclusive Operations (Mutations)
+
+Exclusive is the default mode. Only one exclusive operation runs at a time per actor key. Use this for any operation that modifies state.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="typescript"
+  queryGroup="language"
+>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Operation()  // exclusive by default
+async increment(ctx: ActorContext, delta: number): Promise<number> {
+  const count = await ctx.state.get<number>('count') ?? 0;
+  const newCount = count + delta;
+  await ctx.state.set('count', newCount);
+  return newCount;
+}
+```
+
+</TabPanel>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[operation(exclusive)]
+pub async fn increment(ctx: ActorContext, delta: i64) -> Result<i64> {
+    let count: i64 = ctx.state().get("count").await?.unwrap_or(0);
+    let new_count = count + delta;
+    ctx.state().set("count", &new_count).await?;
+    Ok(new_count)
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+@operation(mode=OperationMode.EXCLUSIVE)
+async def increment(self, ctx: ActorContext, delta: int) -> int:
+    count = await ctx.state.get("count") or 0
+    new_count = count + delta
+    await ctx.state.set("count", new_count)
+    return new_count
+```
+
+</TabPanel>
+
+</Tabs>
+
+### Shared Operations (Reads)
+
+Shared operations can run concurrently with other shared operations on the same key. Use this for read-only operations — and read-only is enforced: while a key is executing shared operations, the engine rejects state writes (`FAILED_PRECONDITION`), because a write racing concurrent readers would break their isolation. Anything that modifies state belongs in an exclusive operation.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="typescript"
+  queryGroup="language"
+>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Operation({ mode: 'shared' })
+async getCount(ctx: ActorContext): Promise<number> {
+  return await ctx.state.get<number>('count') ?? 0;
+}
+```
+
+</TabPanel>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[operation(shared)]
+pub async fn get_count(ctx: SharedActorContext) -> Result<i64> {
+    Ok(ctx.state().get("count").await?.unwrap_or(0))
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+@operation(mode=OperationMode.SHARED)
+async def get_count(self, ctx: SharedActorContext) -> int:
+    return await ctx.state.get("count") or 0
+```
+
+</TabPanel>
+
+</Tabs>
+
+### Concurrency Rules
+
+| Executing \ Incoming | Exclusive | Shared |
+|----------------------|-----------|--------|
+| **Exclusive**        | Queued    | Queued |
+| **Shared**           | Queued    | Runs concurrently |
+
+When an exclusive operation is running, all other operations for that key wait in a per-key queue. When only shared operations are running, additional shared operations execute immediately. An incoming exclusive operation waits for all running shared operations to finish first — and shared operations that arrive *while it waits* queue behind it, so a continuous stream of reads can never starve a write.
+
+The mode is part of the operation's declaration, resolved from worker registrations — callers cannot choose it. If workers temporarily disagree about an operation's mode (a rolling deploy where old and new code declare it differently), Orcher conservatively runs the operation as exclusive until the fleet agrees.
+
+---
+
+## Actor State
+
+Actor state is stored on the server and accessed via RPC calls from the worker. The actor instance itself is transient — if a worker restarts, the actor is recreated and its state is loaded from the server. This means you should never store important data in instance fields; always use `ctx.state`.
+
+### State API
+
+The state API provides key-value operations scoped to the actor instance (actor name + key).
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="typescript"
+  queryGroup="language"
+>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Operation()
+async manageState(ctx: ActorContext): Promise<void> {
+  // Get a value (returns undefined if not set)
+  const name = await ctx.state.get<string>('name');
+
+  // Set a value (JSON-serialized automatically)
+  await ctx.state.set('name', 'Alice');
+
+  // Delete a key (returns true if it existed)
+  const existed = await ctx.state.delete('name');
+
+  // List all keys, optionally filtered by prefix
+  const allKeys = await ctx.state.listKeys();
+  const cartKeys = await ctx.state.listKeys('cart:');
+}
+```
+
+</TabPanel>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[operation(exclusive)]
+pub async fn manage_state(ctx: ActorContext) -> Result<()> {
+    // Get a typed value (returns None if not set)
+    let name: Option<String> = ctx.state().get("name").await?;
+
+    // Set a value (serialized via serde)
+    ctx.state().set("name", &"Alice".to_string()).await?;
+
+    // Delete a key
+    ctx.state().delete("name").await?;
+
+    // List keys with optional prefix
+    let all_keys = ctx.state().list_keys(None).await?;
+    let cart_keys = ctx.state().list_keys(Some("cart:")).await?;
+
+    Ok(())
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+@operation(mode=OperationMode.EXCLUSIVE)
+async def manage_state(self, ctx: ActorContext) -> None:
+    # Get a value (returns None if not set)
+    name = await ctx.state.get("name")
+
+    # Set a value (JSON-serialized automatically)
+    await ctx.state.set("name", "Alice")
+
+    # Delete a key (returns True if it existed)
+    existed = await ctx.state.delete("name")
+
+    # List all keys, optionally filtered by prefix
+    all_keys = await ctx.state.list("items")
+    cart_keys = await ctx.state.list("cart:")
+
+    # Check if a key exists
+    exists = await ctx.state.exists("name")
+```
+
+</TabPanel>
+
+</Tabs>
+
+### State Design Tips
+
+**Use structured keys for related data.** Prefix keys to group related state, making it easy to query with `listKeys("prefix:")`.
+
+```typescript
+// Group by entity type
+await ctx.state.set('item:widget', { name: 'Widget', qty: 3 });
+await ctx.state.set('item:gadget', { name: 'Gadget', qty: 1 });
+
+// List all items
+const itemKeys = await ctx.state.listKeys('item:');
+```
+
+**Keep state values small.** Each `get` and `set` is an RPC call. Store only what you need, and consider splitting large objects into separate keys.
+
+**Don't store derived data.** Compute totals, counts, and aggregates on read rather than storing them separately, to avoid consistency issues between keys.
+
+---
+
+## ActorContext
+
+Every operation receives an `ActorContext` that provides the actor's identity and state access.
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `actorName` | `string` | Actor type name (e.g., `"ShoppingCart"`) |
+| `key` | `string` | Instance key (e.g., `"user-123"`) |
+| `operationName` | `string` | Operation being executed (e.g., `"addItem"`) |
+| `operationId` | `string` | Unique ID for this operation execution |
+| `executionId` | `string` | Execution ID for tracing and idempotency |
+| `mode` | `OperationMode` | `exclusive` or `shared` |
+| `state` | `ActorState` | Server-backed state access (get/set/delete/listKeys) |
+| `metadata` | `Record<string, string>` | Optional metadata from the invocation request |
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-4 not-prose">
+  <Link href="/guides/core/actors/using-actors" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Using Actors</h3>
+    <p className="text-sm text-foreground-light">Learn how to invoke actors, register them with a worker, and understand the execution model.</p>
+  </Link>
+  <Link href="/guides/core/state-management" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Managing State</h3>
+    <p className="text-sm text-foreground-light">Learn about state management patterns across workflows and actors.</p>
+  </Link>
+</div>

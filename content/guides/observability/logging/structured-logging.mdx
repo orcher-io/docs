@@ -1,0 +1,88 @@
+---
+id: 'structured-logging'
+title: 'Structured Logging'
+description: 'Use tracing fields, #[instrument], and span context for machine-parseable structured logs'
+sidebar_label: 'Structured Logging'
+---
+
+All Orcher services use `tracing`'s structured fields for machine-parseable context:
+
+```rust
+use tracing::{info, warn, error, instrument};
+
+#[instrument(
+    skip(ctx),
+    fields(execution_id = %execution_id, workflow = %workflow_name)
+)]
+pub async fn execute_workflow(
+    ctx: &Context,
+    execution_id: String,
+    workflow_name: String,
+) -> Result<()> {
+    // All logs in this function include execution_id and workflow
+    info!("Starting workflow execution");
+
+    info!(
+        version = %ctx.workflow_version,
+        namespace = %ctx.namespace,
+        "Workflow configuration loaded"
+    );
+
+    warn!(
+        queue_depth = ctx.queue_depth,
+        threshold = 1000,
+        "Queue depth is high"
+    );
+
+    error!(
+        error = ?err,
+        retry_count = ctx.retry_count,
+        "Workflow execution failed"
+    );
+
+    Ok(())
+}
+```
+
+The `#[instrument]` macro automatically creates a tracing span. All logs within the function inherit the span's fields, so you don't need to repeat `execution_id` in every log call.
+
+## Span Context
+
+Spans propagate through async calls, giving you correlated logs across the entire execution path:
+
+```rust
+use tracing::info_span;
+
+let span = info_span!(
+    "process_request",
+    correlation_id = %correlation_id,
+    request_id = %request_id
+);
+
+let _enter = span.enter();
+
+// All logs within this scope include correlation_id and request_id
+info!("Processing workflow request");
+```
+
+In JSON format, this produces:
+
+```json
+{
+  "timestamp": "2024-01-15T10:30:45Z",
+  "level": "INFO",
+  "message": "Processing workflow request",
+  "fields": {
+    "correlation_id": "req_xyz789",
+    "request_id": "abc123"
+  }
+}
+```
+
+---
+
+## Next Steps
+
+- [Viewing Logs](/guides/observability/logging/viewing-logs) — CLI commands, Docker, and database queries
+- [Log Aggregation](/guides/observability/logging/aggregation) — Kubernetes, Grafana Loki, Elasticsearch, and performance
+- [Logging Overview](/guides/observability/logging) — Configuration, formats, and log levels

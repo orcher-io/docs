@@ -1,0 +1,29 @@
+---
+id: 'security'
+title: 'Security'
+description: 'Security model and best practices for Orcher deployments.'
+sidebar_label: 'Overview'
+hideToc: true
+---
+
+Orcher is designed to run within your own infrastructure. You control the network boundaries, database credentials, and access policies.
+
+## Authentication
+
+Orcher supports API key authentication for SDK-to-orchestrator communication. Workers authenticate using credentials configured at startup.
+
+- **Namespace isolation** — Workflows and tasks are scoped to namespaces, preventing cross-tenant access
+- **gRPC transport** — All SDK-to-server communication uses gRPC, which supports TLS encryption
+
+## Data Security
+
+- **PostgreSQL ACID guarantees** — All workflow state, journals, and execution logs are stored in PostgreSQL with full transactional integrity
+- **No external dependencies** — Orcher does not phone home or send telemetry to third-party services
+- **Credential management** — Database and Redis credentials are configured via environment variables or TOML configuration files
+
+## Deployment Considerations
+
+- Run PostgreSQL and Redis within a private network, not exposed to the public internet
+- Use TLS for gRPC connections between SDKs and the orchestrator in production
+- Restrict orchestrator admin endpoints to trusted networks
+- Use PostgreSQL roles and permissions to limit database access

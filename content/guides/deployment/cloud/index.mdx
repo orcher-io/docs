@@ -1,0 +1,91 @@
+---
+id: 'cloud'
+title: 'Cloud Platforms'
+description: 'Deploy Orcher to AWS, GCP, and Azure using managed databases, container services, and the provided Kubernetes manifests'
+sidebar_label: 'Cloud Platforms'
+---
+
+Orcher runs on any cloud platform that supports containers and PostgreSQL. The orchestrator is a stateless gRPC/HTTP server — all state lives in PostgreSQL. This means you can run it on managed Kubernetes (EKS, GKE, AKS), container services (ECS, Cloud Run), or plain VMs, connecting to managed PostgreSQL and optionally managed Redis.
+
+- **Stateless orchestrator** — No local state; scale horizontally behind a load balancer
+- **Managed databases** — Use RDS, Cloud SQL, or Azure Database for PostgreSQL instead of self-managed instances
+- **Container registry** — CI pushes images to GitHub Container Registry (ghcr.io); mirror to ECR, GCR, or ACR for production
+- **Kubernetes-first** — Production manifests in `services/orchestrator/k8s/` work on any managed Kubernetes service
+
+---
+
+## Architecture
+
+A cloud deployment consists of three components:
+
+1. **Orchestrator** — Stateless container(s) running the `orchestrator` binary. Exposes gRPC (50051) for SDK workers and HTTP (8080) for health/metrics.
+2. **PostgreSQL** — Primary data store for workflow state, journal, task executions. Use a managed service with automated backups and failover.
+3. **Redis** (optional) — Fast-path dispatch with LPUSH/BRPOP. Workers learn of new work at once instead of at the next poll. Use a managed service or omit entirely — the system falls back to PostgreSQL polling.
+
+SDK workers run wherever your application code runs (ECS tasks, Kubernetes pods, serverless functions, VMs) and connect to the orchestrator's gRPC endpoint.
+
+---
+
+## Container Image
+
+### CI Pipeline
+
+The GitHub Actions CI pipeline (`.github/workflows/ci.yml`) builds and pushes Docker images to GitHub Container Registry on every push to `main`:
+
+```yaml
+- name: Login to GitHub Container Registry
+  uses: docker/login-action@v3
+  with:
+    registry: ghcr.io
+    username: ${{ github.actor }}
+    password: ${{ secrets.GITHUB_TOKEN }}
+
+- name: Build and push Docker image
+  uses: docker/build-push-action@v5
+  with:
+    context: .
+    file: ./services/orchestrator/Dockerfile
+    push: true
+    tags: ${{ steps.meta.outputs.tags }}
+```
+
+Images are tagged by branch, PR number, commit SHA, and `latest`.
+
+### Mirror to Cloud Registry
+
+For production, mirror to your cloud provider's registry:
+
+```bash
+# AWS ECR
+aws ecr get-login-password | docker login --username AWS --password-stdin 123456789.dkr.ecr.us-east-1.amazonaws.com
+docker tag ghcr.io/your-org/orcher:latest 123456789.dkr.ecr.us-east-1.amazonaws.com/orcher:v1.0.0
+docker push 123456789.dkr.ecr.us-east-1.amazonaws.com/orcher:v1.0.0
+
+# GCP Artifact Registry
+docker tag ghcr.io/your-org/orcher:latest us-docker.pkg.dev/your-project/orcher/orchestrator:v1.0.0
+docker push us-docker.pkg.dev/your-project/orcher/orchestrator:v1.0.0
+
+# Azure ACR
+az acr login --name yourregistry
+docker tag ghcr.io/your-org/orcher:latest yourregistry.azurecr.io/orcher:v1.0.0
+docker push yourregistry.azurecr.io/orcher:v1.0.0
+```
+
+Update the Kustomize image reference to pull from your cloud registry:
+
+```bash
+cd services/orchestrator/k8s
+kustomize edit set image orcher/orchestrator=123456789.dkr.ecr.us-east-1.amazonaws.com/orcher:v1.0.0
+kubectl apply -k .
+```
+
+---
+
+## Next Steps
+
+- [Managed Databases](/guides/deployment/cloud/managed-databases) — PostgreSQL, PgBouncer, and Redis configuration
+- [Cloud Providers](/guides/deployment/cloud/providers) — AWS, GCP, and Azure deployment guides
+- [Operations](/guides/deployment/cloud/operations) — High availability, monitoring, and secrets management
+- [Docker](/guides/deployment/docker) — Docker Compose setup for local development
+- [Kubernetes](/guides/deployment/kubernetes) — Kubernetes manifests reference
+- [Configuration](/guides/deployment/configuration) — Full configuration reference

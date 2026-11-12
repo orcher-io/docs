@@ -1,0 +1,6 @@
+# Build output and installed toolchains for the sample checks.
+rust/target/
+typescript/node_modules/
+python/.venv/
+__pycache__/
+.mypy_cache/

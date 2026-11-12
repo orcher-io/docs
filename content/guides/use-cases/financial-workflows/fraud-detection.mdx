@@ -1,0 +1,409 @@
+---
+id: 'financial-fraud'
+title: 'Fraud Detection with Human Review'
+description: 'Auto-approve, auto-reject, or route transactions to human review with configurable timeouts.'
+sidebar_label: 'Fraud Detection'
+---
+
+For high-value transactions, you need a fraud detection pipeline that auto-approves low-risk payments, auto-rejects high-risk ones, and routes medium-risk transactions to a human reviewer with a configurable timeout. Orcher's `wait_for_event_with_timeout` makes the human-in-the-loop step trivial — the workflow pauses until a reviewer signals approval or the timeout expires.
+
+## How it works
+
+One risk assessment, three routes. The two automatic routes finish in milliseconds; the third parks the workflow in front of a human — and only that route pays any waiting cost.
+
+<div className="not-prose my-8 max-w-lg mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Risk Triage</div>
+  </div>
+  <div className="px-4 py-3 flex flex-col items-center gap-1">
+    <div className="border px-4 py-1.5 text-center">
+      <div className="text-xs font-medium font-mono text-foreground">assess_fraud_risk</div>
+      <div className="text-[9px] text-foreground-muted">ML model / rules engine → risk level</div>
+    </div>
+    <div className="text-[10px] text-foreground-muted leading-none py-0.5">▼ triage</div>
+    <div className="grid grid-cols-3 gap-2 w-full">
+      <div className="border px-2 py-2 text-center">
+        <div className="text-[10px] font-medium text-foreground">Low</div>
+        <div className="text-[9px] text-foreground-muted">auto-approve</div>
+        <div className="text-[9px] text-foreground-muted">→ charge</div>
+      </div>
+      <div className="border border-dashed px-2 py-2 text-center">
+        <div className="text-[10px] font-medium text-foreground">Medium</div>
+        <div className="text-[9px] text-foreground-muted">human review</div>
+        <div className="text-[9px] text-foreground-muted">→ event gate, 4h</div>
+      </div>
+      <div className="border px-2 py-2 text-center">
+        <div className="text-[10px] font-medium text-foreground">High</div>
+        <div className="text-[9px] text-foreground-muted">auto-reject</div>
+        <div className="text-[9px] text-foreground-muted">→ workflow fails</div>
+      </div>
+    </div>
+  </div>
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Every route records its decision — auto or human, approve or reject — before acting on it.</span>
+  </div>
+</div>
+
+## Example: triage with an event gate
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use std::time::Duration;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum RiskLevel { Low, Medium, High }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FraudScore {
+    risk_level: RiskLevel,
+    score: f64,
+    reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReviewDecision {
+    approved: bool,
+    reviewer: String,
+    notes: String,
+}
+
+#[task]
+async fn assess_fraud_risk(input: PaymentInput) -> Result<FraudScore> {
+    // Call fraud detection service (ML model, rules engine, etc.)
+    let score = fraud::assess(&input).await?;
+    Ok(score)
+}
+
+#[task]
+async fn notify_fraud_team(input: PaymentInput, score: FraudScore) -> Result<()> {
+    // Send to review queue with all context
+    fraud::create_review_case(&input, &score).await?;
+    Ok(())
+}
+
+#[task]
+async fn record_fraud_decision(order_id: String, approved: bool, reason: String) -> Result<()> {
+    audit::log_fraud_decision(&order_id, approved, &reason).await?;
+    Ok(())
+}
+
+#[workflow(name = "fraud_checked_payment", version = "1.0.0")]
+pub async fn fraud_checked_payment(
+    ctx: WorkflowContext,
+    input: PaymentInput,
+) -> Result<PaymentResult> {
+    // Step 1: Assess fraud risk
+    let fraud_score = ctx.execute_task(assess_fraud_risk, input.clone()).await?;
+
+    match fraud_score.risk_level {
+        RiskLevel::Low => {
+            // Auto-approve: proceed directly to payment
+            ctx.execute_task(record_fraud_decision, (
+                input.order_id.clone(), true, "auto-approved: low risk".to_string()
+            )).await?;
+        }
+        RiskLevel::High => {
+            // Auto-reject: block the payment
+            ctx.execute_task(record_fraud_decision, (
+                input.order_id.clone(), false, format!("auto-rejected: {}", fraud_score.reasons.join(", "))
+            )).await?;
+            anyhow::bail!("Payment rejected: high fraud risk");
+        }
+        RiskLevel::Medium => {
+            // Route to human reviewer
+            ctx.execute_task(notify_fraud_team, (input.clone(), fraud_score)).await?;
+
+            // Wait for reviewer decision with 4-hour timeout
+            let decision: Option<ReviewDecision> = ctx
+                .wait_for_event_with_timeout("fraud_review_decision", Duration::from_secs(14400))
+                .await?;
+
+            match decision {
+                Some(d) if d.approved => {
+                    ctx.execute_task(record_fraud_decision, (
+                        input.order_id.clone(), true, format!("approved by {}", d.reviewer)
+                    )).await?;
+                }
+                Some(d) => {
+                    ctx.execute_task(record_fraud_decision, (
+                        input.order_id.clone(), false, format!("rejected by {}: {}", d.reviewer, d.notes)
+                    )).await?;
+                    anyhow::bail!("Payment rejected by fraud reviewer");
+                }
+                None => {
+                    // Timeout — auto-reject for safety
+                    ctx.execute_task(record_fraud_decision, (
+                        input.order_id.clone(), false, "auto-rejected: review timeout".to_string()
+                    )).await?;
+                    anyhow::bail!("Payment rejected: fraud review timeout");
+                }
+            }
+        }
+    }
+
+    // Fraud check passed — proceed to payment
+    let result = ctx.execute_task(charge_payment_gateway, (
+        input.amount, input.currency.clone(), input.idempotency_key.clone()
+    )).await?;
+
+    Ok(PaymentResult {
+        charge_id: result.charge_id,
+        status: "completed".to_string(),
+        order_id: input.order_id,
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, WorkflowContext, createTaskRefs } from '@orcher/sdk';
+
+type RiskLevel = 'low' | 'medium' | 'high';
+
+interface FraudScore {
+  riskLevel: RiskLevel;
+  score: number;
+  reasons: string[];
+}
+
+interface ReviewDecision {
+  approved: boolean;
+  reviewer: string;
+  notes: string;
+}
+
+@Tasks()
+class FraudTasks {
+  @Task()
+  async assessFraudRisk(input: PaymentInput): Promise<FraudScore> {
+    return await fraud.assess(input);
+  }
+
+  @Task()
+  async notifyFraudTeam(input: PaymentInput, score: FraudScore): Promise<void> {
+    await fraud.createReviewCase(input, score);
+  }
+
+  @Task()
+  async recordFraudDecision(orderId: string, approved: boolean, reason: string): Promise<void> {
+    await audit.logFraudDecision(orderId, approved, reason);
+  }
+}
+
+const fraudTasks = createTaskRefs(FraudTasks);
+
+@Workflow({ name: 'fraud_checked_payment', version: '1.0.0' })
+class FraudCheckedPayment {
+  async run(ctx: WorkflowContext, input: PaymentInput): Promise<PaymentResult> {
+    const fraudScore = await ctx.executeTask(fraudTasks.assessFraudRisk, input);
+
+    if (fraudScore.riskLevel === 'low') {
+      await ctx.executeTask(fraudTasks.recordFraudDecision,
+        input.orderId, true, 'auto-approved: low risk');
+
+    } else if (fraudScore.riskLevel === 'high') {
+      await ctx.executeTask(fraudTasks.recordFraudDecision,
+        input.orderId, false, `auto-rejected: ${fraudScore.reasons.join(', ')}`);
+      throw new Error('Payment rejected: high fraud risk');
+
+    } else {
+      // Medium risk — route to human reviewer
+      await ctx.executeTask(fraudTasks.notifyFraudTeam, input, fraudScore);
+
+      const decision = await ctx.waitForEventWithTimeout<ReviewDecision>(
+        'fraud_review_decision', 14400000 // 4 hours
+      );
+
+      if (decision?.approved) {
+        await ctx.executeTask(fraudTasks.recordFraudDecision,
+          input.orderId, true, `approved by ${decision.reviewer}`);
+      } else if (decision) {
+        await ctx.executeTask(fraudTasks.recordFraudDecision,
+          input.orderId, false, `rejected by ${decision.reviewer}: ${decision.notes}`);
+        throw new Error('Payment rejected by fraud reviewer');
+      } else {
+        await ctx.executeTask(fraudTasks.recordFraudDecision,
+          input.orderId, false, 'auto-rejected: review timeout');
+        throw new Error('Payment rejected: fraud review timeout');
+      }
+    }
+
+    // Fraud check passed — proceed to payment
+    const charge = await ctx.executeTask(
+      paymentTasks.chargePaymentGateway,
+      input.amount, input.currency, input.idempotencyKey
+    );
+
+    return { chargeId: charge.chargeId, status: 'completed', orderId: input.orderId };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext
+from dataclasses import dataclass
+from typing import Optional
+from enum import Enum
+
+class RiskLevel(Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+@dataclass
+class FraudScore:
+    risk_level: RiskLevel
+    score: float
+    reasons: list[str]
+
+@dataclass
+class ReviewDecision:
+    approved: bool
+    reviewer: str
+    notes: str
+
+@task
+async def assess_fraud_risk(input: PaymentInput) -> FraudScore:
+    return await fraud.assess(input)
+
+@task
+async def notify_fraud_team(input: PaymentInput, score: FraudScore) -> None:
+    await fraud.create_review_case(input, score)
+
+@task
+async def record_fraud_decision(order_id: str, approved: bool, reason: str) -> None:
+    await audit.log_fraud_decision(order_id, approved, reason)
+
+@workflow(name="fraud_checked_payment", version="1.0.0")
+async def fraud_checked_payment(ctx: WorkflowContext, input: PaymentInput) -> PaymentResult:
+    fraud_score = await ctx.execute_task(assess_fraud_risk, input)
+
+    if fraud_score.risk_level == RiskLevel.LOW:
+        await ctx.execute_task(record_fraud_decision,
+            input.order_id, True, "auto-approved: low risk")
+
+    elif fraud_score.risk_level == RiskLevel.HIGH:
+        await ctx.execute_task(record_fraud_decision,
+            input.order_id, False, f"auto-rejected: {', '.join(fraud_score.reasons)}")
+        raise ValueError("Payment rejected: high fraud risk")
+
+    else:
+        # Medium risk — route to human reviewer
+        await ctx.execute_task(notify_fraud_team, input, fraud_score)
+
+        decision: Optional[ReviewDecision] = await ctx.wait_for_event_with_timeout(
+            "fraud_review_decision", timeout=14400  # 4 hours
+        )
+
+        if decision and decision.approved:
+            await ctx.execute_task(record_fraud_decision,
+                input.order_id, True, f"approved by {decision.reviewer}")
+        elif decision:
+            await ctx.execute_task(record_fraud_decision,
+                input.order_id, False, f"rejected by {decision.reviewer}: {decision.notes}")
+            raise ValueError("Payment rejected by fraud reviewer")
+        else:
+            await ctx.execute_task(record_fraud_decision,
+                input.order_id, False, "auto-rejected: review timeout")
+            raise ValueError("Payment rejected: fraud review timeout")
+
+    # Fraud check passed — proceed to payment
+    charge = await ctx.execute_task(
+        charge_payment_gateway, input.amount, input.currency, input.idempotency_key
+    )
+
+    return PaymentResult(
+        charge_id=charge.charge_id,
+        status="completed",
+        order_id=input.order_id,
+    )
+```
+
+</TabPanel>
+
+</Tabs>
+
+## The review gate
+
+`wait_for_event_with_timeout` is a race between a human and a clock. The workflow suspends — holding nothing — until either the reviewer's decision arrives as an event or the four-hour deadline fires, and the return value tells you which one won.
+
+<div className="not-prose my-8 max-w-lg mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">The Review Gate</div>
+  </div>
+  {[
+    { label: 'notify_fraud_team', detail: 'Review case created with full context', icon: '✓', state: 'done' },
+    { label: 'wait_for_event_with_timeout', detail: 'Suspended — zero resources, up to 4 hours', icon: '⏸', state: 'suspend' },
+  ].map((row, i) => (
+    <div key={i}>
+      <div className={`px-4 py-2 flex items-center gap-3 ${row.state === 'suspend' ? 'bg-surface-75' : ''}`}>
+        <span className="w-5 h-5 flex items-center justify-center text-[10px] shrink-0 text-foreground-muted">{row.icon}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{row.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{row.detail}</span>
+        </div>
+      </div>
+      <div className="flex justify-start pl-6">
+        <div className="w-px h-2 bg-border-strong" />
+      </div>
+    </div>
+  ))}
+  <div className="px-4 pb-3 pt-1">
+    <div className="text-[10px] text-foreground-muted text-center pb-1.5">▼ whichever comes first</div>
+    <div className="grid grid-cols-3 gap-2">
+      <div className="border px-2 py-2 text-center">
+        <div className="text-[10px] font-medium text-foreground">approved</div>
+        <div className="text-[9px] text-foreground-muted">reviewer says yes</div>
+        <div className="text-[9px] text-foreground-muted">→ charge proceeds</div>
+      </div>
+      <div className="border px-2 py-2 text-center">
+        <div className="text-[10px] font-medium text-foreground">rejected</div>
+        <div className="text-[9px] text-foreground-muted">reviewer says no</div>
+        <div className="text-[9px] text-foreground-muted">→ workflow fails</div>
+      </div>
+      <div className="border border-dashed px-2 py-2 text-center">
+        <div className="text-[10px] font-medium text-foreground">timeout</div>
+        <div className="text-[9px] text-foreground-muted">no decision in 4h</div>
+        <div className="text-[9px] text-foreground-muted">→ auto-reject</div>
+      </div>
+    </div>
+  </div>
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">The customer's card is never touched until the gate opens with an approval.</span>
+  </div>
+</div>
+
+Note the ordering: the charge happens *after* the gate. A suspicious transaction waits as an intent, not as captured money — there is nothing to refund if the answer is no. The same suspension mechanics as [durable timers](/guides/use-cases/financial-workflows#waiting-on-the-outside-world) apply: a deploy during the four-hour window changes nothing, and the reviewer's decision wakes the workflow wherever it lands.
+
+## Design notes
+
+- **Timeout must fail safe.** For payments, no answer means *no* — an expired review auto-rejects. If rejection is too costly for your risk profile, escalate instead: re-notify and wait again, but never silently approve.
+- **Route the decision back with a correlation ID.** `notify_fraud_team` should include the workflow or order ID in the review case, so the reviewer UI can address its `fraud_review_decision` event to this exact workflow instance. See [Events](/guides/core/events) for the delivery mechanics.
+- **Record every decision, on every path.** All five outcomes — auto-approve, auto-reject, human approve, human reject, timeout — pass through `record_fraud_decision` before the workflow acts. Combined with the journal, that's a complete who-decided-what audit trail with no extra logging code.
+- **Keep thresholds out of the workflow.** `assess_fraud_risk` returns the risk level; the scoring model and its thresholds live in the fraud service. Tuning them doesn't touch versioned workflow logic — and the journaled score keeps replay deterministic even as the model evolves.
+
+---
+
+## Next Steps
+
+- Next pattern: [Refund Processing](/guides/use-cases/financial-workflows/refund-processing)
+- Previous: [Subscription Billing with Dunning](/guides/use-cases/financial-workflows/subscription-billing)
+- Back to [Payment Workflows overview](/guides/use-cases/financial-workflows)

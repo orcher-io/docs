@@ -1,0 +1,223 @@
+---
+id: typescript-client
+title: Client API
+description: Connect to the engine, start workflows, wait for results, send events and queries, and handle how a workflow ended with the TypeScript SDK client
+sidebar_label: 'Client'
+---
+
+The `Client` connects to the ORCHER engine over gRPC. Use it to start workflows, wait for their
+results, send them events, query them, and cancel or terminate them.
+
+---
+
+## Connecting
+
+<$CodeSample path="typescript/src/client/connect.ts" region="connect" />
+
+`serverUrl` and `namespace` are required. Call `connect()` before anything else; every other
+method throws a `ClientError` on a client that is not connected.
+
+### API keys and TLS
+
+An engine that requires authentication rejects requests without a valid API key. Pass it as
+`apiKey`; it is sent as `authorization: Bearer <key>` on every request. The SDK doesn't read
+`ORCHER_API_KEY` or any other variable for the client, so read it yourself:
+
+<$CodeSample path="typescript/src/client/connect.ts" region="api-key" />
+
+TLS follows the URL scheme. An `https://` URL connects over TLS and verifies the engine against
+the system trust store, with no other setting. An `http://` URL connects in plaintext, so use
+`https://` whenever the engine expects TLS. The `tls` option adds certificates: a CA
+certificate to trust a private or self-signed authority, and a client certificate and key for
+mutual TLS. Setting `tls` at all turns TLS on:
+
+<$CodeSample path="typescript/src/client/connect.ts" region="mtls" />
+
+| `tls` field | Description |
+|-------------|-------------|
+| `caPath` | PEM file of a private CA to trust. Omit it for a publicly trusted certificate. |
+| `certPath` / `keyPath` | PEM files of the client certificate and key, for mutual TLS. Set both. |
+| `rejectUnauthorized` | Verification cannot be turned off: `false` is rejected. Trust a development certificate through `caPath` instead. |
+
+---
+
+## Starting Workflows
+
+<$CodeSample path="typescript/src/client/start.ts" region="start" />
+
+`startWorkflow()` resolves as soon as the engine has accepted the workflow, with a
+`WorkflowHandle` for it. The type parameter is the type `handle.result()` resolves to.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `workflowType` | (required) | The name the workflow was registered under: `workflow({ name })` or `@Workflow({ name })` |
+| `workflowId` | a random UUID | Identifies the workflow within the namespace; see [duplicate starts](#starting-a-workflow-once) |
+| `taskQueue` | `'default'` | The queue whose workers run it |
+| `args` | none | The input, as a one-element array: `args: [input]`. Only the first element is sent. |
+| `workflowExecutionTimeout` | none | Bounds the whole workflow, retries included |
+| `workflowRunTimeout` | none | Bounds a single run |
+| `workflowTaskTimeout` | none | Bounds the processing of one workflow activation |
+| `workflowIdReusePolicy` | engine default | Whether `workflowId` may be reused; see below |
+| `retryPolicy` | none | Retry a failed workflow as a fresh run (opt-in) |
+| `cronSchedule` | none | Start the workflow on a cron schedule |
+| `memo`, `searchAttributes` | | Not supported yet: passing either throws a `ClientError` |
+
+Timeouts take a `Duration` or a number of milliseconds. Prefer `Duration`, which states its
+unit where you write it.
+
+### Timeouts and Retries
+
+<$CodeSample path="typescript/src/client/start.ts" region="options" />
+
+Without `workflowExecutionTimeout` a workflow runs until it finishes, however long that takes.
+Without `retryPolicy` a failed workflow is not retried; with one, each retry is a new run with
+its own journal. The retry policy fields are the same as for tasks (see
+[retry policy](/guides/sdk/typescript/tasks#retry-policy)).
+
+<Admonition type="note">
+
+An execution deadline is a safety net for work that should never run unbounded, not a
+substitute for task timeouts. A task timeout tells you *which* step hung; a workflow deadline
+only tells you the whole thing took too long.
+
+</Admonition>
+
+### On a Schedule
+
+<$CodeSample path="typescript/src/client/start.ts" region="cron" />
+
+### Starting a Workflow Once
+
+A workflow id names at most one open run. Starting a workflow whose id belongs to a run that
+is still open is refused with a `WorkflowError` whose `code` is `WORKFLOW_ALREADY_EXISTS`, and
+whose `details.runId` names the open run when the engine reports it. That holds under every
+`workflowIdReusePolicy` except `TerminateIfRunning`. The policies differ in what they allow
+once the earlier run has closed:
+
+| `WorkflowIdReusePolicy` | A new start with the same id is allowed |
+|-------------------------|------------------------------------------|
+| `AllowDuplicate` | once the earlier run has closed, however it ended |
+| `AllowDuplicateFailedOnly` | once the earlier run has closed without completing (failed, canceled, terminated or timed out) |
+| `RejectDuplicate` | never |
+| `TerminateIfRunning` | always: an open run is terminated first |
+
+Leaving the policy unset lets the engine decide, which allows a new run once the previous one
+has closed. Use the workflow id as an idempotency key for the work it stands for, so a repeated
+request finds the run that is already going:
+
+<$CodeSample path="typescript/src/client/start.ts" region="dedupe" />
+
+### Payload Size
+
+A default engine refuses any single payload larger than 8 MiB: a workflow input, a task input
+or result, an event, a workflow result. Starting a workflow with a larger input rejects with
+an `InvalidArgumentError` saying so. A task or workflow whose own result is too large fails
+with the failure type `PayloadTooLarge`, which is not retried, because the same code would
+produce the same result. The operator can change the limit. Workers and clients send and
+receive gRPC messages of up to 32 MiB. Keep large data in your own storage and pass a reference
+to it.
+
+---
+
+## WorkflowHandle
+
+`startWorkflow()` returns a handle; `getWorkflowHandle()` makes one for a workflow by id.
+
+<$CodeSample path="typescript/src/client/handle.ts" region="handle" />
+
+### Getting a Handle by Id
+
+<$CodeSample path="typescript/src/client/handle.ts" region="existing" />
+
+Without a `runId`, the handle addresses the workflow's latest run.
+
+### How a Workflow Ended
+
+`handle.result()` resolves with the workflow's return value. A workflow that ended without a
+result rejects with a subclass of `WorkflowOutcomeError` that says how it ended:
+
+| Error | Code | The workflow |
+|-------|------|--------------|
+| `WorkflowFailedError` | `WORKFLOW_EXECUTION_FAILED` | threw, or a task failed after its retries; `failure` holds the recorded message |
+| `WorkflowCanceledError` | `WORKFLOW_CANCELED` | was canceled, for example with `handle.cancel()` |
+| `WorkflowTerminatedError` | `WORKFLOW_TERMINATED` | was terminated with `handle.terminate()` |
+| `WorkflowTimedOutError` | `WORKFLOW_TIMEOUT` | ran past its `workflowExecutionTimeout` |
+
+All four carry `workflowId` and `runId`, and all are `WorkflowError`s and `OrcherError`s, so
+broader `instanceof` checks still match.
+
+<$CodeSample path="typescript/src/client/handle.ts" region="errors" />
+
+<Admonition type="caution">
+
+Against engine 0.5.5, `result()` does not return for a workflow that ran past its
+`workflowExecutionTimeout`: `status()` reports `WorkflowStatus.TimedOut`, but the wait does
+not end. Bound the wait with `resultWithTimeout()` where a deadline is set.
+
+</Admonition>
+
+`resultWithTimeout(ms)` bounds only how long the call waits. When it gives up it throws a
+`TimeoutError`, which is not a workflow outcome: the workflow keeps running.
+
+<$CodeSample path="typescript/src/client/handle.ts" region="timeout" />
+
+Other failures arrive as `OrcherError` subclasses named after the cause, such as
+`ConnectionError`, `UnauthenticatedError`, `PermissionDeniedError` and
+`InvalidArgumentError`. A workflow id that does not exist gives a `WorkflowError` with code
+`WORKFLOW_NOT_FOUND`.
+
+### Canceling and Terminating
+
+`handle.cancel()` asks the workflow to stop; `handle.terminate(reason?)` ends it at once, with no
+further workflow code running. Running tasks learn of either through their heartbeats; see
+[cancellation](/guides/sdk/typescript/tasks#cancellation). `cancel()` takes a
+`cleanupTimeout`, a `Duration` or a number of milliseconds: how long the workflow may take to
+end after the request before the engine terminates it. Without one there is no limit. Engines
+from before cancellation cleanup ignore it and end the run as canceled at once.
+
+<$CodeSample path="typescript/src/client/handle.ts" region="cancel" />
+
+### Resetting a Workflow
+
+Reset replays a workflow's journal up to an event and runs on from there, making fresh
+decisions after that point. Use it to recover runs that failed because of a bug, once the fix
+is deployed:
+
+<$CodeSample path="typescript/src/client/handle.ts" region="reset" />
+
+---
+
+## Client Reference
+
+| Method | Description |
+|--------|-------------|
+| `new Client(config)` | Create a client: `serverUrl`, `namespace`, and optionally `apiKey`, `tls`, `identity` |
+| `client.connect()` | Connect to the engine |
+| `client.startWorkflow<T>(options)` | Start a workflow; resolves with a `WorkflowHandle<T>` |
+| `client.getWorkflowHandle<T>({ workflowId, runId? })` | A handle for an existing workflow |
+| `client.listWorkflows(options?)` | List workflows, filtered by type, queue or status |
+| `client.actorRef(ActorClass, key)` | A typed reference to an actor; see [Actors](/guides/sdk/typescript/actors) |
+| `client.close()` | Close the connection |
+
+### WorkflowHandle
+
+| Member | Description |
+|--------|-------------|
+| `handle.workflowId` / `handle.runId` | The workflow id, and the run the handle names (if any) |
+| `handle.result()` | Wait for the result; rejects with a `WorkflowOutcomeError` subclass if there is none |
+| `handle.resultWithTimeout(ms)` | The same, giving up with a `TimeoutError` after `ms` milliseconds |
+| `handle.status()` | The current `WorkflowStatus` |
+| `handle.describe()` | Status, timing, journal length and configuration |
+| `handle.sendEvent(name, payload?)` | Send an event to `ctx.waitForEvent(name)` |
+| `handle.query<T>(name, args?)` | Call a query handler the workflow registered |
+| `handle.cancel(options?)` | Ask the workflow to stop; `cleanupTimeout` bounds how long it may take |
+| `handle.terminate(reason?)` | Stop the workflow at once, without cleanup |
+| `handle.reset(eventId, reason?)` | Reset to a journal event; resolves with the new execution id |
+
+---
+
+## Next Steps
+
+- [Workflows](/guides/sdk/typescript/workflows): the `WorkflowContext` API
+- [Worker](/guides/sdk/typescript/worker): worker configuration
+- [Patterns](/guides/sdk/typescript/patterns): common workflow patterns

@@ -1,0 +1,476 @@
+---
+id: 'events-patterns'
+title: 'Event Patterns'
+description: 'Common real-world event patterns for Orcher workflows: human approval, webhook callbacks, and dynamic workflow control.'
+sidebar_label: 'Patterns'
+---
+
+These patterns cover the most frequent real-world uses of events in production workflows: waiting for human decisions, receiving webhook callbacks from external services, and dynamically controlling long-running batch jobs.
+
+## Pattern 1: Human Approval
+
+Wait for a human to approve or reject a document, order, or request. Set a timeout so the workflow doesn't block indefinitely — escalate or auto-resolve if no response arrives.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task]
+pub async fn submit_for_review(_ctx: TaskContext, doc_id: String) -> Result<()> { /* ... */ }
+
+#[task]
+pub async fn publish_document(_ctx: TaskContext, doc_id: String) -> Result<()> { /* ... */ }
+
+#[task]
+pub async fn notify_author(_ctx: TaskContext, args: (String, String)) -> Result<()> { /* ... */ }
+
+#[task]
+pub async fn escalate_review(_ctx: TaskContext, doc_id: String) -> Result<()> { /* ... */ }
+
+#[workflow]
+pub async fn document_review(
+    ctx: WorkflowContext,
+    document_id: String,
+) -> Result<String> {
+    ctx.execute_task(submit_for_review, document_id.clone()).await?;
+    ctx.set_state("status", &"under_review")?;
+
+    // Wait for reviewer decision (24 hour timeout)
+    let decision: Option<ReviewDecision> = ctx
+        .wait_for_event_with_timeout("review_decision", Duration::from_secs(86400))
+        .await?;
+
+    match decision {
+        Some(ReviewDecision { approved: true, .. }) => {
+            ctx.execute_task(publish_document, document_id).await?;
+            Ok("approved".to_string())
+        }
+        Some(ReviewDecision { approved: false, comments }) => {
+            ctx.execute_task(notify_author, (document_id, comments)).await?;
+            Ok("rejected".to_string())
+        }
+        None => {
+            ctx.execute_task(escalate_review, document_id).await?;
+            Ok("escalated".to_string())
+        }
+    }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Duration } from '@orcher/sdk';
+
+@Tasks({ taskQueue: 'docs' })
+class DocTasks {
+  @Task()
+  async submitForReview(ctx: TaskContext, docId: string): Promise<void> { /* ... */ }
+
+  @Task()
+  async publishDocument(ctx: TaskContext, docId: string): Promise<void> { /* ... */ }
+
+  @Task()
+  async notifyAuthor(ctx: TaskContext, args: { docId: string; comments: string }): Promise<void> { /* ... */ }
+
+  @Task()
+  async escalateReview(ctx: TaskContext, docId: string): Promise<void> { /* ... */ }
+}
+
+const docs = createTaskRefs(DocTasks);
+
+@Workflow()
+class DocumentReview {
+  async run(ctx: WorkflowContext, documentId: string): Promise<string> {
+    await ctx.executeTask(docs.submitForReview, documentId);
+    ctx.setState('status', 'under_review');
+
+    // Wait for reviewer decision (24 hour timeout)
+    const decision = await ctx.waitForEventWithTimeout<ReviewDecision>(
+      'review_decision',
+      Duration.fromHours(24)
+    );
+
+    if (decision?.approved) {
+      await ctx.executeTask(docs.publishDocument, documentId);
+      return 'approved';
+    } else if (decision) {
+      await ctx.executeTask(docs.notifyAuthor, { docId: documentId, comments: decision.comments });
+      return 'rejected';
+    } else {
+      await ctx.executeTask(docs.escalateReview, documentId);
+      return 'escalated';
+    }
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from datetime import timedelta
+from orcher import workflow, task, WorkflowContext, TaskContext
+
+
+@task
+async def submit_for_review(ctx: TaskContext, doc_id: str) -> None: ...
+
+@task
+async def publish_document(ctx: TaskContext, doc_id: str) -> None: ...
+
+@task
+async def notify_author(ctx: TaskContext, args: tuple) -> None: ...
+
+@task
+async def escalate_review(ctx: TaskContext, doc_id: str) -> None: ...
+
+
+@workflow
+async def document_review(ctx: WorkflowContext, document_id: str) -> str:
+    await ctx.execute_task(submit_for_review, arg=document_id)
+    ctx.set_state("status", "under_review")
+
+    # Wait for reviewer decision (24 hour timeout)
+    decision = await ctx.wait_for_event_with_timeout(
+        "review_decision", timedelta(hours=24)
+    )
+
+    if decision is not None and decision["approved"]:
+        await ctx.execute_task(publish_document, arg=document_id)
+        return "approved"
+    elif decision is not None:
+        await ctx.execute_task(notify_author, arg=(document_id, decision["comments"]))
+        return "rejected"
+    else:
+        await ctx.execute_task(escalate_review, arg=document_id)
+        return "escalated"
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Pattern 2: Webhook Callback
+
+Initiate an action with an external system (e.g., payment gateway), then wait for a webhook callback event. The webhook handler in your API sends the event to the waiting workflow.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task]
+pub async fn initiate_payment(_ctx: TaskContext, req: PaymentRequest) -> Result<String> { /* ... */ }
+
+#[task]
+pub async fn send_receipt(_ctx: TaskContext, tx_id: String) -> Result<()> { /* ... */ }
+
+#[workflow]
+pub async fn payment_processing(
+    ctx: WorkflowContext,
+    payment_request: PaymentRequest,
+) -> Result<PaymentResult> {
+    // Initiate payment with external gateway (returns transaction ID)
+    let transaction_id: String = ctx
+        .execute_task(initiate_payment, payment_request)
+        .await?;
+
+    ctx.set_state("transaction_id", &transaction_id)?;
+    ctx.set_state("status", &"pending")?;
+
+    // Wait for webhook callback from payment gateway (5 min timeout)
+    let callback: PaymentCallback = ctx
+        .wait_for_event_with_timeout("payment_callback", Duration::from_secs(300))
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Payment gateway timeout"))?;
+
+    match callback.status.as_str() {
+        "success" => {
+            ctx.set_state("status", &"completed")?;
+            ctx.execute_task(send_receipt, transaction_id).await?;
+            Ok(PaymentResult::Success(callback.transaction_id))
+        }
+        "failed" => {
+            ctx.set_state("status", &"failed")?;
+            Ok(PaymentResult::Failed(callback.error_message))
+        }
+        _ => Err(anyhow::anyhow!("Unknown payment status")),
+    }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Duration } from '@orcher/sdk';
+
+@Tasks({ taskQueue: 'payments' })
+class PaymentTasks {
+  @Task()
+  async initiatePayment(ctx: TaskContext, req: PaymentRequest): Promise<string> { /* ... */ }
+
+  @Task()
+  async sendReceipt(ctx: TaskContext, txId: string): Promise<void> { /* ... */ }
+}
+
+const pay = createTaskRefs(PaymentTasks);
+
+@Workflow()
+class PaymentProcessing {
+  async run(ctx: WorkflowContext, paymentRequest: PaymentRequest): Promise<PaymentResult> {
+    // Initiate payment with external gateway (returns transaction ID)
+    const transactionId = await ctx.executeTask(pay.initiatePayment, paymentRequest);
+
+    ctx.setState('transactionId', transactionId);
+    ctx.setState('status', 'pending');
+
+    // Wait for webhook callback from payment gateway (5 min timeout)
+    const callback = await ctx.waitForEventWithTimeout<PaymentCallback>(
+      'payment_callback',
+      Duration.fromMinutes(5)
+    );
+
+    if (!callback) {
+      throw new Error('Payment gateway timeout');
+    }
+
+    if (callback.status === 'success') {
+      ctx.setState('status', 'completed');
+      await ctx.executeTask(pay.sendReceipt, transactionId);
+      return { success: true, transactionId: callback.transactionId };
+    } else {
+      ctx.setState('status', 'failed');
+      return { success: false, error: callback.errorMessage };
+    }
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from datetime import timedelta
+from orcher import workflow, task, WorkflowContext, TaskContext
+
+
+@task
+async def initiate_payment(ctx: TaskContext, req: dict) -> str: ...
+
+@task
+async def send_receipt(ctx: TaskContext, tx_id: str) -> None: ...
+
+
+@workflow
+async def payment_processing(ctx: WorkflowContext, payment_request: dict) -> dict:
+    # Initiate payment with external gateway (returns transaction ID)
+    transaction_id = await ctx.execute_task(initiate_payment, arg=payment_request)
+
+    ctx.set_state("transaction_id", transaction_id)
+    ctx.set_state("status", "pending")
+
+    # Wait for webhook callback from payment gateway (5 min timeout)
+    callback = await ctx.wait_for_event_with_timeout("payment_callback", timedelta(minutes=5))
+
+    if callback is None:
+        raise RuntimeError("Payment gateway timeout")
+
+    if callback["status"] == "success":
+        ctx.set_state("status", "completed")
+        await ctx.execute_task(send_receipt, arg=transaction_id)
+        return {"success": True, "transaction_id": callback["transaction_id"]}
+    else:
+        ctx.set_state("status", "failed")
+        return {"success": False, "error": callback["error_message"]}
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Pattern 3: Dynamic Workflow Control
+
+Use events to pause, resume, or cancel a running workflow from the outside. Each iteration checks for a control event with a very short timeout — if no event is pending, processing continues immediately.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task]
+pub async fn process_item(_ctx: TaskContext, item: Item) -> Result<()> { /* ... */ }
+
+#[workflow]
+pub async fn batch_processing(
+    ctx: WorkflowContext,
+    items: Vec<Item>,
+) -> Result<BatchResult> {
+    let mut processed = 0;
+
+    for item in items {
+        // Non-blocking check for control events (100ms timeout)
+        if let Some(control) = ctx
+            .wait_for_event_with_timeout::<String>("control", Duration::from_millis(100))
+            .await?
+        {
+            match control.as_str() {
+                "pause" => {
+                    ctx.set_state("status", &"paused")?;
+                    // Block until resume event
+                    ctx.wait_for_event::<String>("control").await?;
+                    ctx.set_state("status", &"running")?;
+                }
+                "cancel" => {
+                    ctx.set_state("status", &"cancelled")?;
+                    return Ok(BatchResult { processed, cancelled: true });
+                }
+                _ => {} // Unknown control — continue
+            }
+        }
+
+        ctx.execute_task(process_item, item).await?;
+        processed += 1;
+    }
+
+    Ok(BatchResult { processed, cancelled: false })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Duration } from '@orcher/sdk';
+
+@Tasks({ taskQueue: 'processing' })
+class ProcessingTasks {
+  @Task()
+  async processItem(ctx: TaskContext, item: Item): Promise<void> { /* ... */ }
+}
+
+const tasks = createTaskRefs(ProcessingTasks);
+
+@Workflow()
+class BatchProcessing {
+  async run(ctx: WorkflowContext, items: Item[]): Promise<BatchResult> {
+    let processed = 0;
+
+    for (const item of items) {
+      // Non-blocking check for control events (100ms timeout)
+      const control = await ctx.waitForEventWithTimeout<string>('control', Duration.fromMilliseconds(100));
+
+      if (control === 'pause') {
+        ctx.setState('status', 'paused');
+        // Block until resume event
+        await ctx.waitForEvent<string>('control');
+        ctx.setState('status', 'running');
+      } else if (control === 'cancel') {
+        ctx.setState('status', 'cancelled');
+        return { processed, cancelled: true };
+      }
+
+      await ctx.executeTask(tasks.processItem, item);
+      processed++;
+    }
+
+    return { processed, cancelled: false };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from datetime import timedelta
+from orcher import workflow, task, WorkflowContext, TaskContext
+
+
+@task
+async def process_item(ctx: TaskContext, item: dict) -> None: ...
+
+
+@workflow
+async def batch_processing(ctx: WorkflowContext, items: list) -> dict:
+    processed = 0
+
+    for item in items:
+        # Non-blocking check for control events (100ms timeout)
+        control = await ctx.wait_for_event_with_timeout(
+            "control", timedelta(milliseconds=100)
+        )
+
+        if control == "pause":
+            ctx.set_state("status", "paused")
+            # Block until resume event
+            await ctx.wait_for_event("control")
+            ctx.set_state("status", "running")
+        elif control == "cancel":
+            ctx.set_state("status", "cancelled")
+            return {"processed": processed, "cancelled": True}
+
+        await ctx.execute_task(process_item, arg=item)
+        processed += 1
+
+    return {"processed": processed, "cancelled": False}
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/events/best-practices" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Best Practices & Troubleshooting</h3>
+      <p className="text-sm text-foreground-light">
+        Naming conventions, timeout strategies, and common issues
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/events/sending-events" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Sending Events & Signals</h3>
+      <p className="text-sm text-foreground-light">
+        Send events between workflows and understand event buffering
+      </p>
+    </div>
+  </Link>
+</div>

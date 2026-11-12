@@ -1,0 +1,261 @@
+---
+id: 'saga-forward-recovery'
+title: 'Forward Recovery Saga'
+sidebar_label: 'Forward Recovery'
+---
+
+## Forward Recovery Saga
+
+Instead of compensating failed steps (backward recovery), a forward recovery saga retries each step with increasing delays until it eventually succeeds. This approach is appropriate when the operation must eventually complete — for example, when inventory has already been reserved and payment captured, the shipment must be created even if the shipping service is temporarily down. Use durable `ctx.sleep()` timers between retries so the workflow survives worker restarts.
+
+<div className="not-prose my-8 max-w-sm mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Forward Recovery</div>
+    <div className="text-[10px] text-foreground-muted">retry until success — no compensation</div>
+  </div>
+  {[
+    { task: 'reserve_inventory', attempt: 1, status: 'ok', delay: null },
+    { task: 'charge_payment', attempt: 1, status: 'ok', delay: null },
+    { task: 'create_shipment', attempt: 1, status: 'fail', delay: '1s' },
+    { task: 'create_shipment', attempt: 2, status: 'fail', delay: '5s' },
+    { task: 'create_shipment', attempt: 3, status: 'fail', delay: '30s' },
+    { task: 'create_shipment', attempt: 4, status: 'ok', delay: null },
+    { task: 'send_confirmation', attempt: 1, status: 'ok', delay: null },
+  ].map((s, i, arr) => (
+    <div key={i}>
+      {s.delay && (
+        <div className="bg-surface-75 px-4 py-1 flex items-center justify-center gap-2 border-b">
+          <span className="text-[10px] text-foreground-muted">💤</span>
+          <span className="text-[10px] font-mono text-foreground-muted italic">sleep({s.delay})</span>
+        </div>
+      )}
+      <div className={`px-4 py-2 flex items-center gap-3 ${i < arr.length - 1 ? 'border-b' : ''} ${s.status === 'fail' ? 'bg-red-500/5' : ''}`}>
+        <code className="text-[11px] text-foreground flex-1">{s.task}</code>
+        <span className="text-[9px] font-mono text-foreground-muted">#{s.attempt}</span>
+        <span className={`text-[10px] ${s.status === 'fail' ? 'text-red-400' : 'text-foreground-muted'}`}>
+          {s.status === 'fail' ? '✗' : '✓'}
+        </span>
+      </div>
+    </div>
+  ))}
+</div>
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use std::time::Duration;
+
+// Forward recovery saga - retry until success
+#[workflow(name = "forward_recovery_saga", version = "1.0.0")]
+pub async fn forward_recovery_saga(
+    ctx: WorkflowContext,
+    order: OrderData,
+) -> Result<OrderResult> {
+    println!("Starting forward recovery saga");
+
+    // Step 1: Reserve inventory (retry until success)
+    let inventory_id = loop {
+        match ctx.execute_task(reserve_inventory, order.items.clone()).await {
+            Ok(id) => break id,
+            Err(e) => {
+                println!("Inventory reservation failed: {}, retrying in 30s", e);
+                ctx.sleep(Duration::from_secs(30)).await?;
+                continue;
+            }
+        }
+    };
+
+    println!("Inventory reserved: {}", inventory_id);
+
+    // Step 2: Charge payment (retry until success)
+    let payment_id = loop {
+        match ctx.execute_task(charge_payment, order.amount).await {
+            Ok(id) => break id,
+            Err(e) => {
+                println!("Payment failed: {}, retrying in 60s", e);
+                ctx.sleep(Duration::from_secs(60)).await?;
+                continue;
+            }
+        }
+    };
+
+    println!("Payment captured: {}", payment_id);
+
+    // Step 3: Create shipment (retry until success)
+    let shipment_id = loop {
+        match ctx.execute_task(create_shipment, order.order_id.clone()).await {
+            Ok(id) => break id,
+            Err(e) => {
+                println!("Shipment creation failed: {}, retrying in 120s", e);
+                ctx.sleep(Duration::from_secs(120)).await?;
+                continue;
+            }
+        }
+    };
+
+    println!("Forward recovery saga completed");
+    Ok(OrderResult {
+        order_id: order.order_id,
+        success: true,
+        payment_id: Some(payment_id),
+        inventory_id: Some(inventory_id),
+        shipment_id: Some(shipment_id),
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, WorkflowContext, createTaskRefs } from '@orcher/sdk';
+
+// Forward recovery saga - retry until success
+@Workflow()
+class ForwardRecoverySaga {
+  async execute(ctx: WorkflowContext, order: OrderData): Promise<OrderResult> {
+    console.log('Starting forward recovery saga');
+
+    // Step 1: Reserve inventory (retry until success)
+    let inventoryId: string;
+    while (true) {
+      try {
+        inventoryId = await ctx.executeTask(tasks.reserveInventory, order.items);
+        break;
+      } catch (e) {
+        console.log(`Inventory reservation failed: ${e}, retrying in 30s`);
+        await ctx.sleep(30000);
+      }
+    }
+
+    console.log(`Inventory reserved: ${inventoryId}`);
+
+    // Step 2: Charge payment (retry until success)
+    let paymentId: string;
+    while (true) {
+      try {
+        paymentId = await ctx.executeTask(tasks.chargePayment, order.amount);
+        break;
+      } catch (e) {
+        console.log(`Payment failed: ${e}, retrying in 60s`);
+        await ctx.sleep(60000);
+      }
+    }
+
+    console.log(`Payment captured: ${paymentId}`);
+
+    // Step 3: Create shipment (retry until success)
+    let shipmentId: string;
+    while (true) {
+      try {
+        shipmentId = await ctx.executeTask(tasks.createShipment, order.orderId);
+        break;
+      } catch (e) {
+        console.log(`Shipment creation failed: ${e}, retrying in 120s`);
+        await ctx.sleep(120000);
+      }
+    }
+
+    console.log('Forward recovery saga completed');
+    return {
+      orderId: order.orderId,
+      success: true,
+      paymentId,
+      inventoryId,
+      shipmentId,
+    };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, WorkflowContext
+
+# Forward recovery saga - retry until success
+@workflow(name="forward_recovery_saga", version="1.0.0")
+async def forward_recovery_saga(ctx: WorkflowContext, order: dict) -> dict:
+    print("Starting forward recovery saga")
+
+    # Step 1: Reserve inventory (retry until success)
+    while True:
+        try:
+            inventory_id = await ctx.execute_task(reserve_inventory, order["items"])
+            break
+        except Exception as e:
+            print(f"Inventory reservation failed: {e}, retrying in 30s")
+            await ctx.sleep(30000)
+
+    print(f"Inventory reserved: {inventory_id}")
+
+    # Step 2: Charge payment (retry until success)
+    while True:
+        try:
+            payment_id = await ctx.execute_task(charge_payment, order["amount"])
+            break
+        except Exception as e:
+            print(f"Payment failed: {e}, retrying in 60s")
+            await ctx.sleep(60000)
+
+    print(f"Payment captured: {payment_id}")
+
+    # Step 3: Create shipment (retry until success)
+    while True:
+        try:
+            shipment_id = await ctx.execute_task(create_shipment, order["order_id"])
+            break
+        except Exception as e:
+            print(f"Shipment creation failed: {e}, retrying in 120s")
+            await ctx.sleep(120000)
+
+    print("Forward recovery saga completed")
+    return {
+        "order_id": order["order_id"],
+        "success": True,
+        "payment_id": payment_id,
+        "inventory_id": inventory_id,
+        "shipment_id": shipment_id,
+    }
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/patterns/saga/event-driven" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Event-Driven Saga</h3>
+      <p className="text-sm text-foreground-light">
+        Coordinate saga steps through external events and confirmations
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/saga/best-practices" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Best Practices & Pitfalls</h3>
+      <p className="text-sm text-foreground-light">
+        Idempotency, compensation order, performance, and common mistakes to avoid
+      </p>
+    </div>
+  </Link>
+</div>

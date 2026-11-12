@@ -1,0 +1,322 @@
+---
+id: 'parent-child-hierarchical'
+title: 'Hierarchical Workflows'
+description: 'Build multi-level orchestration hierarchies for complex business processes with Orcher'
+sidebar_label: 'Hierarchical'
+---
+
+## Hierarchical Workflows (Multi-Level)
+
+For complex business processes, you can create multi-level orchestration hierarchies where a parent spawns children that themselves spawn grandchildren. Each level handles its own scope of responsibility — the top-level orchestrator coordinates high-level phases, mid-level workflows manage domain-specific logic, and leaf-level workflows perform individual operations. Keep hierarchies shallow (2-3 levels) for easier debugging and observability.
+
+<div className="not-prose my-8 max-w-lg mx-auto">
+  <div className="flex flex-col items-center">
+    {/* Level 1: Top orchestrator */}
+    <div className="text-[10px] font-mono uppercase tracking-wider text-foreground-muted mb-1">level 1 — orchestrator</div>
+    <div className="border bg-surface-100 px-5 py-2 text-center">
+      <div className="text-xs font-medium text-foreground">Order Pipeline</div>
+    </div>
+    <div className="w-px h-3 bg-border-strong" />
+    {/* Level 2: Domain workflows */}
+    <div className="text-[10px] font-mono uppercase tracking-wider text-foreground-muted mb-1">level 2 — domain workflows</div>
+    <div className="relative w-full">
+      <div className="absolute top-0 h-px bg-border-strong" style={{ left: 'calc(16.6% - 0.30rem)', right: 'calc(16.6% - 0.30rem)' }} />
+      <div className="grid grid-cols-3 gap-3">
+        {[
+          { name: 'Payment', children: ['Validate', 'Charge', 'Receipt'] },
+          { name: 'Fulfillment', children: ['Pick', 'Pack', 'Label'] },
+          { name: 'Notification', children: ['Email', 'SMS', 'Push'] },
+        ].map((domain) => (
+          <div key={domain.name} className="flex flex-col items-center">
+            <div className="w-px h-4 bg-border-strong" />
+            <div className="border border-dashed bg-background w-full p-2.5 text-center">
+              <div className="text-[10px] font-medium text-foreground">{domain.name}</div>
+              {/* Level 3: Leaf operations */}
+              <div className="mt-2 flex flex-col gap-1">
+                {domain.children.map((leaf) => (
+                  <div key={leaf} className="border bg-surface-75 py-1 text-center">
+                    <div className="text-[8px] text-foreground-muted">{leaf}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+    <div className="text-[10px] font-mono uppercase tracking-wider text-foreground-muted mt-3">level 3 — leaf operations</div>
+  </div>
+</div>
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+// Level 3 - Leaf operation
+#[workflow(name = "send_notification", version = "1.0.0")]
+pub async fn send_notification(
+    ctx: WorkflowContext,
+    notification: NotificationData,
+) -> Result<NotificationResult> {
+    ctx.execute_task(send_email, notification.email).await?;
+    ctx.execute_task(send_sms, notification.phone).await?;
+
+    Ok(NotificationResult { sent: true })
+}
+
+// Level 2 - Notify customer via multiple channels
+#[workflow(name = "notify_customer", version = "1.0.0")]
+pub async fn notify_customer(
+    ctx: WorkflowContext,
+    // Workflows take a single input; pass multiple values as a tuple/struct.
+    request: (String, String),
+) -> Result<CustomerNotificationResult> {
+    let (customer_id, message) = request;
+
+    // Get customer preferences
+    let preferences = ctx
+        .execute_task(get_customer_preferences, customer_id.clone())
+        .await?;
+
+    // Spawn notification workflow
+    let notification = NotificationData {
+        email: preferences.email,
+        phone: preferences.phone,
+        content: message,
+    };
+
+    let handle = ctx
+        .start_child_workflow("send_notification", notification)
+        .await?;
+
+    let result = handle.result::<NotificationResult>().await?;
+
+    Ok(CustomerNotificationResult {
+        customer_id,
+        notified: result.sent,
+    })
+}
+
+// Level 1 - Top-level orchestrator
+#[workflow(name = "order_confirmation", version = "1.0.0")]
+pub async fn order_confirmation(
+    ctx: WorkflowContext,
+    order: OrderData,
+) -> Result<ConfirmationResult> {
+    // Process order
+    ctx.execute_task(finalize_order, order.id.clone()).await?;
+
+    // Notify customer (spawns child -> grandchild)
+    let message = format!("Your order {} has been confirmed", order.id);
+
+    let notification_handle = ctx
+        .start_child_workflow(
+            "notify_customer",
+            (order.customer_id.clone(), message),
+        )
+        .await?;
+
+    notification_handle.result::<CustomerNotificationResult>().await?;
+
+    Ok(ConfirmationResult {
+        order_id: order.id,
+        confirmed: true,
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import {
+  Workflow, Tasks, Task, WorkflowContext, TaskContext, createTaskRefs
+} from '@orcher/sdk';
+
+@Tasks()
+class NotificationTasks {
+  @Task({ name: 'sendEmail' })
+  async sendEmail(ctx: TaskContext, email: string): Promise<void> { /* ... */ }
+
+  @Task({ name: 'sendSms' })
+  async sendSms(ctx: TaskContext, phone: string): Promise<void> { /* ... */ }
+
+  @Task({ name: 'getCustomerPreferences' })
+  async getCustomerPreferences(ctx: TaskContext, customerId: string): Promise<Preferences> { /* ... */ }
+
+  @Task({ name: 'finalizeOrder' })
+  async finalizeOrder(ctx: TaskContext, orderId: string): Promise<void> { /* ... */ }
+}
+
+const tasks = createTaskRefs(NotificationTasks);
+
+// Level 3 - Leaf operation
+@Workflow()
+class SendNotification {
+  async execute(ctx: WorkflowContext, notification: NotificationData): Promise<NotificationResult> {
+    await ctx.executeTask(tasks.sendEmail, notification.email);
+    await ctx.executeTask(tasks.sendSms, notification.phone);
+
+    return { sent: true };
+  }
+}
+
+// Level 2 - Notify customer via multiple channels
+@Workflow()
+class NotifyCustomer {
+  async execute(
+    ctx: WorkflowContext,
+    customerId: string,
+    message: string,
+  ): Promise<CustomerNotificationResult> {
+    const preferences = await ctx.executeTask(
+      tasks.getCustomerPreferences,
+      customerId,
+    );
+
+    const notification: NotificationData = {
+      email: preferences.email,
+      phone: preferences.phone,
+      content: message,
+    };
+
+    const handle = await ctx.startChildWorkflow(
+      'send_notification',
+      notification,
+    );
+
+    const result = await handle.result<NotificationResult>();
+
+    return { customerId, notified: result.sent };
+  }
+}
+
+// Level 1 - Top-level orchestrator
+@Workflow()
+class OrderConfirmation {
+  async execute(ctx: WorkflowContext, order: OrderData): Promise<ConfirmationResult> {
+    await ctx.executeTask(tasks.finalizeOrder, order.id);
+
+    const message = `Your order ${order.id} has been confirmed`;
+
+    const notificationHandle = await ctx.startChildWorkflow(
+      'notify_customer',
+      [order.customerId, message],
+    );
+
+    await notificationHandle.result<CustomerNotificationResult>();
+
+    return { orderId: order.id, confirmed: true };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext, TaskContext
+
+@task(name="send_email")
+async def send_email(ctx: TaskContext, email: str) -> None:
+    # ... send email notification
+    pass
+
+@task(name="send_sms")
+async def send_sms(ctx: TaskContext, phone: str) -> None:
+    # ... send SMS notification
+    pass
+
+@task(name="get_customer_preferences")
+async def get_customer_preferences(ctx: TaskContext, customer_id: str) -> dict:
+    # ... fetch customer notification preferences
+    return {"email": "user@example.com", "phone": "+1234567890"}
+
+@task(name="finalize_order")
+async def finalize_order(ctx: TaskContext, order_id: str) -> None:
+    # ... finalize the order in the database
+    pass
+
+# Level 3 - Leaf operation
+@workflow(name="send_notification", version="1.0.0")
+async def send_notification(ctx: WorkflowContext, notification: dict) -> dict:
+    await ctx.execute_task(send_email, email=notification["email"])
+    await ctx.execute_task(send_sms, phone=notification["phone"])
+
+    return {"sent": True}
+
+# Level 2 - Notify customer via multiple channels
+@workflow(name="notify_customer", version="1.0.0")
+async def notify_customer(
+    ctx: WorkflowContext, customer_id: str, message: str
+) -> dict:
+    preferences = await ctx.execute_task(
+        get_customer_preferences, customer_id=customer_id
+    )
+
+    notification = {
+        "email": preferences["email"],
+        "phone": preferences["phone"],
+        "content": message,
+    }
+
+    handle = await ctx.start_child_workflow("send_notification", args=(notification,))
+    result = await handle.result()
+
+    return {"customer_id": customer_id, "notified": result["sent"]}
+
+# Level 1 - Top-level orchestrator
+@workflow(name="order_confirmation", version="1.0.0")
+async def order_confirmation(ctx: WorkflowContext, order: dict) -> dict:
+    await ctx.execute_task(finalize_order, order_id=order["id"])
+
+    message = f"Your order {order['id']} has been confirmed"
+
+    notification_handle = await ctx.start_child_workflow(
+        "notify_customer", args=(order["customer_id"], message)
+    )
+
+    await notification_handle.result()
+
+    return {"order_id": order["id"], "confirmed": True}
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/patterns/parent-child/error-handling" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Error Handling & Monitoring</h3>
+      <p className="text-sm text-foreground-light">
+        Strategies for handling child failures and monitoring execution trees
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/parent-child/best-practices" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Best Practices & Performance</h3>
+      <p className="text-sm text-foreground-light">
+        Guidelines for designing efficient parent-child hierarchies
+      </p>
+    </div>
+  </Link>
+</div>

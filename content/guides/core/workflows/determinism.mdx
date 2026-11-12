@@ -1,0 +1,219 @@
+---
+id: 'workflows-determinism'
+title: 'Determinism Rules'
+description: 'Understand what is safe and unsafe in workflow code, and why determinism matters for replay.'
+sidebar_label: 'Determinism'
+---
+
+Workflow code **must be deterministic** — meaning it must produce the same sequence of context calls every time it executes with the same inputs. This is a fundamental requirement, not a suggestion.
+
+The reason is replay. When a workflow resumes after a crash, the runtime re-executes your workflow function from the beginning. It matches each context call to a journal entry by sequence number: the first `execute_task` in your code corresponds to journal entry #1, the second to #2, and so on. If replay encounters a different sequence of calls than the original execution, the journal entries won't match and the workflow will fail with a **non-determinism error**.
+
+### What is Safe
+
+Any operation that produces the same result every time is safe to use directly in workflow code:
+
+- **Pure computation** — math, string manipulation, data transformation
+- **Context methods** — `execute_task`, `execute`, `sleep`, `wait_for_event`, `execute_child_workflow` (these are journaled)
+- **Branching on task results** — `if`/`else` based on journaled values is safe because the same journaled values will be replayed
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+  <TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use std::time::Duration;
+
+#[workflow(name = "safe_workflow", version = "1.0.0")]
+pub async fn safe_workflow(
+    ctx: WorkflowContext,
+    input: MyInput,
+) -> Result<String> {
+    // Safe: Pure computation (same input always gives same output)
+    let computed = input.amount * 2;
+
+    // Safe: Using task execution (result is journaled)
+    let result: String = ctx
+        .execute_task(get_data, ())
+        .await?;
+
+    // Safe: Using workflow context (sleep is journaled)
+    ctx.sleep(Duration::from_secs(60)).await?;
+
+    Ok(result)
+}
+```
+
+  </TabPanel>
+  <TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, WorkflowContext, Duration } from '@orcher/sdk';
+
+@Workflow({ name: 'safe_workflow', version: '1.0' })
+class SafeWorkflow {
+  async run(ctx: WorkflowContext, input: { amount: number }): Promise<string> {
+    // Safe: Pure computation (same input always gives same output)
+    const computed = input.amount * 2;
+
+    // Safe: Using task execution (result is journaled)
+    const result = await ctx.executeTask(dataTasks.getData, {});
+
+    // Safe: Using workflow context (sleep is journaled)
+    await ctx.sleep(Duration.fromSeconds(60));
+
+    return result;
+  }
+}
+```
+
+  </TabPanel>
+  <TabPanel id="python" label="Python">
+
+```python
+from datetime import timedelta
+from orcher import workflow, WorkflowContext
+
+@workflow(name="safe_workflow", version="1.0")
+async def safe_workflow(ctx: WorkflowContext, amount: float) -> str:
+    # Safe: Pure computation (same input always gives same output)
+    computed = amount * 2
+
+    # Safe: Using task execution (result is journaled)
+    result = await ctx.execute_task(get_data)
+
+    # Safe: Using workflow context (timer is journaled)
+    await ctx.sleep(timedelta(seconds=60))
+
+    return result
+```
+
+  </TabPanel>
+</Tabs>
+
+### What is NOT Safe
+
+Operations that can return different values on each execution will break replay. These must always be wrapped in tasks:
+
+- **Current time** — `DateTime::now()`, `new Date()`, `datetime.now()` return different values on replay. If you need the current time, get it inside a task and return it as a result.
+- **Random values** — `rand::random()`, `Math.random()`, `random.randint()` produce different values on each call. Wrap randomness in a task.
+- **UUIDs** — UUID generation is random. Generate UUIDs inside tasks.
+- **Direct I/O** — Network calls, file reads, database queries outside of tasks are not journaled. If the result differs on replay, your workflow will diverge.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+  <TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use std::time::SystemTime;
+use rand::Rng;
+
+#[workflow(name = "unsafe_workflow", version = "1.0.0")]
+pub async fn unsafe_workflow(
+    ctx: WorkflowContext,
+    _input: MyInput,
+) -> Result<String> {
+    // UNSAFE: Current time changes on replay
+    let now = SystemTime::now();
+
+    // UNSAFE: Random values differ on replay
+    let random = rand::thread_rng().gen::<u32>();
+
+    // UNSAFE: Direct network call (not journaled)
+    let response = reqwest::get("https://api.example.com").await?;
+
+    // CORRECT: Use execute() or execute_task() for all external interactions
+    let result: String = ctx
+        .execute("fetch_data", || async {
+            let resp = reqwest::get("https://api.example.com").await?;
+            Ok(resp.text().await?)
+        })
+        .await?;
+
+    Ok(result)
+}
+```
+
+  </TabPanel>
+  <TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, WorkflowContext } from '@orcher/sdk';
+
+@Workflow({ name: 'unsafe_workflow', version: '1.0' })
+class UnsafeWorkflow {
+  async run(ctx: WorkflowContext, input: { amount: number }): Promise<string> {
+    // UNSAFE: Current time changes on replay
+    const now = new Date();
+
+    // UNSAFE: Random values differ on replay
+    const random = Math.random();
+
+    // UNSAFE: Direct network call (not journaled)
+    const response = await fetch('https://api.example.com');
+
+    // CORRECT: Use execute() or executeTask() for all external interactions
+    const result = await ctx.execute('fetch_data', async () => {
+      const resp = await fetch('https://api.example.com');
+      return resp.text();
+    });
+
+    return result;
+  }
+}
+```
+
+  </TabPanel>
+  <TabPanel id="python" label="Python">
+
+```python
+import random
+from datetime import datetime
+from orcher import workflow, WorkflowContext
+
+@workflow(name="unsafe_workflow", version="1.0")
+async def unsafe_workflow(ctx: WorkflowContext) -> str:
+    # UNSAFE: Current time changes on replay
+    now = datetime.now()
+
+    # UNSAFE: Random values differ on replay
+    rand_val = random.randint(0, 100)
+
+    # UNSAFE: Direct network call (not journaled)
+    import httpx
+    response = await httpx.AsyncClient().get("https://api.example.com")
+
+    # CORRECT: Use execute() or execute_task() for all external interactions
+    result = await ctx.execute_task(fetch_data)
+
+    return result
+```
+
+  </TabPanel>
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/workflows/patterns" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Common Patterns</h3>
+      <p className="text-sm text-foreground-light">
+        Sequential, parallel, conditional, and error handling patterns
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/workflows/lifecycle" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Versioning, Lifecycle & Queries</h3>
+      <p className="text-sm text-foreground-light">
+        Manage workflow versions, understand lifecycle states, and query workflows
+      </p>
+    </div>
+  </Link>
+</div>

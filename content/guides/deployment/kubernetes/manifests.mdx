@@ -1,0 +1,240 @@
+---
+id: 'kubernetes-manifests'
+title: 'Kubernetes Manifests'
+description: 'Deployment, Service, ConfigMap, and RBAC manifests for deploying Orcher to Kubernetes'
+sidebar_label: 'Manifests'
+---
+
+## Manifests
+
+All manifests live in `services/orchestrator/k8s/` and are referenced by `kustomization.yaml`.
+
+### Deployment
+
+3 replicas by default, with resource limits, health probes, and pod anti-affinity:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator
+  namespace: orcher
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: orchestrator
+  template:
+    metadata:
+      labels:
+        app: orchestrator
+        component: coordination
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: orchestrator
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: orchestrator
+          image: orcher/orchestrator:latest
+          ports:
+            - name: grpc
+              containerPort: 50051
+            - name: http
+              containerPort: 8080
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: orcher-secrets
+                  key: database-url
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: orcher-secrets
+                  key: redis-url
+                  optional: true
+            - name: LOG_LEVEL
+              value: "info"
+            - name: LOG_FORMAT
+              value: "json"
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+            limits:
+              memory: "2Gi"
+              cpu: "2000m"
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: config
+              mountPath: /etc/orchestrator
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: orchestrator-config
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - orchestrator
+                topologyKey: kubernetes.io/hostname
+```
+
+### Services
+
+Two Service definitions — a standard ClusterIP for normal access and a headless service for direct pod addressing:
+
+```yaml
+# Standard service for gRPC + HTTP
+apiVersion: v1
+kind: Service
+metadata:
+  name: orchestrator
+  namespace: orcher
+spec:
+  type: ClusterIP
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: grpc
+    - name: http
+      port: 8080
+      targetPort: http
+  selector:
+    app: orchestrator
+---
+# Headless service for direct pod access
+apiVersion: v1
+kind: Service
+metadata:
+  name: orchestrator-headless
+  namespace: orcher
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: grpc
+    - name: http
+      port: 8080
+      targetPort: http
+  selector:
+    app: orchestrator
+```
+
+SDK workers connect to the orchestrator via the standard service at `orchestrator.orcher.svc.cluster.local:50051`.
+
+### ConfigMap
+
+TOML configuration mounted at `/etc/orchestrator/config.toml`:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orchestrator-config
+  namespace: orcher
+data:
+  config.toml: |
+    [server]
+    grpc_addr = "0.0.0.0:50051"
+    http_addr = "0.0.0.0:8080"
+    max_concurrent_streams = 1000
+
+    [orchestrator]
+    max_workers = 100
+    max_concurrent_tasks = 1000
+    heartbeat_timeout_secs = 90
+
+    [storage]
+    database_url = "${DATABASE_URL}"
+    redis_url = "${REDIS_URL}"
+
+    [logging]
+    level = "info"
+    format = "json"
+
+    [health]
+    readiness_enabled = true
+    liveness_enabled = true
+```
+
+Note: `DATABASE_URL` and `REDIS_URL` in the ConfigMap are overridden by the environment variables from the Secret, which take precedence.
+
+### RBAC
+
+ServiceAccount, Role, and RoleBinding with minimal permissions:
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: orchestrator
+  namespace: orcher
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: orchestrator
+  namespace: orcher
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: orchestrator
+  namespace: orcher
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: orchestrator
+subjects:
+  - kind: ServiceAccount
+    name: orchestrator
+    namespace: orcher
+```
+
+---
+
+## Next Steps
+
+- [Autoscaling](/guides/deployment/kubernetes/autoscaling) — HPA, PDB, and Kustomize configuration
+- [Production](/guides/deployment/kubernetes/production) — Monitoring, scaling, security, and troubleshooting
+- [Kubernetes Overview](/guides/deployment/kubernetes) — Prerequisites and quick start

@@ -1,0 +1,649 @@
+---
+id: 'api-authentication'
+title: 'Authentication & OAuth'
+description: 'JWT authentication, OAuth 2.0 flows, and device authorization for the Orcher REST API'
+sidebar_label: 'Authentication'
+---
+
+## Authentication
+
+All authenticated endpoints require a Bearer token in the `Authorization` header:
+
+```
+Authorization: Bearer <access_token>
+```
+
+Access tokens are JWTs issued on login or OAuth callback. Refresh tokens can be used to obtain new access tokens without re-authenticating.
+
+### Sign Up
+
+Create a new user account. A verification email is sent before the account can be used to log in.
+
+```bash
+POST /api/v1/auth/signup
+Content-Type: application/json
+
+{
+  "email": "user@example.com",
+  "password": "securepassword123",
+  "name": "John Doe",
+  "username": "johndoe"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `email` | string | Yes | Email address (1-255 chars, valid email) |
+| `password` | string | Yes | Password (8-128 chars) |
+| `name` | string | Yes | Display name (1-255 chars) |
+| `username` | string | No | Username (3-50 chars, generated from email if omitted) |
+
+**Response (201 Created):**
+
+```json
+{
+  "message": "Account created successfully! We've sent a verification email to user@example.com. Please verify your email before logging in.",
+  "email": "user@example.com",
+  "userId": "550e8400-e29b-41d4-a716-446655440000",
+  "verificationRequired": true
+}
+```
+
+**Status Codes:**
+
+- `201` - Account created, verification email sent
+- `400` - Invalid request data
+- `409` - Email already registered
+
+### Verify Email
+
+Verify a user's email address using the token sent to their inbox.
+
+```bash
+POST /api/v1/auth/verify-email
+Content-Type: application/json
+
+{
+  "token": "verification_token_here"
+}
+```
+
+**Response (200 OK):**
+
+```json
+{
+  "message": "Email verified successfully. Your account is now fully activated.",
+  "verified": true
+}
+```
+
+**Status Codes:**
+
+- `200` - Email verified
+- `400` - Invalid or expired token
+
+### Resend Verification Email
+
+Request a new verification email if the original was lost or expired.
+
+```bash
+POST /api/v1/auth/resend-verification
+Content-Type: application/json
+
+{
+  "email": "user@example.com"
+}
+```
+
+**Response (200 OK):**
+
+```json
+{
+  "message": "Verification email sent. Please check your inbox."
+}
+```
+
+**Status Codes:**
+
+- `200` - Verification email sent
+- `400` - User not found or email already verified
+
+### Login
+
+Authenticate a user with email/username and password. Returns access and refresh tokens on success.
+
+```bash
+POST /api/v1/auth/login
+Content-Type: application/json
+
+{
+  "identifier": "user@example.com",
+  "password": "password123",
+  "mfaCode": "123456",
+  "rememberMe": false
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `identifier` | string | Yes | Email or username (1-255 chars) |
+| `password` | string | Yes | Password (1-128 chars) |
+| `mfaCode` | string | No | TOTP code if MFA is enabled (6-8 chars) |
+| `rememberMe` | boolean | No | Extend session duration (default: `false`) |
+
+**Response (200 OK):**
+
+```json
+{
+  "accessToken": "eyJhbGciOiJIUzI1NiIs...",
+  "refreshToken": "eyJhbGciOiJIUzI1NiIs...",
+  "tokenType": "Bearer",
+  "expiresAt": 1704700000,
+  "sessionId": "sess_abc123",
+  "user": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "username": "johndoe",
+    "email": "user@example.com",
+    "displayName": "John Doe",
+    "roles": ["user"],
+    "mfaEnabled": false,
+    "lastLoginAt": "2024-01-07T12:00:00Z"
+  }
+}
+```
+
+**Response (202 Accepted) -- MFA Required:**
+
+If the account has MFA enabled and no `mfaCode` was provided:
+
+```json
+{
+  "mfaRequired": true,
+  "mfaSessionToken": "mfa_sess_xyz789",
+  "message": "Multi-factor authentication is required. Please provide your MFA code."
+}
+```
+
+Re-submit the login request with the `mfaCode` field to complete authentication.
+
+**Status Codes:**
+
+- `200` - Login successful
+- `202` - MFA required (provide code and retry)
+- `400` - Invalid request data
+- `401` - Invalid credentials, account locked, account inactive, email not verified, or invalid MFA code
+
+### Refresh Token
+
+Exchange a valid refresh token for a new access token.
+
+```bash
+POST /api/v1/auth/refresh
+Content-Type: application/json
+
+{
+  "refreshToken": "eyJhbGciOiJIUzI1NiIs..."
+}
+```
+
+**Response (200 OK):**
+
+```json
+{
+  "accessToken": "eyJhbGciOiJIUzI1NiIs...",
+  "refreshToken": "eyJhbGciOiJIUzI1NiIs...",
+  "tokenType": "Bearer",
+  "expiresAt": 1704703600
+}
+```
+
+The `refreshToken` field is present when token rotation is enabled; store the new refresh token and discard the old one.
+
+**Status Codes:**
+
+- `200` - Token refreshed
+- `401` - Invalid or expired refresh token
+
+### Logout
+
+Invalidate the current session and associated tokens.
+
+```bash
+POST /api/v1/auth/logout
+Content-Type: application/json
+
+{
+  "allSessions": false
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `allSessions` | boolean | No | Destroy all sessions for the user (default: `false`) |
+
+**Response (200 OK):**
+
+```json
+{
+  "message": "Logged out successfully",
+  "sessionsDestroyed": 1,
+  "tokensRevoked": 2
+}
+```
+
+**Status Codes:**
+
+- `200` - Logout successful
+- `401` - Not authenticated
+
+---
+
+## OAuth 2.0
+
+Orcher supports OAuth 2.0 authentication with **GitHub**, **Google**, and **Microsoft** as identity providers. All OAuth flows use PKCE (Proof Key for Code Exchange) for security.
+
+### Initiate OAuth Flow
+
+Start an OAuth authorization flow. The response contains the URL to redirect the user to and a PKCE code verifier the client must store.
+
+```bash
+curl -X POST https://your-server/api/v1/auth/oauth/initiate \
+  -H "Content-Type: application/json" \
+  -d '{"provider": "github"}'
+```
+
+**Request Body:**
+
+```json
+{
+  "provider": "github",
+  "redirectUri": "https://app.example.com/auth/callback"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `provider` | string | Yes | OAuth provider (`github`, `google`, `microsoft`) |
+| `redirectUri` | string | No | Custom callback URL (defaults to server config) |
+
+**Response (200 OK):**
+
+```json
+{
+  "authorizationUrl": "https://github.com/login/oauth/authorize?client_id=...&state=...&code_challenge=...",
+  "state": "random_state_token",
+  "codeVerifier": "pkce_code_verifier_value",
+  "provider": "github"
+}
+```
+
+The client must:
+1. Store `state` and `codeVerifier` securely (e.g., session storage).
+2. Redirect the user to `authorizationUrl`.
+
+**Status Codes:**
+
+- `200` - OAuth flow initiated
+- `400` - Invalid provider
+- `500` - OAuth service not configured
+
+### OAuth Callback
+
+Handle the redirect from the OAuth provider. The server validates the state token, exchanges the authorization code for tokens via PKCE, fetches user info, and creates or links the account.
+
+```
+GET /api/v1/auth/oauth/callback?code=AUTH_CODE&state=STATE_TOKEN
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `code` | string | Yes | Authorization code from provider |
+| `state` | string | Yes | State token for CSRF verification |
+| `error` | string | No | Error code if authorization failed |
+| `error_description` | string | No | Human-readable error description |
+
+**Response (200 OK):**
+
+```json
+{
+  "accessToken": "eyJhbGciOiJIUzI1NiIs...",
+  "refreshToken": "eyJhbGciOiJIUzI1NiIs...",
+  "tokenType": "Bearer",
+  "expiresIn": 3600,
+  "user": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "email": "user@example.com",
+    "name": "John Doe",
+    "isNew": true,
+    "oauthProvider": "github"
+  }
+}
+```
+
+**Status Codes:**
+
+- `200` - Authentication successful
+- `400` - Invalid callback data or provider error
+- `401` - Invalid state token or PKCE verification failed
+
+### Link OAuth Account (Protected)
+
+Connect an OAuth provider to an existing authenticated account. The client must first call the initiate endpoint, complete the provider authorization, then submit the code and verifier here.
+
+```bash
+curl -X POST https://your-server/api/v1/oauth/link \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider": "github",
+    "code": "auth_code_123",
+    "state": "state_token_456",
+    "codeVerifier": "verifier_789"
+  }'
+```
+
+**Request Body:**
+
+```json
+{
+  "provider": "github",
+  "code": "auth_code_123",
+  "state": "state_token_456",
+  "codeVerifier": "verifier_789"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `provider` | string | Yes | OAuth provider to link |
+| `code` | string | Yes | Authorization code from provider |
+| `state` | string | Yes | State token from initiate request |
+| `codeVerifier` | string | Yes | PKCE code verifier from initiate response |
+
+**Response (200 OK):**
+
+```json
+{
+  "message": "Successfully linked github account",
+  "provider": "github"
+}
+```
+
+**Status Codes:**
+
+- `200` - Account linked
+- `400` - Invalid request data or account already linked to another user
+- `401` - Not authenticated or invalid state token
+- `409` - OAuth account already linked to a different user
+
+### Unlink OAuth Account (Protected)
+
+Remove the connection between your account and an OAuth provider. You must have at least one other authentication method (password or another linked provider) to prevent account lockout.
+
+```bash
+curl -X DELETE https://your-server/api/v1/oauth/unlink/github \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+**Path Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `provider` | string | Provider to unlink (`github`, `google`, `microsoft`) |
+
+**Response (200 OK):**
+
+```json
+{
+  "message": "Successfully unlinked github account",
+  "provider": "github"
+}
+```
+
+**Status Codes:**
+
+- `200` - Account unlinked
+- `400` - Cannot unlink last authentication method
+- `401` - Not authenticated
+- `404` - Provider not linked to this account
+
+### List Linked OAuth Accounts (Protected)
+
+Retrieve all OAuth providers currently linked to the authenticated user.
+
+```bash
+curl https://your-server/api/v1/oauth/accounts \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+**Response (200 OK):**
+
+```json
+{
+  "providers": ["github", "google"]
+}
+```
+
+**Status Codes:**
+
+- `200` - Returns list of linked providers
+- `401` - Not authenticated
+
+---
+
+## Device Authorization (RFC 8628)
+
+The device authorization flow enables authentication on CLI tools and IoT devices that cannot open a browser directly. It follows [RFC 8628](https://datatracker.ietf.org/doc/html/rfc8628).
+
+**Flow overview:**
+
+1. Device requests a device code and user code.
+2. Device displays the user code and a verification URL.
+3. User visits the URL in a browser and enters the code.
+4. User approves or denies authorization.
+5. Device polls the token endpoint until authorized.
+
+### Request Device Code
+
+Generate a device code and user code pair. The device should display the `userCode` and `verificationUri` to the user.
+
+```bash
+curl -X POST https://your-server/api/v1/auth/oauth/device/code \
+  -H "Content-Type: application/json" \
+  -d '{"provider": "github"}'
+```
+
+**Request Body:**
+
+```json
+{
+  "provider": "github"
+}
+```
+
+**Response (200 OK):**
+
+```json
+{
+  "deviceCode": "NgAyZDgyNGQtYzYwMy00MGI2LWIzNzAtZGI2MjU0MzJhOGQ0",
+  "userCode": "WDJB-MJHT",
+  "verificationUri": "https://your-server/api/v1/auth/oauth/device/authorize",
+  "verificationUriComplete": "https://your-server/api/v1/auth/oauth/device/authorize?userCode=WDJB-MJHT",
+  "expiresIn": 900,
+  "interval": 5
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `deviceCode` | string | Opaque code the device uses to poll for tokens |
+| `userCode` | string | Human-readable code the user enters (e.g., `WDJB-MJHT`) |
+| `verificationUri` | string | URL for the user to visit |
+| `verificationUriComplete` | string | URL with code pre-filled (for QR codes) |
+| `expiresIn` | integer | Seconds until codes expire (typically 900 = 15 minutes) |
+| `interval` | integer | Minimum seconds between poll attempts |
+
+**Status Codes:**
+
+- `200` - Device code generated
+- `400` - Invalid provider
+- `429` - Rate limit exceeded
+
+### Poll for Device Token
+
+The device polls this endpoint at the `interval` from the device code response. Returns the current authorization status.
+
+```bash
+curl -X POST https://your-server/api/v1/auth/oauth/device/token \
+  -H "Content-Type: application/json" \
+  -d '{
+    "deviceCode": "NgAyZDgyNGQtYzYwMy00MGI2LWIzNzAtZGI2MjU0MzJhOGQ0",
+    "provider": "github"
+  }'
+```
+
+**Request Body:**
+
+```json
+{
+  "deviceCode": "NgAyZDgyNGQtYzYwMy00MGI2LWIzNzAtZGI2MjU0MzJhOGQ0",
+  "provider": "github"
+}
+```
+
+The response is a tagged union with a `status` field. Possible statuses:
+
+**Pending** -- user has not yet authorized:
+
+```json
+{
+  "status": "pending",
+  "interval": 5
+}
+```
+
+**Success** -- user authorized, tokens available:
+
+```json
+{
+  "status": "success",
+  "accessToken": "eyJhbGciOiJIUzI1NiIs...",
+  "refreshToken": "eyJhbGciOiJIUzI1NiIs...",
+  "tokenType": "Bearer",
+  "expiresIn": 3600,
+  "user": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "email": "user@example.com",
+    "name": "John Doe",
+    "isNew": false,
+    "oauthProvider": "github"
+  }
+}
+```
+
+**Denied** -- user rejected the request:
+
+```json
+{
+  "status": "denied"
+}
+```
+
+**Expired** -- device code has expired (request a new one):
+
+```json
+{
+  "status": "expired"
+}
+```
+
+**Slow Down** -- polling too frequently:
+
+```json
+{
+  "status": "slowDown",
+  "interval": 10
+}
+```
+
+**Status Codes:**
+
+- `200` - Returns current authorization status
+- `400` - Invalid request data
+- `404` - Device code not found or expired
+- `429` - Polling too frequently
+
+### Get Device Authorization Page
+
+Retrieve the device authorization page data. In production this renders an HTML form; the JSON response is shown here for API clients.
+
+```bash
+curl "https://your-server/api/v1/auth/oauth/device/authorize?userCode=WDJB-MJHT"
+```
+
+**Query Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `userCode` | string | No | Pre-fill the user code field |
+
+**Response (200 OK):**
+
+```json
+{
+  "title": "Device Authorization",
+  "instructions": "Enter the code shown on your device to authorize access.",
+  "userCode": "WDJB-MJHT",
+  "provider": null
+}
+```
+
+### Authorize Device (Protected)
+
+Submit the device authorization decision. The user must be authenticated (logged in via browser). Called when the user enters their code and clicks approve or deny.
+
+```bash
+curl -X POST https://your-server/api/v1/auth/oauth/device/authorize \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -d '{"userCode": "WDJB-MJHT", "granted": true}'
+```
+
+**Request Body:**
+
+```json
+{
+  "userCode": "WDJB-MJHT",
+  "granted": true
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `userCode` | string | Yes | Code displayed on the device (max 20 chars) |
+| `granted` | boolean | Yes | `true` to approve, `false` to deny |
+
+**Response (200 OK):**
+
+```json
+{
+  "message": "Device authorized successfully. You can close this window.",
+  "granted": true
+}
+```
+
+**Status Codes:**
+
+- `200` - Authorization recorded
+- `400` - Invalid user code format
+- `401` - User not authenticated
+- `404` - User code not found or expired
+- `409` - Code already used
+
+---
+
+## Next Steps
+
+- [API Overview](/guides/api) -- base URL, versioning, and common headers
+- [Workflow Endpoints](/guides/api/workflows) -- start and manage workflow executions
+- [Errors & Limits](/guides/api/errors-and-limits) -- error response format and rate limits

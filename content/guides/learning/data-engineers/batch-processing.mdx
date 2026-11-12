@@ -1,0 +1,758 @@
+---
+id: data-engineers-batch-processing
+title: "Batch & Incremental Processing"
+description: "Batch processing patterns, incremental sync with cursor-based pagination, and CDC (change data capture)"
+sidebar_label: 'Batch Processing'
+---
+
+This page covers two ways to move data: **batch processing** a whole dataset in chunks, and **incremental sync** — only pulling what changed since last time. The first you saw in miniature on the last page; the second is the pattern that turns a nightly full-reload into a lightweight sync that runs every few minutes.
+
+## Batch Processing
+
+You already know this shape from the [CSV import](/guides/learning/data-engineers/etl-pipelines) — count the work, loop over chunks, checkpoint each one. Here it's a **database-to-database migration** instead of a file, with an enrichment step in the middle. Same durability, new source and transform. We'll build it in three moves.
+
+### Step 1 — Page through the source
+
+Two tasks read the source: `count_source_rows` for the total, and `fetch_batch` for one page via `LIMIT/OFFSET` — the cursor pagination you'd write against any large table. Each fetched page is a journaled task, so a crash costs you one page, not the whole migration.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="typescript" queryGroup="language">
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Task()
+async countSourceRows(ctx: TaskContext, table: string): Promise<number> {
+  const result = await db.query('SELECT COUNT(*) as count FROM ' + table);
+  return result.rows[0].count;
+}
+
+@Task()
+async fetchBatch(ctx: TaskContext, input: { table: string; offset: number; limit: number }): Promise<Row[]> {
+  return await db.query(
+    'SELECT * FROM ' + input.table + ' ORDER BY id LIMIT $1 OFFSET $2',
+    [input.limit, input.offset]
+  );
+}
+```
+
+</TabPanel>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task]
+async fn count_source_rows(ctx: TaskContext, table: String) -> Result<i64> {
+    let pool = get_db_pool().await?;
+    let (count,): (i64,) = sqlx::query_as(&format!("SELECT COUNT(*) FROM {}", table))
+        .fetch_one(&pool).await?;
+    Ok(count)
+}
+
+#[task]
+async fn fetch_batch(ctx: TaskContext, input: (String, usize, usize)) -> Result<Vec<Row>> {
+    let (table, offset, limit) = input;
+    let pool = get_db_pool().await?;
+    sqlx::query_as(&format!(
+        "SELECT * FROM {} ORDER BY id LIMIT {} OFFSET {}", table, limit, offset
+    )).fetch_all(&pool).await.map_err(Into::into)
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@task(name="count_source_rows")
+async def count_source_rows(ctx: TaskContext, table: str) -> int:
+    result = await db.query(f"SELECT COUNT(*) FROM {table}")
+    return result[0]["count"]
+
+@task(name="fetch_batch")
+async def fetch_batch(ctx: TaskContext, input: dict) -> list[dict]:
+    return await db.query(
+        f"SELECT * FROM {input['table']} ORDER BY id LIMIT $1 OFFSET $2",
+        [input["limit"], input["offset"]],
+    )
+```
+
+</TabPanel>
+</Tabs>
+
+> **Note on `OFFSET`.** `LIMIT/OFFSET` is the clearest way to show pagination, but on very large tables the database re-scans skipped rows, so deep offsets get slow. In production, prefer *keyset* pagination — `WHERE id > $last_id ORDER BY id LIMIT $n` — which is also the seam that leads straight into incremental sync below.
+
+### Step 2 — Enrich, then load idempotently
+
+`transform_rows` does the enrichment the migration exists for — lowercasing emails, mapping a country code to a region, normalizing dates. `upsert_batch` writes with an UPSERT so a retried batch updates in place instead of duplicating — the idempotency rule from the last page, and it never stops mattering.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="typescript" queryGroup="language">
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Task()
+async transformRows(ctx: TaskContext, rows: Row[]): Promise<TransformedRow[]> {
+  return rows.map(row => ({
+    ...row,
+    email: row.email.toLowerCase(),
+    region: lookupRegion(row.country_code),
+    created_date: new Date(row.created_at).toISOString().split('T')[0],
+  }));
+}
+
+@Task()
+async upsertBatch(ctx: TaskContext, input: { table: string; rows: TransformedRow[] }): Promise<number> {
+  return await db.upsertRows(input.table, input.rows); // ON CONFLICT DO UPDATE
+}
+```
+
+</TabPanel>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task]
+async fn transform_rows(ctx: TaskContext, rows: Vec<Row>) -> Result<Vec<TransformedRow>> {
+    Ok(rows.into_iter().map(|row| TransformedRow {
+        email: row.email.to_lowercase(),
+        region: lookup_region(&row.country_code),
+        created_date: row.created_at.format("%Y-%m-%d").to_string(),
+        ..row.into()
+    }).collect())
+}
+
+#[task]
+async fn upsert_batch(ctx: TaskContext, input: (String, Vec<TransformedRow>)) -> Result<usize> {
+    let (table, rows) = input;
+    let pool = get_db_pool().await?;
+    db::upsert_rows(&pool, &table, &rows).await // ON CONFLICT DO UPDATE
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@task(name="transform_rows")
+async def transform_rows(ctx: TaskContext, rows: list[dict]) -> list[dict]:
+    return [{
+        **row,
+        "email": row["email"].lower(),
+        "region": lookup_region(row["country_code"]),
+        "created_date": parse_date(row["created_at"]).strftime("%Y-%m-%d"),
+    } for row in rows]
+
+@task(name="upsert_batch")
+async def upsert_batch(ctx: TaskContext, input: dict) -> int:
+    return await db.upsert_rows(input["table"], input["rows"])  # ON CONFLICT DO UPDATE
+```
+
+</TabPanel>
+</Tabs>
+
+### Step 3 — Orchestrate the migration
+
+The workflow is the same count-then-loop as before, now fetch → transform → upsert per batch. Nothing tracks progress explicitly — the loop index lives in the journal.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="typescript" queryGroup="language">
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Workflow({ name: 'database_migration', version: '1.0.0' })
+class DatabaseMigration {
+  async run(ctx: WorkflowContext, input: MigrationInput): Promise<MigrationResult> {
+    const totalRows = await ctx.executeTask(tasks.countSourceRows, input.sourceTable);
+    const numBatches = Math.ceil(totalRows / input.batchSize);
+
+    for (let i = 0; i < numBatches; i++) {
+      const rows = await ctx.executeTask(tasks.fetchBatch, {
+        table: input.sourceTable, offset: i * input.batchSize, limit: input.batchSize,
+      });
+      const transformed = await ctx.executeTask(tasks.transformRows, rows);
+      await ctx.executeTask(tasks.upsertBatch, { table: input.targetTable, rows: transformed });
+    }
+
+    return { rowsMigrated: totalRows, batchesProcessed: numBatches };
+  }
+}
+```
+
+</TabPanel>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[workflow(name = "database_migration", version = "1.0.0")]
+async fn database_migration(ctx: WorkflowContext, input: MigrationInput) -> Result<MigrationResult> {
+    let total_rows = ctx.execute_task(count_source_rows, input.source_table.clone()).await?;
+    let num_batches = (total_rows as usize + input.batch_size - 1) / input.batch_size;
+
+    for i in 0..num_batches {
+        let rows = ctx.execute_task(fetch_batch, (
+            input.source_table.clone(), i * input.batch_size, input.batch_size,
+        )).await?;
+        let transformed = ctx.execute_task(transform_rows, rows).await?;
+        ctx.execute_task(upsert_batch, (input.target_table.clone(), transformed)).await?;
+    }
+
+    Ok(MigrationResult { rows_migrated: total_rows, batches_processed: num_batches })
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@workflow(name="database_migration", version="1.0.0")
+async def database_migration(ctx: WorkflowContext, input: MigrationInput) -> MigrationResult:
+    total_rows = await ctx.execute_task(count_source_rows, table=input.source_table)
+    num_batches = (total_rows + input.batch_size - 1) // input.batch_size
+
+    for i in range(num_batches):
+        rows = await ctx.execute_task(fetch_batch, input={
+            "table": input.source_table, "offset": i * input.batch_size, "limit": input.batch_size,
+        })
+        transformed = await ctx.execute_task(transform_rows, rows=rows)
+        await ctx.execute_task(upsert_batch, input={"table": input.target_table, "rows": transformed})
+
+    return MigrationResult(rows_migrated=total_rows, batches_processed=num_batches)
+```
+
+</TabPanel>
+</Tabs>
+
+The [Batch Processing reference](/guides/use-cases/data-processing/batch-processing) has the full assembled file plus a step-by-step crash-recovery walkthrough. With the shape familiar, let's get to the pattern this page is really about.
+
+---
+
+## Incremental Sync (CDC Pattern)
+
+Re-processing everything on every run doesn't scale — once a table has millions of rows, you want to touch only what changed since last time. That's **change data capture (CDC)**, and you've built it before:
+
+- **A cursor column + cron.** Store `last_synced_at`, `SELECT ... WHERE updated_at > last_synced_at`, advance the cursor. Simple — until a run fails *after* advancing the cursor but *before* loading, and you've silently skipped a window forever.
+- **Debezium + Kafka Connect.** Robust, streaming CDC — but a broker, connectors, and a schema registry to operate for what might be a five-minute sync.
+
+The pattern below is the cursor approach with the classic bug engineered out: the cursor (here called a **watermark**) advances **only after** the load succeeds, and because that ordering is journaled, a crash can't leave it half-advanced.
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">The Watermark Advances Last</div>
+  </div>
+  {[
+    { label: 'get_watermark', detail: 'last run reached 10:00:00', icon: '1' },
+    { label: 'fetch_new_records', detail: 'everything since 10:00:00 — 412 rows', icon: '2' },
+    { label: 'transform → load', detail: 'UPSERT into the target', icon: '3' },
+    { label: 'load fails / worker dies', detail: 'watermark still says 10:00:00', icon: '✗', state: 'crash' },
+    { label: 'next run', detail: 're-fetches the same 412 rows — UPSERT makes the re-load harmless', icon: '↻', state: 'resume' },
+    { label: 'save_watermark', detail: 'only now advances — to the newest row loaded', icon: '✓', state: 'done' },
+  ].map((row, i, arr) => (
+    <div key={i}>
+      <div className={`px-4 py-2 flex items-center gap-3 ${row.state === 'crash' ? 'bg-red-500/5' : ''} ${row.state === 'resume' ? 'bg-surface-75' : ''}`}>
+        <span className={`w-5 h-5 flex items-center justify-center text-[10px] shrink-0 ${row.state === 'crash' ? 'text-red-400' : row.state ? 'text-foreground-muted' : 'font-mono text-foreground-muted border border-default'}`}>{row.icon}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{row.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{row.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Re-fetch on failure, never skip. The watermark is a promise: everything below it is loaded.</span>
+  </div>
+</div>
+
+Now the code, built to match that ordering. The [complete file](#the-complete-sync) is at the end.
+
+### Step 1 — Read the watermark
+
+Where did the last run get to? On the very first run there's no row yet, so we fall back to an epoch start.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="typescript" queryGroup="language">
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Task()
+async getWatermark(ctx: TaskContext, sourceName: string): Promise<string | null> {
+  const result = await db.query(
+    'SELECT watermark FROM sync_state WHERE source = $1', [sourceName]
+  );
+  return result.rows[0]?.watermark ?? null;
+}
+```
+
+</TabPanel>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task]
+async fn get_watermark(ctx: TaskContext, source: String) -> Result<Option<String>> {
+    let pool = get_db_pool().await?;
+    let result: Option<(String,)> = sqlx::query_as(
+        "SELECT watermark FROM sync_state WHERE source = $1"
+    ).bind(&source).fetch_optional(&pool).await?;
+    Ok(result.map(|r| r.0))
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@task(name="get_watermark")
+async def get_watermark(ctx: TaskContext, source: str) -> str | None:
+    result = await db.query(
+        "SELECT watermark FROM sync_state WHERE source = $1", [source]
+    )
+    return result[0]["watermark"] if result else None
+```
+
+</TabPanel>
+</Tabs>
+
+### Step 2 — Fetch only what's new, and transform it
+
+`fetch_new_records` asks the source for everything after the watermark, ordered by time. `transform_records` reshapes it — cents to dollars, uppercased currency, mapped status. Fetching a bounded window (`limit: 1000`) keeps each run small; a backlog just takes a few runs to drain.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="typescript" queryGroup="language">
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Task()
+async fetchNewRecords(ctx: TaskContext, input: { source: string; since: string }): Promise<SourceRecord[]> {
+  return await sourceApi.listPayments({
+    createdAfter: input.since, limit: 1000, orderBy: 'created_at',
+  });
+}
+
+@Task()
+async transformRecords(ctx: TaskContext, records: SourceRecord[]): Promise<TargetRecord[]> {
+  return records.map(r => ({
+    id: r.id,
+    amount: r.amount / 100, // cents to dollars
+    currency: r.currency.toUpperCase(),
+    status: mapStatus(r.status),
+    customerId: r.customer_id,
+    createdAt: r.created_at,
+  }));
+}
+```
+
+</TabPanel>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task]
+async fn fetch_new_records(ctx: TaskContext, input: (String, String)) -> Result<Vec<SourceRecord>> {
+    let (source, since) = input;
+    source_api::list_payments(&source, &since, 1000).await
+}
+
+#[task]
+async fn transform_records(ctx: TaskContext, records: Vec<SourceRecord>) -> Result<Vec<TargetRecord>> {
+    Ok(records.into_iter().map(|r| TargetRecord {
+        id: r.id,
+        amount: r.amount as f64 / 100.0, // cents to dollars
+        currency: r.currency.to_uppercase(),
+        status: map_status(&r.status),
+        customer_id: r.customer_id,
+        created_at: r.created_at,
+    }).collect())
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@task(name="fetch_new_records")
+async def fetch_new_records(ctx: TaskContext, input: dict) -> list[dict]:
+    return await source_api.list_payments(
+        source=input["source"], since=input["since"], limit=1000
+    )
+
+@task(name="transform_records")
+async def transform_records(ctx: TaskContext, records: list[dict]) -> list[dict]:
+    return [{
+        "id": r["id"],
+        "amount": r["amount"] / 100,  # cents to dollars
+        "currency": r["currency"].upper(),
+        "status": map_status(r["status"]),
+        "customer_id": r["customer_id"],
+        "created_at": r["created_at"],
+    } for r in records]
+```
+
+</TabPanel>
+</Tabs>
+
+### Step 3 — Load, then advance the watermark
+
+Two tasks, and their **order is the whole pattern**. `load_records` UPSERTs the batch; `save_watermark` records how far we got. Load first: if it fails, the watermark is untouched and the next run re-syncs the same window safely. Save last: the watermark only ever names data that's already landed.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="typescript" queryGroup="language">
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Task()
+async loadRecords(ctx: TaskContext, input: { table: string; records: TargetRecord[] }): Promise<number> {
+  return await db.upsertRows(input.table, input.records);
+}
+
+@Task()
+async saveWatermark(ctx: TaskContext, input: { source: string; watermark: string }): Promise<void> {
+  await db.query(`
+    INSERT INTO sync_state (source, watermark, updated_at)
+    VALUES ($1, $2, NOW())
+    ON CONFLICT (source) DO UPDATE SET watermark = $2, updated_at = NOW()
+  `, [input.source, input.watermark]);
+}
+```
+
+</TabPanel>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task]
+async fn load_records(ctx: TaskContext, input: (String, Vec<TargetRecord>)) -> Result<usize> {
+    let (table, records) = input;
+    let pool = get_db_pool().await?;
+    db::upsert_rows(&pool, &table, &records).await
+}
+
+#[task]
+async fn save_watermark(ctx: TaskContext, input: (String, String)) -> Result<()> {
+    let (source, watermark) = input;
+    let pool = get_db_pool().await?;
+    sqlx::query(
+        "INSERT INTO sync_state (source, watermark, updated_at)
+         VALUES ($1, $2, NOW())
+         ON CONFLICT (source) DO UPDATE SET watermark = $2, updated_at = NOW()"
+    ).bind(&source).bind(&watermark).execute(&pool).await?;
+    Ok(())
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@task(name="load_records")
+async def load_records(ctx: TaskContext, input: dict) -> int:
+    return await db.upsert_rows(input["table"], input["records"])
+
+@task(name="save_watermark")
+async def save_watermark(ctx: TaskContext, input: dict) -> None:
+    await db.query("""
+        INSERT INTO sync_state (source, watermark, updated_at)
+        VALUES ($1, $2, NOW())
+        ON CONFLICT (source) DO UPDATE SET watermark = $2, updated_at = NOW()
+    """, [input["source"], input["watermark"]])
+```
+
+</TabPanel>
+</Tabs>
+
+### Step 4 — Orchestrate the sync
+
+The workflow runs the five tasks in the order that makes the watermark safe, with one shortcut: if nothing's new, return early without touching the watermark.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="typescript" queryGroup="language">
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Workflow({ name: 'incremental_sync', version: '1.0.0' })
+class IncrementalSync {
+  async run(ctx: WorkflowContext, input: SyncInput): Promise<SyncResult> {
+    const watermark = await ctx.executeTask(tasks.getWatermark, input.sourceName);
+    const since = watermark ?? '2024-01-01T00:00:00Z';
+
+    const records = await ctx.executeTask(tasks.fetchNewRecords, { source: input.sourceName, since });
+    if (records.length === 0) {
+      return { recordsSynced: 0, newWatermark: since }; // nothing new — don't move the watermark
+    }
+
+    const transformed = await ctx.executeTask(tasks.transformRecords, records);
+    await ctx.executeTask(tasks.loadRecords, { table: input.targetTable, records: transformed });
+
+    // advance the watermark ONLY after the load succeeded
+    const newWatermark = records[records.length - 1].created_at;
+    await ctx.executeTask(tasks.saveWatermark, { source: input.sourceName, watermark: newWatermark });
+
+    return { recordsSynced: records.length, newWatermark };
+  }
+}
+```
+
+</TabPanel>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[workflow(name = "incremental_sync", version = "1.0.0")]
+async fn incremental_sync(ctx: WorkflowContext, input: SyncInput) -> Result<SyncResult> {
+    let watermark = ctx.execute_task(get_watermark, input.source_name.clone()).await?;
+    let since = watermark.unwrap_or_else(|| "2024-01-01T00:00:00Z".into());
+
+    let records = ctx.execute_task(fetch_new_records, (input.source_name.clone(), since.clone())).await?;
+    if records.is_empty() {
+        return Ok(SyncResult { records_synced: 0, new_watermark: since }); // nothing new
+    }
+
+    let transformed = ctx.execute_task(transform_records, records.clone()).await?;
+    ctx.execute_task(load_records, (input.target_table, transformed)).await?;
+
+    // advance the watermark ONLY after the load succeeded
+    let new_watermark = records.last().unwrap().created_at.clone();
+    ctx.execute_task(save_watermark, (input.source_name, new_watermark.clone())).await?;
+
+    Ok(SyncResult { records_synced: records.len(), new_watermark })
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@workflow(name="incremental_sync", version="1.0.0")
+async def incremental_sync(ctx: WorkflowContext, input: SyncInput) -> SyncResult:
+    watermark = await ctx.execute_task(get_watermark, source=input.source_name)
+    since = watermark or "2024-01-01T00:00:00Z"
+
+    records = await ctx.execute_task(fetch_new_records, input={"source": input.source_name, "since": since})
+    if not records:
+        return SyncResult(records_synced=0, new_watermark=since)  # nothing new
+
+    transformed = await ctx.execute_task(transform_records, records=records)
+    await ctx.execute_task(load_records, input={"table": input.target_table, "records": transformed})
+
+    # advance the watermark ONLY after the load succeeded
+    new_watermark = records[-1]["created_at"]
+    await ctx.execute_task(save_watermark, input={"source": input.source_name, "watermark": new_watermark})
+
+    return SyncResult(records_synced=len(records), new_watermark=new_watermark)
+```
+
+</TabPanel>
+</Tabs>
+
+Run this on a durable timer (the [Scheduled Sync reference](/guides/use-cases/data-processing/scheduled-sync) shows how) and you have a CDC pipeline that survives restarts, never skips a window, and needs no broker — a `sync_state` table and a loop.
+
+### The complete sync
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="typescript" queryGroup="language">
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Tasks()
+class SyncTasks {
+  @Task()
+  async getWatermark(ctx: TaskContext, sourceName: string): Promise<string | null> {
+    const result = await db.query(
+      'SELECT watermark FROM sync_state WHERE source = $1', [sourceName]
+    );
+    return result.rows[0]?.watermark ?? null;
+  }
+
+  @Task()
+  async fetchNewRecords(ctx: TaskContext, input: { source: string; since: string }): Promise<SourceRecord[]> {
+    return await sourceApi.listPayments({
+      createdAfter: input.since, limit: 1000, orderBy: 'created_at',
+    });
+  }
+
+  @Task()
+  async transformRecords(ctx: TaskContext, records: SourceRecord[]): Promise<TargetRecord[]> {
+    return records.map(r => ({
+      id: r.id,
+      amount: r.amount / 100, // cents to dollars
+      currency: r.currency.toUpperCase(),
+      status: mapStatus(r.status),
+      customerId: r.customer_id,
+      createdAt: r.created_at,
+    }));
+  }
+
+  @Task()
+  async loadRecords(ctx: TaskContext, input: { table: string; records: TargetRecord[] }): Promise<number> {
+    return await db.upsertRows(input.table, input.records);
+  }
+
+  @Task()
+  async saveWatermark(ctx: TaskContext, input: { source: string; watermark: string }): Promise<void> {
+    await db.query(`
+      INSERT INTO sync_state (source, watermark, updated_at)
+      VALUES ($1, $2, NOW())
+      ON CONFLICT (source) DO UPDATE SET watermark = $2, updated_at = NOW()
+    `, [input.source, input.watermark]);
+  }
+}
+
+const tasks = createTaskRefs(SyncTasks);
+
+@Workflow({ name: 'incremental_sync', version: '1.0.0' })
+class IncrementalSync {
+  async run(ctx: WorkflowContext, input: SyncInput): Promise<SyncResult> {
+    const watermark = await ctx.executeTask(tasks.getWatermark, input.sourceName);
+    const since = watermark ?? '2024-01-01T00:00:00Z';
+
+    const records = await ctx.executeTask(tasks.fetchNewRecords, { source: input.sourceName, since });
+    if (records.length === 0) {
+      return { recordsSynced: 0, newWatermark: since };
+    }
+
+    const transformed = await ctx.executeTask(tasks.transformRecords, records);
+    await ctx.executeTask(tasks.loadRecords, { table: input.targetTable, records: transformed });
+
+    const newWatermark = records[records.length - 1].created_at;
+    await ctx.executeTask(tasks.saveWatermark, { source: input.sourceName, watermark: newWatermark });
+
+    return { recordsSynced: records.length, newWatermark };
+  }
+}
+```
+
+</TabPanel>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task]
+async fn get_watermark(ctx: TaskContext, source: String) -> Result<Option<String>> {
+    let pool = get_db_pool().await?;
+    let result: Option<(String,)> = sqlx::query_as(
+        "SELECT watermark FROM sync_state WHERE source = $1"
+    ).bind(&source).fetch_optional(&pool).await?;
+    Ok(result.map(|r| r.0))
+}
+
+#[task]
+async fn fetch_new_records(ctx: TaskContext, input: (String, String)) -> Result<Vec<SourceRecord>> {
+    let (source, since) = input;
+    source_api::list_payments(&source, &since, 1000).await
+}
+
+#[task]
+async fn transform_records(ctx: TaskContext, records: Vec<SourceRecord>) -> Result<Vec<TargetRecord>> {
+    Ok(records.into_iter().map(|r| TargetRecord {
+        id: r.id,
+        amount: r.amount as f64 / 100.0,
+        currency: r.currency.to_uppercase(),
+        status: map_status(&r.status),
+        customer_id: r.customer_id,
+        created_at: r.created_at,
+    }).collect())
+}
+
+#[task]
+async fn load_records(ctx: TaskContext, input: (String, Vec<TargetRecord>)) -> Result<usize> {
+    let (table, records) = input;
+    let pool = get_db_pool().await?;
+    db::upsert_rows(&pool, &table, &records).await
+}
+
+#[task]
+async fn save_watermark(ctx: TaskContext, input: (String, String)) -> Result<()> {
+    let (source, watermark) = input;
+    let pool = get_db_pool().await?;
+    sqlx::query(
+        "INSERT INTO sync_state (source, watermark, updated_at)
+         VALUES ($1, $2, NOW())
+         ON CONFLICT (source) DO UPDATE SET watermark = $2, updated_at = NOW()"
+    ).bind(&source).bind(&watermark).execute(&pool).await?;
+    Ok(())
+}
+
+#[workflow(name = "incremental_sync", version = "1.0.0")]
+async fn incremental_sync(ctx: WorkflowContext, input: SyncInput) -> Result<SyncResult> {
+    let watermark = ctx.execute_task(get_watermark, input.source_name.clone()).await?;
+    let since = watermark.unwrap_or_else(|| "2024-01-01T00:00:00Z".into());
+
+    let records = ctx.execute_task(fetch_new_records, (
+        input.source_name.clone(), since.clone(),
+    )).await?;
+
+    if records.is_empty() {
+        return Ok(SyncResult { records_synced: 0, new_watermark: since });
+    }
+
+    let transformed = ctx.execute_task(transform_records, records.clone()).await?;
+    ctx.execute_task(load_records, (input.target_table, transformed)).await?;
+
+    let new_watermark = records.last().unwrap().created_at.clone();
+    ctx.execute_task(save_watermark, (input.source_name, new_watermark.clone())).await?;
+
+    Ok(SyncResult { records_synced: records.len(), new_watermark })
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@task(name="get_watermark")
+async def get_watermark(ctx: TaskContext, source: str) -> str | None:
+    result = await db.query(
+        "SELECT watermark FROM sync_state WHERE source = $1", [source]
+    )
+    return result[0]["watermark"] if result else None
+
+@task(name="fetch_new_records")
+async def fetch_new_records(ctx: TaskContext, input: dict) -> list[dict]:
+    return await source_api.list_payments(
+        source=input["source"], since=input["since"], limit=1000
+    )
+
+@task(name="transform_records")
+async def transform_records(ctx: TaskContext, records: list[dict]) -> list[dict]:
+    return [{
+        "id": r["id"],
+        "amount": r["amount"] / 100,  # cents to dollars
+        "currency": r["currency"].upper(),
+        "status": map_status(r["status"]),
+        "customer_id": r["customer_id"],
+        "created_at": r["created_at"],
+    } for r in records]
+
+@task(name="load_records")
+async def load_records(ctx: TaskContext, input: dict) -> int:
+    return await db.upsert_rows(input["table"], input["records"])
+
+@task(name="save_watermark")
+async def save_watermark(ctx: TaskContext, input: dict) -> None:
+    await db.query("""
+        INSERT INTO sync_state (source, watermark, updated_at)
+        VALUES ($1, $2, NOW())
+        ON CONFLICT (source) DO UPDATE SET watermark = $2, updated_at = NOW()
+    """, [input["source"], input["watermark"]])
+
+@workflow(name="incremental_sync", version="1.0.0")
+async def incremental_sync(ctx: WorkflowContext, input: SyncInput) -> SyncResult:
+    watermark = await ctx.execute_task(get_watermark, source=input.source_name)
+    since = watermark or "2024-01-01T00:00:00Z"
+
+    records = await ctx.execute_task(fetch_new_records, input={
+        "source": input.source_name, "since": since,
+    })
+
+    if not records:
+        return SyncResult(records_synced=0, new_watermark=since)
+
+    transformed = await ctx.execute_task(transform_records, records=records)
+    await ctx.execute_task(load_records, input={
+        "table": input.target_table, "records": transformed,
+    })
+
+    new_watermark = records[-1]["created_at"]
+    await ctx.execute_task(save_watermark, input={
+        "source": input.source_name, "watermark": new_watermark,
+    })
+
+    return SyncResult(records_synced=len(records), new_watermark=new_watermark)
+```
+
+</TabPanel>
+</Tabs>
+
+---
+
+## Next Steps
+
+- [Parallel Processing & Error Handling](/guides/learning/data-engineers/parallel-processing)
+- [Back to Overview](/guides/learning/data-engineers)

@@ -1,0 +1,141 @@
+---
+id: 'glossary'
+title: 'Glossary'
+description: 'Definitions for the terminology, primitives, and acronyms used throughout the Orcher documentation.'
+sidebar_label: 'Glossary'
+hideToc: true
+---
+
+A reference for the vocabulary used across the Orcher documentation. Orcher deliberately chooses a small, consistent set of nouns.
+
+## Core primitives
+
+### Durable execution
+
+The execution model at the heart of Orcher: your code runs as ordinary functions, and the engine records the result of each step to PostgreSQL as it happens. If a process crashes, another worker resumes the execution from the last recorded step instead of starting over. The effect is code that survives failures without you writing checkpointing or recovery logic.
+
+### Workflow
+
+A durable program — the top-level unit you author. A workflow orchestrates tasks, timers, events, and child workflows, and its progress is journaled so it can be resumed after a crash. Workflow code must be [deterministic](#determinism).
+
+### Workflow execution (run)
+
+A single instance of a workflow. Each execution is identified by a **workflow ID** (stable, chosen by you or generated) and a **run ID** (unique per attempt/restart). "Execution" and "run" are used interchangeably.
+
+### Task
+
+The unit of dispatched work — a function the workflow calls to do something non-deterministic or side-effecting (an HTTP call, a database write, a computation). Task results are recorded, so on replay a completed task returns its saved result instead of running again.
+
+### Actor
+
+A keyed, durable, stateful entity (modeled on the "virtual object" idea). An actor has an identity (`actor name` + `key`) and durable state that persists across calls. Operations against a single actor key are processed **one at a time**, giving each key single-writer consistency without you managing locks.
+
+### Operation
+
+A method exposed by an actor. Callers invoke an operation by actor name and key; the engine routes it to the actor's durable state and serializes it against other operations on the same key.
+
+## Durability & execution
+
+### Journal (execution journal)
+
+The event-sourced history of a workflow execution — the authoritative, ordered record of everything that happened (tasks scheduled and completed, timers started and fired, events received). Orcher [replays](#replay) the journal to reconstruct a workflow's state.
+
+> Orcher says **journal**, not *history*. Another intentional vocabulary choice.
+
+### Execution log
+
+A separate, step-level durable record used for caching the results of inline steps and enforcing idempotency. Distinct from the [journal](#journal-execution-journal): the journal is the workflow-level event history; the execution log stores individual step results.
+
+### Replay
+
+The process of reconstructing a workflow's state by re-running the workflow function and, for every step that already completed, returning its recorded result rather than executing it again. Replay is how Orcher recovers an execution after a crash. It runs on the worker (SDK) side.
+
+### Determinism
+
+The property a workflow must have: given the same journal, the workflow code must make the same decisions in the same order. Anything non-deterministic — the current time, random values, I/O — must come from a task or from the SDK's deterministic helpers, never from calling those APIs directly inside the workflow.
+
+### Durable timer
+
+A sleep that survives crashes and restarts. When a workflow waits for a duration, the engine journals the timer; on replay it reuses the original fire time, so the delay is not restarted from zero. Durable timers are how workflows can safely wait minutes, days, or months.
+
+### Checkpoint
+
+An informal term for a recorded step result. Every completed task is checkpointed before its value is returned to the workflow, which is what makes crash recovery lossless.
+
+### Payload
+
+The serialized form of an input or output as it crosses the wire (JSON by default), carried alongside metadata such as headers. You work with typed values in your SDK; payloads are the on-the-wire representation.
+
+## Coordination
+
+### Event (signal)
+
+An asynchronous message delivered to a running workflow. A workflow can pause until an event arrives; an external caller — an API handler, another workflow, a scheduled job — delivers it. The workflow resumes from exactly where it paused. Orcher's canonical term is **event**; **signal** is a supported alias.
+
+### Query
+
+A read-only, synchronous inspection of a running workflow's state. A query returns a value without mutating the workflow or advancing its journal.
+
+### Update
+
+A synchronous request that *does* mutate a running workflow. Unlike a query, an update is journaled and can change workflow state.
+
+### Child workflow
+
+A workflow started by another workflow. The parent can wait for the child's result or run it detached. A **parent-close policy** (`terminate`, `cancel`, or `abandon`) decides what happens to a running child if the parent finishes first.
+
+### Saga
+
+A **pattern**, not a built-in primitive: a multi-step operation where each step has a compensating action, so that if a later step fails, the already-completed steps are undone in reverse. In Orcher you implement a saga on top of tasks and child workflows — the engine gives you the durability, you define the compensations.
+
+### Fan-out / fan-in
+
+A **pattern** for parallelism: a workflow dispatches many tasks or child workflows at once (fan-out), then waits for and aggregates their results (fan-in).
+
+## Configuration & lifecycle
+
+### Retry policy
+
+Configuration that governs automatic re-execution of a failed task: the maximum number of attempts, the initial and maximum interval between attempts, and a backoff coefficient that grows the interval after each failure.
+
+### Task queue
+
+A named queue that routes work to workers. A worker polls one or more task queues; work is dispatched to whichever worker is listening on the matching queue within a namespace.
+
+### Namespace
+
+An isolation boundary for workflows, tasks, and actors. Namespaces let you separate environments or tenants within one Orcher deployment.
+
+### Heartbeat
+
+A periodic liveness signal a long-running task sends while it works. If heartbeats stop for longer than the task's heartbeat timeout, the engine can treat the task as failed and retry it.
+
+### Idempotency key
+
+A caller-supplied identifier used to deduplicate — for example, to ensure that retrying a workflow start does not create two executions.
+
+### Restart-fresh
+
+Restarting a workflow with a clean journal while preserving its identity, so a long- or infinitely-running workflow doesn't accumulate unbounded history.
+
+### Workflow version
+
+A label identifying the version of a workflow's code, recorded with each execution. Useful for observability — knowing which code produced a given run.
+
+## Platform & infrastructure
+
+### Orchestrator
+
+The control-plane server. It stores journals, dispatches work, and coordinates executions. It exposes a gRPC API on port `50051` and an HTTP endpoint on port `8001` for health and metrics.
+
+### Worker
+
+The process **you** run that connects to the orchestrator, registers the workflows, tasks, and actors it can handle, and long-polls for work to execute. Your business logic lives in workers; the orchestrator never runs your code. A worker is the deployable unit of your application — the thing you scale horizontally to add throughput.
+
+### Client
+
+The SDK object your application code uses to start workflows, send events, run queries, and invoke actors from *outside* a workflow (for example, from an API handler). Distinct from a [worker](#worker), which *executes* workflows.
+
+### gRPC / long-poll
+
+How workers talk to the orchestrator. Workers open a gRPC connection and **long-poll** — a request that blocks until work is available or a timeout elapses — so they pick up work promptly without hammering the server.

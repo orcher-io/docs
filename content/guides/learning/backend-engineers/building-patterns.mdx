@@ -1,0 +1,2205 @@
+---
+id: backend-engineers-building-patterns
+title: "Building Patterns"
+description: "Real-world patterns — reliable payment processing, webhook handling, and distributed transactions with the Saga pattern"
+sidebar_label: 'Building Patterns'
+---
+
+Now that you understand the concepts, let's build real systems.
+
+## Installation & Setup
+
+First, let's get Orcher integrated into your application.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+**Step 1: Add dependencies**
+
+```toml
+[dependencies]
+orcher = "0.1"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+```
+
+**Step 2: Connect to the Orcher server**
+
+Create a `main.rs` that connects to the orchestrator via gRPC:
+
+```rust
+use orcher::prelude::*;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Build a worker that connects to the Orcher server
+    let worker = Worker::builder()
+        .server_url("http://localhost:50051")
+        .task_queue("orders")
+        .build()
+        .await?;
+
+    // Run the worker (blocks until shutdown)
+    worker.run().await?;
+
+    Ok(())
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+**Step 1: Install packages**
+
+```bash
+npm install @orcher/sdk
+```
+
+**Step 2: Connect to the Orcher server**
+
+Create an `index.ts` that connects to the orchestrator via gRPC:
+
+```typescript
+import { Worker } from '@orcher/sdk';
+
+async function main() {
+  // Build a worker that connects to the Orcher server
+  const worker = new Worker({
+    serverUrl: "http://localhost:50051",
+    taskQueue: "orders",
+  });
+
+  // Run the worker (blocks until shutdown)
+  await worker.run();
+}
+
+main().catch(console.error);
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+**Step 1: Install packages**
+
+```bash
+pip install orcher-sdk
+```
+
+**Step 2: Connect to the Orcher server**
+
+Create a `main.py` that connects to the orchestrator via gRPC:
+
+```python
+import asyncio
+from orcher import Worker
+
+async def main():
+    # Build a worker that connects to the Orcher server
+    worker = (
+        Worker.builder()
+        .server_url("http://localhost:50051")
+        .task_queue("orders")
+        .build()
+    )
+
+    # Run the worker (blocks until shutdown)
+    await worker.run()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+</TabPanel>
+</Tabs>
+
+**What's happening here:**
+
+1. **Server connection**: The SDK connects to the Orcher server via gRPC
+2. **Task queue**: Workers poll the specified task queue for pending work
+3. **Worker loop**: The worker polls for pending workflows and tasks and executes them
+
+**Important**: The Orcher server manages workflow state and dispatching. Workers connect to the server and execute workflows and tasks. You can scale workers independently by running multiple instances.
+
+## Pattern 1: Reliable Payment Processing
+
+Let's build a payment system that survives a crash mid-payment without losing track of the money or charging twice.
+
+### The Problem We're Solving
+
+Payment processing is high-stakes:
+- **Lose a charge**: Company loses revenue
+- **Double-charge**: Customer complaints, chargebacks, reputation damage
+- **Partial completion**: Charge succeeded but email failed → customer confusion
+- **Fraud not checked**: Financial liability
+
+Traditional code is brittle:
+
+```typescript
+// Traditional approach (FRAGILE!)
+async function processPayment(payment) {
+  const charge = await stripe.charges.create({ amount: payment.amount });
+  await db.payments.insert({ chargeId: charge.id });
+  await sendEmail({ template: 'receipt', to: payment.email });
+  // If server crashes here, email is lost forever
+  await updateUserCredits(payment.userId, payment.amount);
+}
+```
+
+**Problems:**
+- No automatic retry
+- No idempotency
+- No visibility into failures
+- Manual debugging required
+
+### The Orcher Solution: Step by Step
+
+Let's build this properly. We'll break it into phases:
+
+**Phase 1: The Workflow Structure**
+
+First, understand the flow. Every step is a checkpoint, and step 2 can branch to an early rejection:
+
+<div className="not-prose my-8 max-w-sm mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">The Payment Workflow</div>
+  </div>
+  {[
+    { n: '1', label: 'validate_payment_method', note: '' },
+    { n: '2', label: 'check_fraud', note: 'fraud_score > 0.8 → reject & stop' },
+    { n: '3', label: 'charge_card', note: 'Stripe — the point of no return' },
+    { n: '4', label: 'record_payment', note: '' },
+    { n: '5', label: 'send_receipt', note: '' },
+    { n: '6', label: 'update_credits', note: '' },
+    { n: '7', label: 'return success', note: '' },
+  ].map((s, i, arr) => (
+    <div key={s.n}>
+      <div className={`px-4 py-2 flex items-center gap-3 ${s.n === '2' ? 'bg-red-500/5' : ''}`}>
+        <span className="w-5 h-5 flex items-center justify-center text-[10px] font-mono text-foreground-muted border border-default shrink-0">{s.n}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{s.label}</span>
+          {s.note && <span className={`text-[10px] ml-2 ${s.n === '2' ? 'text-red-400' : 'text-foreground-muted'}`}>{s.note}</span>}
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Every arrow is a potential failure point — and every step a journaled checkpoint.</span>
+  </div>
+</div>
+
+**Phase 2: Define Data Types**
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PaymentInput {
+    pub user_id: String,
+    pub amount: i64,          // Amount in cents
+    pub currency: String,
+    pub payment_method: String,  // Stripe payment method ID
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PaymentResult {
+    pub charge_id: String,
+    pub status: String,
+    pub receipt_url: String,
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+interface PaymentInput {
+  userId: string;
+  amount: number;       // Amount in cents
+  currency: string;
+  paymentMethod: string;  // Stripe payment method ID
+}
+
+interface PaymentResult {
+  chargeId: string;
+  status: string;
+  receiptUrl: string;
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+from dataclasses import dataclass
+
+@dataclass
+class PaymentInput:
+    user_id: str
+    amount: int          # Amount in cents
+    currency: str
+    payment_method: str  # Stripe payment method ID
+
+@dataclass
+class PaymentResult:
+    charge_id: str
+    status: str
+    receipt_url: str
+```
+
+</TabPanel>
+</Tabs>
+
+**Phase 3: The Workflow**
+
+Now the orchestration logic:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+
+#[workflow(name = "process_payment")]
+pub async fn process_payment(
+    ctx: WorkflowContext,
+    input: PaymentInput,
+) -> Result<PaymentResult> {
+    // Step 1: Validate (fast, local check)
+    ctx.execute_task(validate_payment_method, input.payment_method.clone())
+        .await?;
+
+    // Step 2: Fraud check (external API)
+    let fraud_score: f64 = ctx.execute_task(check_fraud, (
+        input.user_id.clone(),
+        input.amount,
+    )).await?;
+
+    // Decision logic in the workflow
+    if fraud_score > 0.8 {
+        return Err(anyhow::anyhow!("Payment flagged for fraud"));
+    }
+
+    // Step 3: Charge card (idempotent via Stripe idempotency key)
+    let charge: StripeCharge = ctx.execute_task(charge_stripe, (
+        input.payment_method.clone(),
+        input.amount,
+        input.currency.clone(),
+    )).await?;
+
+    // Step 4: Record in database
+    ctx.execute_task(record_payment, PaymentRecord {
+        user_id: input.user_id.clone(),
+        charge_id: charge.id.clone(),
+        amount: input.amount,
+        status: "succeeded".to_string(),
+    }).await?;
+
+    // Step 5: Send email (idempotent - won't send twice)
+    ctx.execute_task(send_receipt_email, (
+        input.user_id.clone(),
+        charge.receipt_url.clone(),
+    )).await?;
+
+    // Step 6: Update credits
+    ctx.execute_task(update_user_credits, (
+        input.user_id.clone(),
+        input.amount,
+    )).await?;
+
+    Ok(PaymentResult {
+        charge_id: charge.id,
+        status: "succeeded".to_string(),
+        receipt_url: charge.receipt_url,
+    })
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, TaskContext, WorkflowContext, createTaskRefs } from '@orcher/sdk';
+
+@Tasks()
+class PaymentTasks {
+  @Task()
+  async validatePaymentMethod(ctx: TaskContext, method: string): Promise<void> { /* ... */ }
+
+  @Task()
+  async checkFraud(ctx: TaskContext, input: { userId: string; amount: number }): Promise<number> { /* ... */ }
+
+  @Task()
+  async chargeStripe(ctx: TaskContext, input: { paymentMethod: string; amount: number; currency: string }): Promise<StripeCharge> { /* ... */ }
+
+  @Task()
+  async recordPayment(ctx: TaskContext, input: { userId: string; chargeId: string; amount: number; status: string }): Promise<void> { /* ... */ }
+
+  @Task()
+  async sendReceiptEmail(ctx: TaskContext, input: { userId: string; receiptUrl: string }): Promise<void> { /* ... */ }
+
+  @Task()
+  async updateUserCredits(ctx: TaskContext, input: { userId: string; amount: number }): Promise<void> { /* ... */ }
+}
+
+const tasks = createTaskRefs(PaymentTasks);
+
+@Workflow({ name: 'process_payment', version: '1.0.0' })
+class ProcessPayment {
+  async run(ctx: WorkflowContext, input: PaymentInput): Promise<PaymentResult> {
+    // Step 1: Validate (fast, local check)
+    await ctx.executeTask(tasks.validatePaymentMethod, input.paymentMethod);
+
+    // Step 2: Fraud check (external API)
+    const fraudScore = await ctx.executeTask(tasks.checkFraud, {
+      userId: input.userId,
+      amount: input.amount,
+    });
+
+    // Decision logic in the workflow
+    if (fraudScore > 0.8) {
+      throw new Error('Payment flagged for fraud');
+    }
+
+    // Step 3: Charge card (idempotent via Stripe idempotency key)
+    const charge = await ctx.executeTask(tasks.chargeStripe, {
+      paymentMethod: input.paymentMethod,
+      amount: input.amount,
+      currency: input.currency,
+    });
+
+    // Step 4: Record in database
+    await ctx.executeTask(tasks.recordPayment, {
+      userId: input.userId,
+      chargeId: charge.id,
+      amount: input.amount,
+      status: 'succeeded',
+    });
+
+    // Step 5: Send email (idempotent - won't send twice)
+    await ctx.executeTask(tasks.sendReceiptEmail, {
+      userId: input.userId,
+      receiptUrl: charge.receipt_url,
+    });
+
+    // Step 6: Update credits
+    await ctx.executeTask(tasks.updateUserCredits, {
+      userId: input.userId,
+      amount: input.amount,
+    });
+
+    return {
+      chargeId: charge.id,
+      status: 'succeeded',
+      receiptUrl: charge.receipt_url,
+    };
+  }
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext
+
+@task(name="validate_payment_method")
+async def validate_payment_method(ctx: TaskContext, method: str) -> None:
+    if not method.startswith("pm_") and not method.startswith("card_"):
+        raise ValueError("Invalid payment method format")
+
+@task(name="check_fraud")
+async def check_fraud(ctx: TaskContext, user_id: str, amount: int) -> float:
+    # Call fraud detection service
+    ...
+
+@task(name="charge_stripe")
+async def charge_stripe(ctx: TaskContext, payment_method: str, amount: int, currency: str) -> dict:
+    # Call Stripe API
+    ...
+
+@task(name="record_payment")
+async def record_payment(ctx: TaskContext, record: dict) -> None:
+    # Insert into database with ON CONFLICT DO NOTHING
+    ...
+
+@task(name="send_receipt_email")
+async def send_receipt_email(ctx: TaskContext, user_id: str, receipt_url: str) -> None:
+    # Send via email service
+    ...
+
+@task(name="update_user_credits")
+async def update_user_credits(ctx: TaskContext, user_id: str, amount: int) -> None:
+    # Update credits in database
+    ...
+
+@workflow(name="process_payment", version="1.0.0")
+async def process_payment(ctx: WorkflowContext, input: PaymentInput) -> PaymentResult:
+    # Step 1: Validate (fast, local check)
+    await ctx.execute_task(validate_payment_method, method=input.payment_method)
+
+    # Step 2: Fraud check (external API)
+    fraud_score = await ctx.execute_task(check_fraud, user_id=input.user_id, amount=input.amount)
+
+    # Decision logic in the workflow
+    if fraud_score > 0.8:
+        raise Exception("Payment flagged for fraud")
+
+    # Step 3: Charge card (idempotent via Stripe idempotency key)
+    charge = await ctx.execute_task(
+        charge_stripe,
+        payment_method=input.payment_method,
+        amount=input.amount,
+        currency=input.currency,
+    )
+
+    # Step 4: Record in database
+    await ctx.execute_task(record_payment, record={
+        "user_id": input.user_id,
+        "charge_id": charge["id"],
+        "amount": input.amount,
+        "status": "succeeded",
+    })
+
+    # Step 5: Send email (idempotent - won't send twice)
+    await ctx.execute_task(send_receipt_email, user_id=input.user_id, receipt_url=charge["receipt_url"])
+
+    # Step 6: Update credits
+    await ctx.execute_task(update_user_credits, user_id=input.user_id, amount=input.amount)
+
+    return PaymentResult(
+        charge_id=charge["id"],
+        status="succeeded",
+        receipt_url=charge["receipt_url"],
+    )
+```
+
+</TabPanel>
+</Tabs>
+
+**What makes this reliable:**
+
+1. **Each `ctx.execute_task()` is checkpointed**: If the workflow crashes, it resumes from the last checkpoint
+2. **Idempotent by design**: Each task can be safely retried
+3. **Decision logic isolated**: The workflow controls the flow, tasks do the work
+4. **Clear error boundaries**: Any error stops the workflow; it can be retried later
+
+**Phase 4: Implementing Tasks**
+
+Now the individual task implementations. Notice how each task is focused and idempotent:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task]
+async fn validate_payment_method(method: String) -> Result<()> {
+    // Validate format only (no external calls)
+    if !method.starts_with("pm_") && !method.starts_with("card_") {
+        return Err(anyhow::anyhow!("Invalid payment method format"));
+    }
+    Ok(())
+}
+
+#[task]
+async fn check_fraud(user_id: String, amount: i64) -> Result<f64> {
+    // Call fraud detection service
+    let response = reqwest::Client::new()
+        .post("https://fraud-api.example.com/check")
+        .json(&serde_json::json!({
+            "user_id": user_id,
+            "amount": amount,
+        }))
+        .send()
+        .await?;
+
+    let score = response.json::<serde_json::Value>().await?["score"]
+        .as_f64()
+        .unwrap_or(0.0);
+
+    Ok(score)
+}
+
+#[task]
+async fn charge_stripe(
+    payment_method: String,
+    amount: i64,
+    currency: String,
+) -> Result<StripeCharge> {
+    let stripe_key = std::env::var("STRIPE_SECRET_KEY")?;
+
+    // Stripe's idempotency is built-in via their API
+    let response = reqwest::Client::new()
+        .post("https://api.stripe.com/v1/charges")
+        .header("Authorization", format!("Bearer {}", stripe_key))
+        .form(&[
+            ("amount", amount.to_string()),
+            ("currency", currency),
+            ("payment_method", payment_method),
+            ("confirm", "true".to_string()),
+        ])
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        return Err(anyhow::anyhow!("Stripe charge failed"));
+    }
+
+    let charge: StripeCharge = response.json().await?;
+    Ok(charge)
+}
+
+#[task]
+async fn record_payment(record: PaymentRecord) -> Result<()> {
+    let pool = get_db_pool();
+
+    // Idempotent: ON CONFLICT DO NOTHING
+    sqlx::query!(
+        r#"
+        INSERT INTO payments (user_id, charge_id, amount, status, created_at)
+        VALUES ($1, $2, $3, $4, NOW())
+        ON CONFLICT (charge_id) DO NOTHING
+        "#,
+        record.user_id,
+        record.charge_id,
+        record.amount,
+        record.status,
+    )
+    .execute(&pool)
+    .await?;
+
+    Ok(())
+}
+
+#[task]
+async fn send_receipt_email(user_id: String, receipt_url: String) -> Result<()> {
+    // Get user email
+    let pool = get_db_pool();
+    let user: User = sqlx::query_as!(
+        User,
+        "SELECT email FROM users WHERE id = $1",
+        user_id
+    )
+    .fetch_one(&pool)
+    .await?;
+
+    // Send via email service (idempotent - they deduplicate)
+    let sendgrid_key = std::env::var("SENDGRID_API_KEY")?;
+
+    reqwest::Client::new()
+        .post("https://api.sendgrid.com/v3/mail/send")
+        .header("Authorization", format!("Bearer {}", sendgrid_key))
+        .json(&serde_json::json!({
+            "personalizations": [{
+                "to": [{"email": user.email}],
+            }],
+            "from": {"email": "receipts@example.com"},
+            "subject": "Payment Receipt",
+            "content": [{
+                "type": "text/html",
+                "value": format!(
+                    "Your payment was successful. <a href='{}'>View Receipt</a>",
+                    receipt_url
+                ),
+            }],
+        }))
+        .send()
+        .await?;
+
+    Ok(())
+}
+
+#[task]
+async fn update_user_credits(user_id: String, amount: i64) -> Result<()> {
+    let pool = get_db_pool();
+    let credits = amount / 100; // Convert cents to credits
+
+    // Idempotent: adds credits (not set)
+    sqlx::query!(
+        "UPDATE users SET credits = credits + $1 WHERE id = $2",
+        credits,
+        user_id
+    )
+    .execute(&pool)
+    .await?;
+
+    Ok(())
+}
+
+// Helper types
+#[derive(Debug, Serialize, Deserialize)]
+struct StripeCharge {
+    id: String,
+    receipt_url: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PaymentRecord {
+    user_id: String,
+    charge_id: String,
+    amount: i64,
+    status: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct User {
+    email: String,
+}
+
+fn get_db_pool() -> sqlx::PgPool {
+    // Return from your app context
+    todo!("Get pool from application state")
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Tasks, Task, TaskContext } from '@orcher/sdk';
+import Stripe from 'stripe';
+import sgMail from '@sendgrid/mail';
+import { Pool } from 'pg';
+
+@Tasks()
+class PaymentTasks {
+  @Task()
+  async validatePaymentMethod(ctx: TaskContext, method: string): Promise<void> {
+    // Validate format only (no external calls)
+    if (!method.startsWith('pm_') && !method.startsWith('card_')) {
+      throw new Error('Invalid payment method format');
+    }
+  }
+
+  @Task()
+  async checkFraud(ctx: TaskContext, { userId, amount }: { userId: string; amount: number }): Promise<number> {
+    // Call fraud detection service
+    const response = await fetch('https://fraud-api.example.com/check', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: userId, amount }),
+    });
+
+    const data = await response.json();
+    return data.score as number;
+  }
+
+  @Task()
+  async chargeStripe(ctx: TaskContext, {
+    paymentMethod,
+    amount,
+    currency,
+  }: {
+    paymentMethod: string;
+    amount: number;
+    currency: string;
+  }): Promise<StripeCharge> {
+    const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
+      apiVersion: '2023-10-16',
+    });
+
+    // Stripe's idempotency is built-in
+    const charge = await stripe.charges.create({
+      amount,
+      currency,
+      payment_method: paymentMethod,
+      confirm: true,
+    });
+
+    return {
+      id: charge.id,
+      receipt_url: charge.receipt_url!,
+    };
+  }
+
+  @Task()
+  async recordPayment(ctx: TaskContext, record: {
+    userId: string;
+    chargeId: string;
+    amount: number;
+    status: string;
+  }): Promise<void> {
+    const pool = getDbPool();
+
+    // Idempotent: ON CONFLICT DO NOTHING
+    await pool.query(
+      `INSERT INTO payments (user_id, charge_id, amount, status, created_at)
+       VALUES ($1, $2, $3, $4, NOW())
+       ON CONFLICT (charge_id) DO NOTHING`,
+      [record.userId, record.chargeId, record.amount, record.status]
+    );
+  }
+
+  @Task()
+  async sendReceiptEmail(ctx: TaskContext, { userId, receiptUrl }: { userId: string; receiptUrl: string }): Promise<void> {
+    const pool = getDbPool();
+
+    // Get user email
+    const result = await pool.query('SELECT email FROM users WHERE id = $1', [userId]);
+    const userEmail = result.rows[0].email;
+
+    // Send via SendGrid (idempotent - they deduplicate)
+    sgMail.setApiKey(process.env.SENDGRID_API_KEY!);
+
+    await sgMail.send({
+      to: userEmail,
+      from: 'receipts@example.com',
+      subject: 'Payment Receipt',
+      html: 'Your payment was successful. <a href="' + receiptUrl + '">View Receipt</a>',
+    });
+  }
+
+  @Task()
+  async updateUserCredits(ctx: TaskContext, { userId, amount }: { userId: string; amount: number }): Promise<void> {
+    const pool = getDbPool();
+    const credits = Math.floor(amount / 100); // Convert cents to credits
+
+    // Idempotent: adds credits (not set)
+    await pool.query('UPDATE users SET credits = credits + $1 WHERE id = $2', [
+      credits,
+      userId,
+    ]);
+  }
+}
+
+// Helper types and functions
+interface StripeCharge {
+  id: string;
+  receipt_url: string;
+}
+
+function getDbPool(): Pool {
+  return new Pool({
+    connectionString: process.env.DATABASE_URL,
+  });
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import task
+import httpx
+import asyncpg
+
+@task(name="validate_payment_method")
+async def validate_payment_method(ctx: TaskContext, method: str) -> None:
+    """Validate format only (no external calls)."""
+    if not method.startswith("pm_") and not method.startswith("card_"):
+        raise ValueError("Invalid payment method format")
+
+@task(name="check_fraud")
+async def check_fraud(ctx: TaskContext, user_id: str, amount: int) -> float:
+    """Call fraud detection service."""
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            "https://fraud-api.example.com/check",
+            json={"user_id": user_id, "amount": amount},
+        )
+        data = response.json()
+        return data.get("score", 0.0)
+
+@task(name="charge_stripe")
+async def charge_stripe(ctx: TaskContext, payment_method: str, amount: int, currency: str) -> dict:
+    """Charge via Stripe (idempotency built-in)."""
+    import stripe
+    stripe.api_key = os.environ["STRIPE_SECRET_KEY"]
+
+    charge = stripe.Charge.create(
+        amount=amount,
+        currency=currency,
+        payment_method=payment_method,
+        confirm=True,
+    )
+    return {"id": charge.id, "receipt_url": charge.receipt_url}
+
+@task(name="record_payment")
+async def record_payment(ctx: TaskContext, record: dict) -> None:
+    """Idempotent: ON CONFLICT DO NOTHING."""
+    pool = await get_db_pool()
+    await pool.execute(
+        """INSERT INTO payments (user_id, charge_id, amount, status, created_at)
+           VALUES ($1, $2, $3, $4, NOW())
+           ON CONFLICT (charge_id) DO NOTHING""",
+        record["user_id"], record["charge_id"], record["amount"], record["status"],
+    )
+
+@task(name="send_receipt_email")
+async def send_receipt_email(ctx: TaskContext, user_id: str, receipt_url: str) -> None:
+    """Send via email service (idempotent - they deduplicate)."""
+    pool = await get_db_pool()
+    row = await pool.fetchrow("SELECT email FROM users WHERE id = $1", user_id)
+    user_email = row["email"]
+
+    async with httpx.AsyncClient() as client:
+        await client.post(
+            "https://api.sendgrid.com/v3/mail/send",
+            headers={"Authorization": f"Bearer {os.environ['SENDGRID_API_KEY']}"},
+            json={
+                "personalizations": [{"to": [{"email": user_email}]}],
+                "from": {"email": "receipts@example.com"},
+                "subject": "Payment Receipt",
+                "content": [{"type": "text/html", "value": f"<a href='{receipt_url}'>View Receipt</a>"}],
+            },
+        )
+
+@task(name="update_user_credits")
+async def update_user_credits(ctx: TaskContext, user_id: str, amount: int) -> None:
+    """Idempotent: adds credits (not set)."""
+    pool = await get_db_pool()
+    credits = amount // 100  # Convert cents to credits
+    await pool.execute(
+        "UPDATE users SET credits = credits + $1 WHERE id = $2",
+        credits, user_id,
+    )
+
+async def get_db_pool():
+    # Return from your app context
+    ...
+```
+
+</TabPanel>
+</Tabs>
+
+**Key Design Decisions:**
+
+1. **`validate_payment_method`**: No external calls, fast validation
+2. **`check_fraud`**: External API call, but cached on replay
+3. **`charge_stripe`**: Stripe handles idempotency for us
+4. **`record_payment`**: `ON CONFLICT DO NOTHING` makes it idempotent
+5. **`send_receipt_email`**: Email service deduplicates
+6. **`update_user_credits`**: Uses `+=` not `=`, so it's additive and safe
+
+### Testing the Payment Flow
+
+Let's see what happens in different scenarios:
+
+<div className="not-prose my-6 max-w-xl mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-[10px] font-mono uppercase tracking-wide text-foreground-muted">Scenario 1 · happy path</div>
+  <div className="px-4 pt-3 text-[11px] text-foreground-muted">User submits payment → API starts workflow → worker executes:</div>
+  <div className="p-4 pt-2 space-y-1 text-[11px] font-mono text-foreground-muted">
+    <div>1 · validate_payment_method</div>
+    <div>2 · check_fraud <span className="text-foreground">score 0.2</span></div>
+    <div>3 · charge_stripe <span className="text-foreground">ch_abc</span></div>
+    <div>4 · record_payment</div>
+    <div>5 · send_receipt_email</div>
+    <div>6 · update_user_credits</div>
+  </div>
+  <div className="bg-surface-75 px-4 py-2 border-t text-[11px] text-foreground-muted">Workflow completes → user sees success</div>
+</div>
+
+<div className="not-prose my-6 max-w-xl mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-[10px] font-mono uppercase tracking-wide text-foreground-muted">Scenario 2 · email service down</div>
+  <div className="px-4 pt-3 text-[11px] text-foreground-muted">User submits payment → worker executes:</div>
+  <div className="p-4 pt-2 space-y-1 text-[11px] font-mono text-foreground-muted">
+    <div>1 · validate_payment_method</div>
+    <div>2 · check_fraud</div>
+    <div>3 · charge_stripe</div>
+    <div>4 · record_payment</div>
+    <div className="text-red-400">5 · send_receipt_email — timeout</div>
+  </div>
+  <div className="bg-red-500/5 border-y px-4 py-2 text-[11px] text-red-400">Workflow fails → scheduled for retry in 1s</div>
+  <div className="px-4 pt-3 text-[11px] text-foreground-muted">Retry #1:</div>
+  <div className="p-4 pt-2 space-y-1 text-[11px] font-mono text-foreground-muted">
+    <div>1–4 · <span className="text-foreground">cached</span> — no duplicate Stripe charge</div>
+    <div>5 · send_receipt_email — email service recovered</div>
+    <div>6 · update_user_credits</div>
+  </div>
+  <div className="bg-surface-75 px-4 py-2 border-t text-[11px] text-foreground-muted">Workflow completes → recovery never sends the email again</div>
+</div>
+
+<div className="not-prose my-6 max-w-xl mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-[10px] font-mono uppercase tracking-wide text-foreground-muted">Scenario 3 · server crashes</div>
+  <div className="px-4 pt-3 text-[11px] text-foreground-muted">User submits payment → worker executes:</div>
+  <div className="p-4 pt-2 space-y-1 text-[11px] font-mono text-foreground-muted">
+    <div>1 · validate_payment_method</div>
+    <div>2 · check_fraud</div>
+    <div>3 · charge_stripe</div>
+    <div>4 · record_payment</div>
+  </div>
+  <div className="bg-red-500/5 border-y px-4 py-2 text-[11px] text-red-400">💥 Server crashes — power outage</div>
+  <div className="px-4 pt-3 text-[11px] text-foreground-muted">10 minutes later, server restarts → worker picks up the pending workflow:</div>
+  <div className="p-4 pt-2 space-y-1 text-[11px] font-mono text-foreground-muted">
+    <div>1–4 · <span className="text-foreground">cached</span> from journal</div>
+    <div>5 · send_receipt_email</div>
+    <div>6 · update_user_credits</div>
+  </div>
+  <div className="bg-surface-75 px-4 py-2 border-t text-[11px] text-foreground-muted">Workflow completes → no data loss</div>
+</div>
+
+<div className="not-prose my-6 max-w-xl mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-[10px] font-mono uppercase tracking-wide text-foreground-muted">Scenario 4 · fraud detected</div>
+  <div className="px-4 pt-3 text-[11px] text-foreground-muted">User submits payment → worker executes:</div>
+  <div className="p-4 pt-2 space-y-1 text-[11px] font-mono text-foreground-muted">
+    <div>1 · validate_payment_method</div>
+    <div>2 · check_fraud <span className="text-foreground">score 0.95</span></div>
+    <div className="text-red-400">3 · workflow throws — “payment flagged for fraud”</div>
+  </div>
+  <div className="bg-red-500/5 px-4 py-2 border-t text-[11px] text-red-400">Completes with error status → no charge made → user notified</div>
+</div>
+
+### Why This Is Better
+
+Compare to traditional approaches:
+
+**Traditional:**
+- 200 lines of error handling
+- Redis for state management
+- Manual retry queues
+- Hope you got the idempotency logic right
+- Debugging requires checking 5 different systems
+- Testing requires mocking everything
+
+**Orcher:**
+- 100 lines of business logic
+- No manual state management
+- Automatic retries
+- Completed steps never repeated on recovery
+- Debugging: just query the journal table
+- Testing: mock individual tasks easily
+
+## Pattern 2: Webhook Processing
+
+Webhooks are notoriously tricky. Let's build a reliable webhook handler.
+
+### The Webhook Problem
+
+External services (Stripe, Twilio, GitHub, etc.) send HTTP requests to your server when events occur. Problems:
+
+1. **Duplicate webhooks**: Services retry on timeout, you process twice
+2. **Out-of-order delivery**: Event A arrives after Event B
+3. **Lost webhooks**: Your server is down, webhook is lost forever
+4. **Slow processing**: Webhook times out, service retries, you process twice
+5. **No visibility**: Did we process this webhook? What happened?
+
+**Traditional approach:**
+
+```typescript
+// Traditional (FRAGILE!)
+app.post('/webhooks/stripe', async (req, res) => {
+  const event = req.body;
+
+  // Quick check for duplicate
+  const exists = await redis.get('webhook:' + event.id);
+  if (exists) {
+    return res.json({ received: true });
+  }
+
+  // Process synchronously (blocks response)
+  try {
+    await processEvent(event);
+    await redis.set('webhook:' + event.id, 'processed', 'EX', 86400);
+    res.json({ received: true });
+  } catch (error) {
+    // Error - but webhook service already timed out
+    // Will retry and we'll process twice!
+    res.status(500).json({ error: error.message });
+  }
+});
+```
+
+**Problems:**
+- Synchronous processing (slow response)
+- Redis dependency for deduplication
+- If Redis is down, duplicate processing
+- If processing is slow, webhook times out
+- No automatic retries on failure
+
+### The Orcher Solution
+
+With Orcher, webhooks become trivial:
+
+**Step 1: Receive and Queue**
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+use axum::{Json, Extension, http::StatusCode};
+
+pub async fn handle_stripe_webhook(
+    Extension(orcher): Extension<Orcher>,
+    Json(event): Json<StripeWebhookEvent>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Start workflow asynchronously (non-blocking)
+    let workflow_id = orcher
+        .start_workflow("stripe_webhook_processor", event)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Return immediately - webhook processed in background
+    Ok(Json(serde_json::json!({
+        "received": true,
+        "workflow_id": workflow_id
+    })))
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+app.post('/webhooks/stripe', async (req, res) => {
+  const event: StripeWebhookEvent = req.body;
+
+  // Start workflow asynchronously (non-blocking)
+  const workflowId = await orcher.startWorkflow('stripe_webhook_processor', event);
+
+  // Return immediately - webhook processed in background
+  res.json({ received: true, workflowId });
+});
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+from fastapi import FastAPI, Request
+
+app = FastAPI()
+
+@app.post("/webhooks/stripe")
+async def handle_stripe_webhook(request: Request):
+    event = await request.json()
+
+    # Start workflow asynchronously (non-blocking)
+    workflow_id = await orcher.start_workflow("stripe_webhook_processor", event)
+
+    # Return immediately - webhook processed in background
+    return {"received": True, "workflow_id": workflow_id}
+```
+
+</TabPanel>
+</Tabs>
+
+**Key insight**: The API handler returns immediately. Processing happens in the background worker. This keeps responses fast.
+
+**Step 2: The Processing Workflow**
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[workflow(name = "stripe_webhook_processor")]
+pub async fn stripe_webhook_processor(
+    ctx: WorkflowContext,
+    event: StripeWebhookEvent,
+) -> Result<()> {
+    // Step 1: Verify webhook signature
+    ctx.execute_task(verify_stripe_signature, event.id.clone())
+        .await?;
+
+    // Step 2: Check for duplicate (idempotent)
+    let is_duplicate: bool = ctx.execute_task(check_duplicate, event.id.clone())
+        .await?;
+
+    if is_duplicate {
+        // Already processed - this is a retry from Stripe
+        return Ok(());
+    }
+
+    // Step 3: Route to appropriate handler
+    match event.event_type.as_str() {
+        "charge.succeeded" => {
+            ctx.execute_task(handle_charge_succeeded, event.data).await?;
+        }
+        "charge.failed" => {
+            ctx.execute_task(handle_charge_failed, event.data).await?;
+        }
+        "customer.subscription.updated" => {
+            ctx.execute_task(handle_subscription_updated, event.data).await?;
+        }
+        _ => {
+            ctx.execute_task(log_unknown_event, event.event_type).await?;
+        }
+    }
+
+    // Step 4: Mark as processed
+    ctx.execute_task(mark_event_processed, event.id).await?;
+
+    Ok(())
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, TaskContext, WorkflowContext, createTaskRefs } from '@orcher/sdk';
+
+@Tasks()
+class WebhookTasks {
+  @Task()
+  async verifyStripeSignature(ctx: TaskContext, eventId: string): Promise<void> { /* ... */ }
+
+  @Task()
+  async checkDuplicate(ctx: TaskContext, eventId: string): Promise<boolean> { /* ... */ }
+
+  @Task()
+  async handleChargeSucceeded(ctx: TaskContext, data: any): Promise<void> { /* ... */ }
+
+  @Task()
+  async handleChargeFailed(ctx: TaskContext, data: any): Promise<void> { /* ... */ }
+
+  @Task()
+  async handleSubscriptionUpdated(ctx: TaskContext, data: any): Promise<void> { /* ... */ }
+
+  @Task()
+  async logUnknownEvent(ctx: TaskContext, eventType: string): Promise<void> { /* ... */ }
+
+  @Task()
+  async markEventProcessed(ctx: TaskContext, eventId: string): Promise<void> { /* ... */ }
+}
+
+const webhookTasks = createTaskRefs(WebhookTasks);
+
+@Workflow({ name: 'stripe_webhook_processor', version: '1.0.0' })
+class StripeWebhookProcessor {
+  async run(ctx: WorkflowContext, event: StripeWebhookEvent): Promise<void> {
+    // Step 1: Verify webhook signature
+    await ctx.executeTask(webhookTasks.verifyStripeSignature, event.id);
+
+    // Step 2: Check for duplicate (idempotent)
+    const isDuplicate = await ctx.executeTask(webhookTasks.checkDuplicate, event.id);
+
+    if (isDuplicate) {
+      // Already processed - this is a retry from Stripe
+      return;
+    }
+
+    // Step 3: Route to appropriate handler
+    switch (event.type) {
+      case 'charge.succeeded':
+        await ctx.executeTask(webhookTasks.handleChargeSucceeded, event.data);
+        break;
+      case 'charge.failed':
+        await ctx.executeTask(webhookTasks.handleChargeFailed, event.data);
+        break;
+      case 'customer.subscription.updated':
+        await ctx.executeTask(webhookTasks.handleSubscriptionUpdated, event.data);
+        break;
+      default:
+        await ctx.executeTask(webhookTasks.logUnknownEvent, event.type);
+    }
+
+    // Step 4: Mark as processed
+    await ctx.executeTask(webhookTasks.markEventProcessed, event.id);
+  }
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext
+
+@task(name="verify_stripe_signature")
+async def verify_stripe_signature(ctx: TaskContext, event_id: str) -> None:
+    ...
+
+@task(name="check_duplicate")
+async def check_duplicate(ctx: TaskContext, event_id: str) -> bool:
+    pool = await get_db_pool()
+    result = await pool.fetchval(
+        "SELECT COUNT(*) FROM processed_webhooks WHERE event_id = $1", event_id
+    )
+    return result > 0
+
+@task(name="handle_charge_succeeded")
+async def handle_charge_succeeded(ctx: TaskContext, data: dict) -> None:
+    ...
+
+@task(name="handle_charge_failed")
+async def handle_charge_failed(ctx: TaskContext, data: dict) -> None:
+    ...
+
+@task(name="handle_subscription_updated")
+async def handle_subscription_updated(ctx: TaskContext, data: dict) -> None:
+    ...
+
+@task(name="log_unknown_event")
+async def log_unknown_event(ctx: TaskContext, event_type: str) -> None:
+    ...
+
+@task(name="mark_event_processed")
+async def mark_event_processed(ctx: TaskContext, event_id: str) -> None:
+    pool = await get_db_pool()
+    await pool.execute(
+        "INSERT INTO processed_webhooks (event_id, processed_at) VALUES ($1, NOW())",
+        event_id,
+    )
+
+@workflow(name="stripe_webhook_processor", version="1.0.0")
+async def stripe_webhook_processor(ctx: WorkflowContext, event: dict) -> None:
+    # Step 1: Verify webhook signature
+    await ctx.execute_task(verify_stripe_signature, event_id=event["id"])
+
+    # Step 2: Check for duplicate (idempotent)
+    is_duplicate = await ctx.execute_task(check_duplicate, event_id=event["id"])
+
+    if is_duplicate:
+        return
+
+    # Step 3: Route to appropriate handler
+    event_type = event["type"]
+    if event_type == "charge.succeeded":
+        await ctx.execute_task(handle_charge_succeeded, data=event["data"])
+    elif event_type == "charge.failed":
+        await ctx.execute_task(handle_charge_failed, data=event["data"])
+    elif event_type == "customer.subscription.updated":
+        await ctx.execute_task(handle_subscription_updated, data=event["data"])
+    else:
+        await ctx.execute_task(log_unknown_event, event_type=event_type)
+
+    # Step 4: Mark as processed
+    await ctx.execute_task(mark_event_processed, event_id=event["id"])
+```
+
+</TabPanel>
+</Tabs>
+
+**Step 3: Task Implementations**
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task]
+async fn check_duplicate(event_id: String) -> Result<bool> {
+    let pool = get_db_pool();
+
+    let result = sqlx::query!(
+        "SELECT COUNT(*) as count FROM processed_webhooks WHERE event_id = $1",
+        event_id
+    )
+    .fetch_one(&pool)
+    .await?;
+
+    Ok(result.count.unwrap_or(0) > 0)
+}
+
+#[task]
+async fn handle_charge_succeeded(data: serde_json::Value) -> Result<()> {
+    let charge_id = data["object"]["id"].as_str().unwrap();
+    let customer_id = data["object"]["customer"].as_str().unwrap();
+
+    let pool = get_db_pool();
+
+    // Update order status
+    sqlx::query!(
+        "UPDATE orders SET status = 'paid', payment_id = $1 WHERE customer_id = $2",
+        charge_id,
+        customer_id
+    )
+    .execute(&pool)
+    .await?;
+
+    // Send confirmation
+    send_order_confirmation(customer_id, charge_id).await?;
+
+    Ok(())
+}
+
+#[task]
+async fn mark_event_processed(event_id: String) -> Result<()> {
+    let pool = get_db_pool();
+
+    sqlx::query!(
+        "INSERT INTO processed_webhooks (event_id, processed_at) VALUES ($1, NOW())",
+        event_id
+    )
+    .execute(&pool)
+    .await?;
+
+    Ok(())
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Tasks, Task, TaskContext } from '@orcher/sdk';
+import { Pool } from 'pg';
+
+@Tasks()
+class WebhookTaskImpls {
+  @Task()
+  async checkDuplicate(ctx: TaskContext, eventId: string): Promise<boolean> {
+    const pool = getDbPool();
+
+    const result = await pool.query(
+      'SELECT COUNT(*) as count FROM processed_webhooks WHERE event_id = $1',
+      [eventId]
+    );
+
+    return parseInt(result.rows[0].count) > 0;
+  }
+
+  @Task()
+  async handleChargeSucceeded(ctx: TaskContext, data: any): Promise<void> {
+    const chargeId = data.object.id;
+    const customerId = data.object.customer;
+
+    const pool = getDbPool();
+
+    // Update order status
+    await pool.query(
+      'UPDATE orders SET status = $1, payment_id = $2 WHERE customer_id = $3',
+      ['paid', chargeId, customerId]
+    );
+
+    // Send confirmation
+    await sendOrderConfirmation(customerId, chargeId);
+  }
+
+  @Task()
+  async markEventProcessed(ctx: TaskContext, eventId: string): Promise<void> {
+    const pool = getDbPool();
+
+    await pool.query(
+      'INSERT INTO processed_webhooks (event_id, processed_at) VALUES ($1, NOW())',
+      [eventId]
+    );
+  }
+}
+
+// Helper functions
+async function sendOrderConfirmation(customerId: string, chargeId: string) {
+  // Implementation: send email via SendGrid/SES
+}
+
+function getDbPool(): Pool {
+  return new Pool({
+    connectionString: process.env.DATABASE_URL,
+  });
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import task
+
+@task(name="check_duplicate")
+async def check_duplicate(ctx: TaskContext, event_id: str) -> bool:
+    pool = await get_db_pool()
+    result = await pool.fetchval(
+        "SELECT COUNT(*) FROM processed_webhooks WHERE event_id = $1", event_id
+    )
+    return result > 0
+
+@task(name="handle_charge_succeeded")
+async def handle_charge_succeeded(ctx: TaskContext, data: dict) -> None:
+    charge_id = data["object"]["id"]
+    customer_id = data["object"]["customer"]
+
+    pool = await get_db_pool()
+
+    # Update order status
+    await pool.execute(
+        "UPDATE orders SET status = $1, payment_id = $2 WHERE customer_id = $3",
+        "paid", charge_id, customer_id,
+    )
+
+    # Send confirmation
+    await send_order_confirmation(customer_id, charge_id)
+
+@task(name="mark_event_processed")
+async def mark_event_processed(ctx: TaskContext, event_id: str) -> None:
+    pool = await get_db_pool()
+    await pool.execute(
+        "INSERT INTO processed_webhooks (event_id, processed_at) VALUES ($1, NOW())",
+        event_id,
+    )
+
+# Helper functions
+async def send_order_confirmation(customer_id: str, charge_id: str):
+    # Implementation: send email via SendGrid/SES
+    ...
+
+async def get_db_pool():
+    # Return from your app context
+    ...
+```
+
+</TabPanel>
+</Tabs>
+
+### Why This Works
+
+**Fast Response:**
+- Webhook endpoint returns in under 50ms
+- Stripe won't timeout and retry unnecessarily
+- Processing happens in background
+
+**Automatic Deduplication:**
+- `check_duplicate` prevents double-processing
+- Even if Stripe retries, we detect it
+- No Redis needed - PostgreSQL is your deduplication store
+
+**Fault Tolerance:**
+- If processing fails, workflow retries automatically
+- Each task is idempotent
+- Complete audit trail in journal
+
+**Visibility:**
+- Query `workflow_execution_journal` to see what happened
+- Query `processed_webhooks` to see all events
+- Easy debugging
+
+## Pattern 3: Distributed Transactions (Saga Pattern)
+
+Let's build a complex order fulfillment system that spans multiple services.
+
+### The Distributed Transaction Problem
+
+Your order flow:
+1. Create order in your database
+2. Reserve inventory (external inventory service)
+3. Charge customer (Stripe)
+4. Trigger fulfillment (external warehouse service)
+
+**What if step 3 fails?**
+- Order created ✓
+- Inventory reserved ✓
+- Payment failed ✗
+- Fulfillment not triggered ✗
+
+Now you need to:
+- Release the inventory reservation
+- Cancel the order
+- Notify the customer
+
+This is the **saga pattern**: each step has a compensating action.
+
+### The Orcher Saga Implementation
+
+**Step 1: Define the Workflow**
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[workflow(name = "order_fulfillment")]
+pub async fn order_fulfillment(
+    ctx: WorkflowContext,
+    order: OrderInput,
+) -> Result<OrderResult> {
+    let total_amount = order.items.iter()
+        .map(|i| i.price * i.quantity as i64)
+        .sum();
+
+    // Step 1: Create order (compensatable)
+    let order_id: String = ctx.execute_task(create_order, (
+        order.user_id.clone(),
+        order.items.clone(),
+        total_amount,
+    )).await?;
+
+    // Step 2: Reserve inventory (compensatable)
+    let reservation = match ctx.execute_task(
+        reserve_inventory,
+        order.items.clone(),
+    ).await {
+        Ok(res) => res,
+        Err(e) => {
+            // Compensate: cancel order
+            ctx.execute_task(cancel_order, order_id.clone()).await?;
+            return Err(e);
+        }
+    };
+
+    // Step 3: Process payment (compensatable)
+    let payment_id = match ctx.execute_task(
+        charge_payment,
+        (order.payment_method.clone(), total_amount),
+    ).await {
+        Ok(id) => id,
+        Err(e) => {
+            // Compensate: release inventory and cancel order
+            ctx.execute_task(release_inventory, reservation.id).await?;
+            ctx.execute_task(cancel_order, order_id.clone()).await?;
+            return Err(e);
+        }
+    };
+
+    // Step 4: Confirm order (point of no return)
+    ctx.execute_task(confirm_order, order_id.clone()).await?;
+
+    // Step 5: Trigger fulfillment
+    ctx.execute_task(trigger_fulfillment, (
+        order_id.clone(),
+        reservation.id,
+    )).await?;
+
+    Ok(OrderResult {
+        order_id,
+        status: "confirmed".to_string(),
+        total_amount,
+    })
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, TaskContext, WorkflowContext, createTaskRefs } from '@orcher/sdk';
+
+@Tasks()
+class OrderTasks {
+  @Task()
+  async createOrder(ctx: TaskContext, input: { userId: string; items: OrderItem[]; totalAmount: number }): Promise<string> { /* ... */ }
+
+  @Task()
+  async reserveInventory(ctx: TaskContext, items: OrderItem[]): Promise<InventoryReservation> { /* ... */ }
+
+  @Task()
+  async chargePayment(ctx: TaskContext, input: { paymentMethod: string; amount: number }): Promise<string> { /* ... */ }
+
+  @Task()
+  async confirmOrder(ctx: TaskContext, orderId: string): Promise<void> { /* ... */ }
+
+  @Task()
+  async cancelOrder(ctx: TaskContext, orderId: string): Promise<void> { /* ... */ }
+
+  @Task()
+  async releaseInventory(ctx: TaskContext, reservationId: string): Promise<void> { /* ... */ }
+
+  @Task()
+  async triggerFulfillment(ctx: TaskContext, input: { orderId: string; reservationId: string }): Promise<void> { /* ... */ }
+}
+
+const orderTasks = createTaskRefs(OrderTasks);
+
+@Workflow({ name: 'order_fulfillment', version: '1.0.0' })
+class OrderFulfillment {
+  async run(ctx: WorkflowContext, order: OrderInput): Promise<OrderResult> {
+    const totalAmount = order.items.reduce(
+      (sum, item) => sum + item.price * item.quantity,
+      0
+    );
+
+    // Step 1: Create order (compensatable)
+    const orderId = await ctx.executeTask(orderTasks.createOrder, {
+      userId: order.userId,
+      items: order.items,
+      totalAmount,
+    });
+
+    // Step 2: Reserve inventory (compensatable)
+    let reservation: InventoryReservation;
+    try {
+      reservation = await ctx.executeTask(orderTasks.reserveInventory, order.items);
+    } catch (error) {
+      // Compensate: cancel order
+      await ctx.executeTask(orderTasks.cancelOrder, orderId);
+      throw error;
+    }
+
+    // Step 3: Process payment (compensatable)
+    let paymentId: string;
+    try {
+      paymentId = await ctx.executeTask(orderTasks.chargePayment, {
+        paymentMethod: order.paymentMethod,
+        amount: totalAmount,
+      });
+    } catch (error) {
+      // Compensate: release inventory and cancel order
+      await ctx.executeTask(orderTasks.releaseInventory, reservation.id);
+      await ctx.executeTask(orderTasks.cancelOrder, orderId);
+      throw error;
+    }
+
+    // Step 4: Confirm order (point of no return)
+    await ctx.executeTask(orderTasks.confirmOrder, orderId);
+
+    // Step 5: Trigger fulfillment
+    await ctx.executeTask(orderTasks.triggerFulfillment, {
+      orderId,
+      reservationId: reservation.id,
+    });
+
+    return {
+      orderId,
+      status: 'confirmed',
+      totalAmount,
+    };
+  }
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext
+
+@task(name="create_order")
+async def create_order(ctx: TaskContext, user_id: str, items: list, total_amount: int) -> str:
+    ...
+
+@task(name="reserve_inventory")
+async def reserve_inventory(ctx: TaskContext, items: list) -> dict:
+    ...
+
+@task(name="charge_payment")
+async def charge_payment(ctx: TaskContext, payment_method: str, amount: int) -> str:
+    ...
+
+@task(name="confirm_order")
+async def confirm_order(ctx: TaskContext, order_id: str) -> None:
+    ...
+
+@task(name="cancel_order")
+async def cancel_order(ctx: TaskContext, order_id: str) -> None:
+    ...
+
+@task(name="release_inventory")
+async def release_inventory(ctx: TaskContext, reservation_id: str) -> None:
+    ...
+
+@task(name="trigger_fulfillment")
+async def trigger_fulfillment(ctx: TaskContext, order_id: str, reservation_id: str) -> None:
+    ...
+
+@workflow(name="order_fulfillment", version="1.0.0")
+async def order_fulfillment(ctx: WorkflowContext, order: dict) -> dict:
+    total_amount = sum(item["price"] * item["quantity"] for item in order["items"])
+
+    # Step 1: Create order (compensatable)
+    order_id = await ctx.execute_task(
+        create_order, user_id=order["user_id"], items=order["items"], total_amount=total_amount
+    )
+
+    # Step 2: Reserve inventory (compensatable)
+    try:
+        reservation = await ctx.execute_task(reserve_inventory, items=order["items"])
+    except Exception as e:
+        # Compensate: cancel order
+        await ctx.execute_task(cancel_order, order_id=order_id)
+        raise
+
+    # Step 3: Process payment (compensatable)
+    try:
+        payment_id = await ctx.execute_task(
+            charge_payment, payment_method=order["payment_method"], amount=total_amount
+        )
+    except Exception as e:
+        # Compensate: release inventory and cancel order
+        await ctx.execute_task(release_inventory, reservation_id=reservation["id"])
+        await ctx.execute_task(cancel_order, order_id=order_id)
+        raise
+
+    # Step 4: Confirm order (point of no return)
+    await ctx.execute_task(confirm_order, order_id=order_id)
+
+    # Step 5: Trigger fulfillment
+    await ctx.execute_task(trigger_fulfillment, order_id=order_id, reservation_id=reservation["id"])
+
+    return {
+        "order_id": order_id,
+        "status": "confirmed",
+        "total_amount": total_amount,
+    }
+```
+
+</TabPanel>
+</Tabs>
+
+**Key Points:**
+
+1. **Try-Catch Compensation**: Each step that can fail has explicit compensation logic
+2. **Ordering Matters**: Steps are ordered to minimize compensation complexity
+3. **Point of No Return**: After `confirm_order`, we don't compensate (customer has been charged)
+4. **Automatic Retry**: If `trigger_fulfillment` fails, Orcher retries automatically
+
+### Understanding Compensation
+
+**Scenario 1: Payment fails — roll back in reverse.** The charge is declined *before* the point of no return, so every completed step is undone by its compensation, newest first.
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Payment Declined → Compensate</div>
+  </div>
+  {[
+    { label: 'create_order', detail: 'order_123 — journaled', icon: '✓', state: 'done' },
+    { label: 'reserve_inventory', detail: 'reservation_456 — journaled', icon: '✓', state: 'done' },
+    { label: 'charge_payment', detail: 'card declined', icon: '✗', state: 'crash' },
+    { label: 'release_inventory(456)', detail: 'compensation — undoes step 2', icon: '↺', state: 'resume' },
+    { label: 'cancel_order(123)', detail: 'compensation — undoes step 1', icon: '↺', state: 'resume' },
+    { label: 'return error', detail: 'nothing was left half-done', icon: '=', state: 'done' },
+  ].map((row, i, arr) => (
+    <div key={i}>
+      <div className={`px-4 py-2 flex items-center gap-3 ${row.state === 'crash' ? 'bg-red-500/5' : ''} ${row.state === 'resume' ? 'bg-surface-75' : ''}`}>
+        <span className={`w-5 h-5 flex items-center justify-center text-[10px] shrink-0 ${row.state === 'crash' ? 'text-red-400' : 'text-foreground-muted'}`}>{row.icon}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{row.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{row.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+</div>
+
+**Scenario 2: Fulfillment is down — retry, don't roll back.** The failure is *after* the charge, so undoing isn't an option (the customer paid). Instead the step retries until it succeeds.
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Past the Point of No Return → Retry</div>
+  </div>
+  {[
+    { label: 'charge_payment', detail: 'customer charged — journaled', icon: '✓', state: 'done' },
+    { label: 'confirm_order', detail: 'journaled', icon: '✓', state: 'done' },
+    { label: 'trigger_fulfillment', detail: 'service unavailable', icon: '✗', state: 'crash' },
+    { label: 'automatic retry', detail: 'backoff — no compensation, the charge stands', icon: '↻', state: 'resume' },
+    { label: 'trigger_fulfillment', detail: 'succeeds — workflow completes', icon: '✓', state: 'done' },
+  ].map((row, i, arr) => (
+    <div key={i}>
+      <div className={`px-4 py-2 flex items-center gap-3 ${row.state === 'crash' ? 'bg-red-500/5' : ''} ${row.state === 'resume' ? 'bg-surface-75' : ''}`}>
+        <span className={`w-5 h-5 flex items-center justify-center text-[10px] shrink-0 ${row.state === 'crash' ? 'text-red-400' : 'text-foreground-muted'}`}>{row.icon}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{row.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{row.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">The point of no return decides the strategy: compensate before it, retry after it.</span>
+  </div>
+</div>
+
+**Full Task Implementations:**
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task]
+async fn create_order(
+    user_id: String,
+    items: Vec<OrderItem>,
+    total_amount: i64,
+) -> Result<String> {
+    let pool = get_db_pool();
+    let order_id = uuid::Uuid::new_v4().to_string();
+
+    sqlx::query!(
+        "INSERT INTO orders (id, user_id, total_amount, status) VALUES ($1, $2, $3, 'pending')",
+        order_id, user_id, total_amount
+    )
+    .execute(&pool)
+    .await?;
+
+    // Insert items
+    for item in items {
+        sqlx::query!(
+            "INSERT INTO order_items (order_id, product_id, quantity, price) VALUES ($1, $2, $3, $4)",
+            order_id, item.product_id, item.quantity, item.price
+        )
+        .execute(&pool)
+        .await?;
+    }
+
+    Ok(order_id)
+}
+
+#[task]
+async fn reserve_inventory(items: Vec<OrderItem>) -> Result<InventoryReservation> {
+    let reservation_id = uuid::Uuid::new_v4().to_string();
+
+    // Call inventory service
+    let response = reqwest::Client::new()
+        .post("https://inventory-service.example.com/reserve")
+        .json(&serde_json::json!({
+            "reservation_id": reservation_id,
+            "items": items,
+        }))
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        return Err(anyhow::anyhow!("Inventory reservation failed"));
+    }
+
+    Ok(InventoryReservation {
+        id: reservation_id,
+        items: items.into_iter().map(|i| ReservedItem {
+            product_id: i.product_id,
+            quantity: i.quantity,
+        }).collect(),
+    })
+}
+
+#[task]
+async fn charge_payment(payment_method: String, amount: i64) -> Result<String> {
+    let stripe_key = std::env::var("STRIPE_SECRET_KEY")?;
+
+    let response = reqwest::Client::new()
+        .post("https://api.stripe.com/v1/charges")
+        .header("Authorization", format!("Bearer {}", stripe_key))
+        .form(&[
+            ("amount", amount.to_string()),
+            ("currency", "usd".to_string()),
+            ("payment_method", payment_method),
+            ("confirm", "true".to_string()),
+        ])
+        .send()
+        .await?;
+
+    let charge: serde_json::Value = response.json().await?;
+    Ok(charge["id"].as_str().unwrap().to_string())
+}
+
+#[task]
+async fn confirm_order(order_id: String) -> Result<()> {
+    let pool = get_db_pool();
+    sqlx::query!("UPDATE orders SET status = 'confirmed' WHERE id = $1", order_id)
+        .execute(&pool)
+        .await?;
+    Ok(())
+}
+
+#[task]
+async fn cancel_order(order_id: String) -> Result<()> {
+    let pool = get_db_pool();
+    sqlx::query!("UPDATE orders SET status = 'cancelled' WHERE id = $1", order_id)
+        .execute(&pool)
+        .await?;
+    Ok(())
+}
+
+#[task]
+async fn release_inventory(reservation_id: String) -> Result<()> {
+    reqwest::Client::new()
+        .post("https://inventory-service.example.com/release")
+        .json(&serde_json::json!({"reservation_id": reservation_id}))
+        .send()
+        .await?;
+    Ok(())
+}
+
+#[task]
+async fn trigger_fulfillment(order_id: String, reservation_id: String) -> Result<()> {
+    reqwest::Client::new()
+        .post("https://fulfillment-service.example.com/orders")
+        .json(&serde_json::json!({
+            "order_id": order_id,
+            "reservation_id": reservation_id
+        }))
+        .send()
+        .await?;
+    Ok(())
+}
+
+fn get_db_pool() -> sqlx::PgPool {
+    todo!("Get pool from application state")
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Tasks, Task, TaskContext } from '@orcher/sdk';
+import { Pool } from 'pg';
+import { v4 as uuidv4 } from 'uuid';
+import Stripe from 'stripe';
+
+@Tasks()
+class OrderTaskImpls {
+  @Task()
+  async createOrder(ctx: TaskContext, {
+    userId,
+    items,
+    totalAmount,
+  }: {
+    userId: string;
+    items: OrderItem[];
+    totalAmount: number;
+  }): Promise<string> {
+    const pool = getDbPool();
+    const orderId = uuidv4();
+
+    await pool.query(
+      'INSERT INTO orders (id, user_id, total_amount, status) VALUES ($1, $2, $3, $4)',
+      [orderId, userId, totalAmount, 'pending']
+    );
+
+    for (const item of items) {
+      await pool.query(
+        'INSERT INTO order_items (order_id, product_id, quantity, price) VALUES ($1, $2, $3, $4)',
+        [orderId, item.productId, item.quantity, item.price]
+      );
+    }
+
+    return orderId;
+  }
+
+  @Task()
+  async reserveInventory(ctx: TaskContext, items: OrderItem[]): Promise<InventoryReservation> {
+    const reservationId = uuidv4();
+
+    const response = await fetch('https://inventory-service.example.com/reserve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reservation_id: reservationId, items }),
+    });
+
+    if (!response.ok) {
+      throw new Error('Inventory reservation failed');
+    }
+
+    return {
+      id: reservationId,
+      items: items.map((item) => ({
+        productId: item.productId,
+        quantity: item.quantity,
+      })),
+    };
+  }
+
+  @Task()
+  async chargePayment(ctx: TaskContext, {
+    paymentMethod,
+    amount,
+  }: {
+    paymentMethod: string;
+    amount: number;
+  }): Promise<string> {
+    const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
+      apiVersion: '2023-10-16',
+    });
+
+    const charge = await stripe.charges.create({
+      amount,
+      currency: 'usd',
+      payment_method: paymentMethod,
+      confirm: true,
+    });
+
+    return charge.id;
+  }
+
+  @Task()
+  async confirmOrder(ctx: TaskContext, orderId: string): Promise<void> {
+    const pool = getDbPool();
+    await pool.query('UPDATE orders SET status = $1 WHERE id = $2', ['confirmed', orderId]);
+  }
+
+  @Task()
+  async cancelOrder(ctx: TaskContext, orderId: string): Promise<void> {
+    const pool = getDbPool();
+    await pool.query('UPDATE orders SET status = $1 WHERE id = $2', ['cancelled', orderId]);
+  }
+
+  @Task()
+  async releaseInventory(ctx: TaskContext, reservationId: string): Promise<void> {
+    await fetch('https://inventory-service.example.com/release', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reservation_id: reservationId }),
+    });
+  }
+
+  @Task()
+  async triggerFulfillment(ctx: TaskContext, {
+    orderId,
+    reservationId,
+  }: {
+    orderId: string;
+    reservationId: string;
+  }): Promise<void> {
+    await fetch('https://fulfillment-service.example.com/orders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ order_id: orderId, reservation_id: reservationId }),
+    });
+  }
+}
+
+function getDbPool(): Pool {
+  return new Pool({
+    connectionString: process.env.DATABASE_URL,
+  });
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+import uuid
+import httpx
+from orcher import task
+
+@task(name="create_order")
+async def create_order(ctx: TaskContext, user_id: str, items: list, total_amount: int) -> str:
+    pool = await get_db_pool()
+    order_id = str(uuid.uuid4())
+
+    await pool.execute(
+        "INSERT INTO orders (id, user_id, total_amount, status) VALUES ($1, $2, $3, 'pending')",
+        order_id, user_id, total_amount,
+    )
+
+    for item in items:
+        await pool.execute(
+            "INSERT INTO order_items (order_id, product_id, quantity, price) VALUES ($1, $2, $3, $4)",
+            order_id, item["product_id"], item["quantity"], item["price"],
+        )
+
+    return order_id
+
+@task(name="reserve_inventory")
+async def reserve_inventory(ctx: TaskContext, items: list) -> dict:
+    reservation_id = str(uuid.uuid4())
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            "https://inventory-service.example.com/reserve",
+            json={"reservation_id": reservation_id, "items": items},
+        )
+
+    if response.status_code != 200:
+        raise Exception("Inventory reservation failed")
+
+    return {
+        "id": reservation_id,
+        "items": [{"product_id": i["product_id"], "quantity": i["quantity"]} for i in items],
+    }
+
+@task(name="charge_payment")
+async def charge_payment(ctx: TaskContext, payment_method: str, amount: int) -> str:
+    import stripe
+    stripe.api_key = os.environ["STRIPE_SECRET_KEY"]
+
+    charge = stripe.Charge.create(
+        amount=amount,
+        currency="usd",
+        payment_method=payment_method,
+        confirm=True,
+    )
+    return charge.id
+
+@task(name="confirm_order")
+async def confirm_order(ctx: TaskContext, order_id: str) -> None:
+    pool = await get_db_pool()
+    await pool.execute("UPDATE orders SET status = 'confirmed' WHERE id = $1", order_id)
+
+@task(name="cancel_order")
+async def cancel_order(ctx: TaskContext, order_id: str) -> None:
+    pool = await get_db_pool()
+    await pool.execute("UPDATE orders SET status = 'cancelled' WHERE id = $1", order_id)
+
+@task(name="release_inventory")
+async def release_inventory(ctx: TaskContext, reservation_id: str) -> None:
+    async with httpx.AsyncClient() as client:
+        await client.post(
+            "https://inventory-service.example.com/release",
+            json={"reservation_id": reservation_id},
+        )
+
+@task(name="trigger_fulfillment")
+async def trigger_fulfillment(ctx: TaskContext, order_id: str, reservation_id: str) -> None:
+    async with httpx.AsyncClient() as client:
+        await client.post(
+            "https://fulfillment-service.example.com/orders",
+            json={"order_id": order_id, "reservation_id": reservation_id},
+        )
+
+async def get_db_pool():
+    # Return from your app context
+    ...
+```
+
+</TabPanel>
+</Tabs>
+
+**The saga pattern in action:**
+
+This pattern ensures consistency across distributed services without a distributed transaction coordinator. Each step is compensatable, and Orcher's journaling ensures we never lose track of where we are in the process.
+
+---
+
+## Next Steps
+
+- [Deep Dive: Distributed Systems](/guides/learning/backend-engineers/distributed-systems) — CAP theorem, event sourcing, and advanced patterns
+- [Part 3: Production Excellence](/guides/learning/backend-engineers/production) — Monitoring, testing, and deployment
+- [Back to Overview](/guides/learning/backend-engineers) — Learning path overview

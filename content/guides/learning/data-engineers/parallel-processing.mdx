@@ -1,0 +1,492 @@
+---
+id: data-engineers-parallel-processing
+title: "Parallel Processing & Error Handling"
+description: "Parallel fan-out processing, error handling strategies for data pipelines, and scheduled recurring pipelines"
+sidebar_label: 'Parallel Processing'
+---
+
+A pipeline that works isn't the same as one that scales. This page is about the two things that break first under load: doing independent work **in parallel** instead of one row at a time, and keeping **one poison record** from taking down an entire run. Then a short note on running any of it on a schedule.
+
+## Parallel Fan-Out Processing
+
+When your data is already partitioned — S3 date prefixes, table shards, per-tenant files — the batches are independent, so there's no reason to process them one after another. You've scaled this out before with Spark partitions or a Dask bag. The shape is always the same: **fan out** the work, then **fan in** the results.
+
+<div className="not-prose my-8 max-w-xl mx-auto">
+  <div className="flex justify-center">
+    <div className="border bg-surface-100 px-5 py-2.5 text-center">
+      <div className="text-[11px] font-medium font-mono text-foreground">list_partitions</div>
+      <div className="text-[10px] text-foreground-muted mt-0.5">discover the independent units</div>
+    </div>
+  </div>
+  <div className="flex justify-center">
+    <div className="flex items-center gap-1.5">
+      <div className="w-px h-6 bg-border-strong" />
+      <span className="text-[10px] font-mono text-foreground-muted">fan out — all at once</span>
+    </div>
+  </div>
+  <div className="grid grid-cols-3 gap-3">
+    {['2024-01', '2024-02', '2024-03'].map((p) => (
+      <div key={p} className="border bg-surface-75 px-2 py-2 text-center">
+        <div className="text-[10px] font-medium font-mono text-foreground">process_partition</div>
+        <div className="text-[9px] text-foreground-muted">{p}</div>
+        <div className="text-[9px] text-foreground-muted mt-1">own journal &amp; retries</div>
+      </div>
+    ))}
+  </div>
+  <div className="flex justify-center">
+    <div className="flex items-center gap-1.5">
+      <div className="w-px h-6 bg-border-strong" />
+      <span className="text-[10px] font-mono text-foreground-muted">fan in — sum the results</span>
+    </div>
+  </div>
+  <div className="flex justify-center">
+    <div className="border bg-background px-5 py-2 text-center">
+      <div className="text-[11px] font-medium text-foreground">totalRows</div>
+    </div>
+  </div>
+  <p className="text-[10px] text-foreground-muted text-center mt-3 mb-0">
+    Each partition is its own journaled task — one failing partition retries alone; the rest keep their cached results.
+  </p>
+</div>
+
+### Step 1 — Discover and process one partition
+
+Two tasks: `list_partitions` finds the independent units, `process_partition` does the full read-transform-load for exactly one. Because a partition is self-contained, its task is the natural retry boundary.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="typescript" queryGroup="language">
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Task()
+async listPartitions(ctx: TaskContext, source: string): Promise<string[]> {
+  // e.g., list S3 prefixes, date partitions, or table shards
+  return await storage.listPrefixes(source);
+}
+
+@Task()
+async processPartition(ctx: TaskContext, partition: string): Promise<PartitionResult> {
+  const data = await storage.readPartition(partition);
+  const transformed = data.map(transformRecord);
+  const loaded = await db.upsertRows('analytics', transformed);
+  return { partition, rowsLoaded: loaded };
+}
+```
+
+</TabPanel>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task]
+async fn list_partitions(source: String) -> Result<Vec<String>> {
+    storage::list_prefixes(&source).await
+}
+
+#[task]
+async fn process_partition(partition: String) -> Result<PartitionResult> {
+    let data = storage::read_partition(&partition).await?;
+    let transformed: Vec<_> = data.into_iter().map(transform_record).collect();
+    let loaded = db::upsert_rows("analytics", &transformed).await?;
+    Ok(PartitionResult { partition, rows_loaded: loaded })
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@task(name="list_partitions")
+async def list_partitions(ctx: TaskContext, source: str) -> list[str]:
+    return await storage.list_prefixes(source)
+
+@task(name="process_partition")
+async def process_partition(ctx: TaskContext, partition: str) -> dict:
+    data = await storage.read_partition(partition)
+    transformed = [transform_record(r) for r in data]
+    loaded = await db.upsert_rows("analytics", transformed)
+    return {"partition": partition, "rows_loaded": loaded}
+```
+
+</TabPanel>
+</Tabs>
+
+### Step 2 — Fan out, then fan in
+
+The workflow starts every partition task without awaiting them one by one — `Promise.all` / `try_join_all` / `asyncio.gather` — so they run concurrently across your worker pool. Then it awaits them all and sums the results. Throughput scales with workers, not with a rewrite.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="typescript" queryGroup="language">
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Workflow({ name: 'parallel_etl', version: '1.0.0' })
+class ParallelEtl {
+  async run(ctx: WorkflowContext, source: string): Promise<EtlResult> {
+    const partitions = await ctx.executeTask(tasks.listPartitions, source);
+
+    // Fan-out: start all partitions at once, then await them together
+    const results = await Promise.all(
+      partitions.map(p => ctx.executeTask(tasks.processPartition, p))
+    );
+
+    // Fan-in: aggregate
+    const totalRows = results.reduce((sum, r) => sum + r.rowsLoaded, 0);
+    return { totalRows, partitions: results.length };
+  }
+}
+```
+
+</TabPanel>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[workflow(name = "parallel_etl", version = "1.0.0")]
+async fn parallel_etl(ctx: WorkflowContext, source: String) -> Result<EtlResult> {
+    let partitions = ctx.execute_task(list_partitions, source).await?;
+
+    // Fan-out: start all partitions, then await them together
+    let mut handles = Vec::new();
+    for partition in &partitions {
+        handles.push(ctx.execute_task(process_partition, partition.clone()));
+    }
+    let results: Vec<PartitionResult> = futures::future::try_join_all(handles).await?;
+
+    // Fan-in: aggregate
+    let total_rows: usize = results.iter().map(|r| r.rows_loaded).sum();
+    Ok(EtlResult { total_rows, partitions: results.len() })
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@workflow(name="parallel_etl", version="1.0.0")
+async def parallel_etl(ctx: WorkflowContext, source: str) -> dict:
+    partitions = await ctx.execute_task(list_partitions, source=source)
+
+    # Fan-out: start all partitions, then await them together
+    results = await asyncio.gather(*[
+        ctx.execute_task(process_partition, partition=p) for p in partitions
+    ])
+
+    # Fan-in: aggregate
+    total_rows = sum(r["rows_loaded"] for r in results)
+    return {"total_rows": total_rows, "partitions": len(results)}
+```
+
+</TabPanel>
+</Tabs>
+
+One caution the code hides: `Promise.all` starts *every* partition at once. With thousands of partitions that can overwhelm a downstream database — the [Parallel ETL reference](/guides/use-cases/data-processing/parallel-etl) shows how to cap concurrency and why child workflows are the better tool once each partition grows beyond a single task.
+
+---
+
+## Error Handling for Data Pipelines
+
+Real data fails in two completely different ways, and conflating them is the classic pipeline mistake. A **transient** failure — a network blip, a `429` rate limit — will succeed if you just try again. A **permanent** failure — a malformed row, a schema mismatch — will fail identically forever. Retrying a permanent failure wastes time; giving up on a transient one loses data. Each needs its own answer.
+
+<div className="not-prose my-8 max-w-lg mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Two Failures, Two Answers</div>
+  </div>
+  <div className="grid grid-cols-2 gap-px bg-border-default">
+    <div className="bg-background px-4 py-3">
+      <div className="text-[10px] font-mono uppercase tracking-widest text-foreground-muted mb-2">Transient</div>
+      <div className="text-xs font-medium text-foreground mb-1">Retry — the platform's job</div>
+      <p className="m-0 text-[10px] text-foreground-muted leading-relaxed">Timeout, rate limit. Set a retry policy on the task; Orcher backs off and retries automatically. Your workflow code never sees the blip.</p>
+    </div>
+    <div className="bg-background px-4 py-3">
+      <div className="text-[10px] font-mono uppercase tracking-widest text-foreground-muted mb-2">Permanent</div>
+      <div className="text-xs font-medium text-foreground mb-1">Quarantine — your job</div>
+      <p className="m-0 text-[10px] text-foreground-muted leading-relaxed">Bad data. Catch it, write it to a dead-letter table with the reason, and keep going. One poison row can't sink a million-row run.</p>
+    </div>
+  </div>
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Where a traditional pipeline needs a retry library and a DLQ topic, these are a task policy and a try/catch.</span>
+  </div>
+</div>
+
+### Step 1 — Let transient failures retry themselves
+
+The fetch task talks to a flaky API, so it carries a **retry policy**: up to five attempts with exponential backoff. A `429` or timeout just throws — Orcher catches it, waits, and re-runs the task. No retry loop in your code, because retrying transient faults is the runtime's job (the [Retry with Backoff](/guides/use-cases/background-tasks/retry-backoff) reference goes deep on this).
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="typescript" queryGroup="language">
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Transient failures: Orcher retries automatically
+@Task({ retryPolicy: { maxAttempts: 5, initialInterval: 1000, backoffCoefficient: 2.0 } })
+async fetchFromApi(ctx: TaskContext, input: { endpoint: string; page: number }): Promise<ApiResponse> {
+  const response = await fetch(
+    input.endpoint + '?page=' + input.page + '&size=100',
+    { signal: AbortSignal.timeout(30_000) },
+  );
+  if (response.status === 429) throw new Error('Rate limited'); // retried with backoff
+  if (!response.ok) throw new Error('API error: ' + response.status);
+  return response.json();
+}
+```
+
+</TabPanel>
+<TabPanel id="rust" label="Rust">
+
+```rust
+// Transient failures: Orcher retries automatically
+#[task(retry_policy(max_attempts = 5, initial_interval = 1, backoff_coefficient = 2.0))]
+async fn fetch_from_api(input: (String, usize)) -> Result<ApiResponse> {
+    let (endpoint, page) = input;
+    let url = format!("{}?page={}&size=100", endpoint, page);
+    let response = reqwest::Client::new()
+        .get(&url).timeout(Duration::from_secs(30)).send().await?;
+    if response.status() == 429 {
+        anyhow::bail!("Rate limited"); // retried with backoff
+    }
+    response.json::<ApiResponse>().await.map_err(Into::into)
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+# Transient failures: Orcher retries automatically
+@task(name="fetch_from_api", retry_policy={"max_attempts": 5, "initial_interval_seconds": 1})
+async def fetch_from_api(ctx: TaskContext, input: dict) -> dict:
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(f"{input['endpoint']}?page={input['page']}&size=100")
+        if resp.status_code == 429:
+            raise Exception("Rate limited")  # retried with backoff
+        resp.raise_for_status()
+        return resp.json()
+```
+
+</TabPanel>
+</Tabs>
+
+### Step 2 — Quarantine permanent failures and continue
+
+The processing task does the opposite: it *catches* the error so it never propagates. A row that can't be transformed goes to a `failed_records` dead-letter table — with its payload and the reason — and the task returns `failed` instead of throwing. The run continues; you triage the dead-letter table later, out of band.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="typescript" queryGroup="language">
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Permanent failures: catch, log, continue
+@Task()
+async processRecordSafely(ctx: TaskContext, record: RawRecord): Promise<ProcessResult> {
+  try {
+    const transformed = transformRecord(record);
+    await db.upsert('records', transformed);
+    return { status: 'success', id: record.id };
+  } catch (error) {
+    // Log to dead-letter table for manual review
+    await db.insert('failed_records', {
+      record_id: record.id,
+      error: String(error),
+      payload: JSON.stringify(record),
+      failed_at: new Date().toISOString(),
+    });
+    return { status: 'failed', id: record.id, error: String(error) };
+  }
+}
+```
+
+</TabPanel>
+<TabPanel id="rust" label="Rust">
+
+```rust
+// Permanent failures: catch, log, continue
+#[task]
+async fn process_record_safely(record: RawRecord) -> Result<ProcessResult> {
+    match transform_and_load(&record).await {
+        Ok(_) => Ok(ProcessResult::success(record.id)),
+        Err(e) => {
+            // Log to dead-letter table
+            db::insert_failed_record(&record, &e.to_string()).await.ok();
+            Ok(ProcessResult::failed(record.id, e.to_string()))
+        }
+    }
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+# Permanent failures: catch, log, continue
+@task(name="process_record_safely")
+async def process_record_safely(ctx: TaskContext, record: dict) -> dict:
+    try:
+        transformed = transform_record(record)
+        await db.upsert("records", transformed)
+        return {"status": "success", "id": record["id"]}
+    except Exception as e:
+        await db.insert("failed_records", {
+            "record_id": record["id"],
+            "error": str(e),
+            "payload": json.dumps(record),
+            "failed_at": datetime.utcnow().isoformat(),
+        })
+        return {"status": "failed", "id": record["id"], "error": str(e)}
+```
+
+</TabPanel>
+</Tabs>
+
+### Step 3 — Orchestrate: page through, tally both outcomes
+
+The workflow pages through the API (each page a retry-protected fetch) and runs every record through the safe processor, counting successes and failures. It always finishes with a summary — never a crash — because the only errors that can escape are the transient ones the platform already retried away.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="typescript" queryGroup="language">
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Workflow({ name: 'resilient_api_sync', version: '1.0.0' })
+class ResilientApiSync {
+  async run(ctx: WorkflowContext, endpoint: string): Promise<SyncSummary> {
+    let page = 0, hasMore = true, succeeded = 0, failed = 0;
+
+    while (hasMore) {
+      const response = await ctx.executeTask(tasks.fetchFromApi, { endpoint, page });
+      hasMore = response.hasMore;
+
+      for (const record of response.data) {
+        const result = await ctx.executeTask(tasks.processRecordSafely, record);
+        if (result.status === 'success') succeeded++;
+        else failed++;
+      }
+      page++;
+    }
+
+    return { succeeded, failed, totalPages: page };
+  }
+}
+```
+
+</TabPanel>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[workflow(name = "resilient_api_sync", version = "1.0.0")]
+async fn resilient_api_sync(ctx: WorkflowContext, endpoint: String) -> Result<SyncSummary> {
+    let mut page = 0;
+    let mut has_more = true;
+    let (mut succeeded, mut failed) = (0, 0);
+
+    while has_more {
+        let response = ctx.execute_task(fetch_from_api, (endpoint.clone(), page)).await?;
+        has_more = response.has_more;
+
+        for record in response.data {
+            let result = ctx.execute_task(process_record_safely, record).await?;
+            match result.status.as_str() {
+                "success" => succeeded += 1,
+                _ => failed += 1,
+            }
+        }
+        page += 1;
+    }
+
+    Ok(SyncSummary { succeeded, failed, total_pages: page })
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+@workflow(name="resilient_api_sync", version="1.0.0")
+async def resilient_api_sync(ctx: WorkflowContext, endpoint: str) -> dict:
+    page, has_more, succeeded, failed = 0, True, 0, 0
+
+    while has_more:
+        response = await ctx.execute_task(fetch_from_api, input={"endpoint": endpoint, "page": page})
+        has_more = response["has_more"]
+
+        for record in response["data"]:
+            result = await ctx.execute_task(process_record_safely, record=record)
+            if result["status"] == "success":
+                succeeded += 1
+            else:
+                failed += 1
+        page += 1
+
+    return {"succeeded": succeeded, "failed": failed, "total_pages": page}
+```
+
+</TabPanel>
+</Tabs>
+
+That returned `failed` count is your signal to go work the dead-letter table — fix the mapping, then re-run just those rows. A separate workflow can even do it on a timer.
+
+---
+
+## Scheduled Recurring Pipelines
+
+Most pipelines run on a clock — hourly syncs, nightly aggregations, weekly reports. Reflexively you'd reach for cron or a separate always-on scheduler that triggers the job. Orcher can be that scheduler itself. Model the recurrence as a **long-running workflow** that does its work, then `ctx.sleep()`s until the next run — a durable timer that releases the worker while it waits and fires on schedule even across restarts.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="typescript"
+  queryGroup="language"
+>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Workflow({ name: 'hourly_sync', version: '1.0.0' })
+class HourlySyncScheduler {
+  async run(ctx: WorkflowContext, config: SyncConfig): Promise<void> {
+    while (true) {
+      // Run the sync
+      await ctx.executeTask(tasks.runIncrementalSync, config);
+
+      // Sleep for 1 hour (durable — survives restarts)
+      await ctx.sleep(Duration.fromHours(1));
+    }
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[workflow(name = "hourly_sync", version = "1.0.0")]
+async fn hourly_sync_scheduler(
+    ctx: WorkflowContext,
+    config: SyncConfig,
+) -> Result<()> {
+    loop {
+        ctx.execute_task(run_incremental_sync, config.clone()).await?;
+        ctx.sleep(Duration::from_secs(3600)).await?; // durable sleep
+    }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+@workflow(name="hourly_sync", version="1.0.0")
+async def hourly_sync_scheduler(ctx: WorkflowContext, config: SyncConfig) -> None:
+    while True:
+        await ctx.execute_task(run_incremental_sync, config=config)
+        await ctx.sleep(timedelta(hours=1))  # durable 1-hour sleep
+```
+
+</TabPanel>
+
+</Tabs>
+
+Start this workflow once and it runs forever — no cron entry, no scheduler service. Two things to know before you rely on it: a fixed `sleep(1h)` drifts (it fires an hour after the work *finishes*, not on the hour), and an unbounded loop grows its journal. Both are handled in the [Scheduled Jobs reference](/guides/use-cases/background-tasks/scheduled-jobs), which also covers the Schedule API for when you want true cron semantics and pause/resume controls.
+
+---
+
+## Next Steps
+
+- [Production Best Practices](/guides/learning/data-engineers/production)
+- [Back to Overview](/guides/learning/data-engineers)

@@ -1,0 +1,182 @@
+---
+id: api-best-practices
+title: Best Practices & Examples
+sidebar_label: Best Practices
+---
+
+## API Documentation
+
+### Interactive Documentation
+
+Orcher provides interactive API documentation powered by OpenAPI:
+
+- **Swagger UI**: `http://localhost:8080/api/docs/swagger`
+- **ReDoc**: `http://localhost:8080/api/docs/redoc`
+- **RapiDoc**: `http://localhost:8080/api/docs/rapidoc`
+- **Scalar**: `http://localhost:8080/api/docs/scalar`
+
+### OpenAPI Specification
+
+Download the OpenAPI spec:
+
+```bash
+GET /api/v1/openapi.json
+```
+
+Or YAML format:
+
+```bash
+GET /api/v1/openapi.yaml
+```
+
+---
+
+## Best Practices
+
+### 1. Use Idempotency Keys
+
+For critical operations, use idempotency keys to prevent duplicate executions:
+
+```bash
+POST /api/v1/workflows/execute
+Authorization: Bearer <token>
+Idempotency-Key: unique-key-123
+Content-Type: application/json
+
+{...}
+```
+
+### 2. Handle Rate Limits
+
+Implement exponential backoff when rate limited:
+
+```rust
+async fn retry_with_backoff(request: Request) -> Result<Response> {
+    let mut delay = 1;
+    loop {
+        match send_request(&request).await {
+            Ok(response) => return Ok(response),
+            Err(e) if e.is_rate_limited() => {
+                tokio::time::sleep(Duration::from_secs(delay)).await;
+                delay *= 2;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+```
+
+### 3. Use Webhooks for Long Operations
+
+Instead of polling, use webhooks for long-running workflows:
+
+```bash
+POST /api/v1/workflows/execute
+Content-Type: application/json
+
+{
+  "workflow_type": "data_processing",
+  "webhook_url": "https://yourapp.com/webhooks/workflow",
+  "input": {...}
+}
+```
+
+### 4. Implement Timeouts
+
+Set appropriate timeouts for your requests:
+
+```rust
+use reqwest::Client;
+use std::time::Duration;
+
+let client = Client::builder()
+    .timeout(Duration::from_secs(30))
+    .build()?;
+```
+
+### 5. Use Compression
+
+Enable compression to reduce bandwidth:
+
+```bash
+GET /api/v1/executions
+Accept-Encoding: gzip, deflate, br
+```
+
+---
+
+## SDK Support
+
+While you can use the REST API directly, Orcher provides official SDKs that connect via gRPC
+for optimal performance:
+
+- [**Rust SDK**](/guides/sdk/rust) -- Type-safe Rust client with compile-time guarantees
+- [**TypeScript SDK**](/guides/sdk/typescript) -- Node.js with decorators and dependency injection
+- [**Python SDK**](/guides/sdk/python) -- Python 3.10+ with async/await and decorators
+
+---
+
+## Examples
+
+### Complete Workflow Execution Flow
+
+```bash
+# 1. Authenticate
+curl -X POST http://localhost:8080/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"user@example.com","password":"pass"}'
+
+# 2. Start workflow
+curl -X POST http://localhost:8080/api/v1/workflows/execute \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "workflow_type": "order_processing",
+    "workflow_id": "order-12345",
+    "input": {"order_id": "12345"}
+  }'
+
+# 3. Check status
+curl http://localhost:8080/api/v1/executions/exec_abc123/status \
+  -H "Authorization: Bearer $TOKEN"
+
+# 4. Get result
+curl http://localhost:8080/api/v1/executions/exec_abc123/result \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### Streaming Logs with curl
+
+```bash
+curl -N http://localhost:8080/api/v1/executions/exec_abc123/logs/stream \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept: text/event-stream"
+```
+
+### Batch Operations
+
+```bash
+# Submit multiple tasks
+for i in {1..10}; do
+  curl -X POST http://localhost:8080/api/v1/tasks \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "{\"task_type\":\"process_item\",\"input\":{\"id\":$i}}"
+done
+```
+
+---
+
+## Additional Resources
+
+- [CLI Reference](/guides/sdk/cli) -- Command-line interface for workflow management
+- [Platform Engineers Guide](/guides/learning/platform-engineers) -- Deployment, monitoring, and operations
+
+---
+
+## Next Steps
+
+- [API Overview](/guides/api) -- Authentication and getting started
+- [Workflow Endpoints](/guides/api/workflows) -- Execute, monitor, and manage workflow executions
+- [Task Endpoints](/guides/api/tasks) -- Submit and track tasks
+- [Errors & Limits](/guides/api/errors-and-limits) -- Error handling and rate limiting

@@ -1,0 +1,95 @@
+---
+id: 'features'
+title: 'Orcher Features'
+description: 'Explore the key features that make Orcher a powerful workflow orchestration platform.'
+---
+
+Orcher is a Rust-native workflow orchestration engine built for performance, reliability, and developer experience. It combines durable execution with a code-first approach, giving you compile-time safety and automatic crash recovery — all while letting you write workflows as straightforward async functions in Rust, TypeScript, or Python.
+
+## Durable Execution
+
+Every step of your workflow is automatically journaled to a persistent store, so if a worker crashes mid-execution, the workflow replays from the last completed step rather than starting over. This gives you crash recovery, no repeated steps, and the confidence that no work is lost — even across server restarts, deployments, or hardware failures.
+
+- **Automatic Journaling** — Every task execution is recorded, enabling replay and recovery without any manual checkpointing code
+- **Crash Recovery** — Workflows automatically resume from the last completed step after server restarts or worker crashes
+- **No Repeated Steps** — Completed tasks return journaled results instead of re-executing on replay; use idempotency keys to keep external side effects safe under retries
+
+## High Performance
+
+Orcher is written in Rust with an architecture optimized for throughput and latency. The worker-embedded execution model eliminates network hops between the scheduler and task runners, while eager task dispatch can return the next task directly in the completion response, saving a poll round trip.
+
+- **No Runtime Overhead** — Rust with no garbage collector, so throughput stays predictable under sustained load
+- **Eager Dispatch** — A worker that completes a step can be handed its next task in the same response, without waiting for a poll
+
+## Type-Safe Workflows
+
+Orcher leverages Rust's type system (and typed decorators in TypeScript/Python) to catch errors at compile time rather than at runtime. Your IDE gives you full autocomplete, type hints, and inline documentation for workflow inputs, task arguments, and return values — making refactoring safe and large codebases manageable.
+
+- **Compile-Time Validation** — Catch mismatched types, missing arguments, and incorrect return values before deployment
+- **Full IDE Support** — Autocomplete, go-to-definition, and inline documentation across all three SDKs
+- **Refactoring Safety** — Rename tasks and workflows with confidence; the compiler catches every callsite
+
+## Code-First Approach
+
+Workflows are defined as regular functions with decorators or macros — no YAML, no DSLs, no separate configuration files. This means your workflows live alongside your application code, are versioned in Git, can be unit-tested with standard testing frameworks, and benefit from your team's existing code review and CI/CD processes.
+
+- **Version Control** — Workflows are just code; track changes, review diffs, and roll back with Git
+- **Testing** — Unit test your workflows and tasks like any other function using standard test frameworks
+- **Reusability** — Extract common patterns into shared libraries and compose workflows from reusable building blocks
+
+## Production-Grade Security
+
+Orcher includes the security primitives you need for production deployments: encrypted communication between workers and the server, authentication for API access, and structured audit logs that record every workflow execution and state change for compliance and debugging.
+
+- **TLS Encryption** — Secure all gRPC communication between workers, the orchestrator server, and API clients
+- **Authentication** — Built-in support for API keys and bearer tokens for programmatic access
+- **Audit Logging** — Complete, structured logs of all workflow executions, task completions, and configuration changes
+
+## Flexible Patterns
+
+Orcher supports the full spectrum of workflow orchestration patterns out of the box. Decompose complex business processes into parent-child workflow hierarchies, implement distributed transactions using the saga pattern, fan out work across parallel tasks and collect results, or pause workflows to wait for external events and human approvals.
+
+- **[Parent-Child Workflows](/guides/patterns/parent-child)** — Decompose complex processes into manageable sub-workflows with independent error handling
+- **[Saga Pattern](/guides/patterns/saga)** — Implement compensating transactions to maintain consistency across distributed services
+- **[Fan-Out/Fan-In](/guides/patterns/fan-out-fan-in)** — Process items in parallel and aggregate results with rate limiting and partial failure handling
+- **[Event Gates](/guides/core/events)** — Wait for external signals or human approvals with configurable timeouts and escalation
+
+## Observability
+
+Orcher exposes Prometheus-compatible metrics, OpenTelemetry-based distributed tracing, and structured logging so you can monitor workflow throughput, track individual execution paths across services, and debug failures with full context — using the observability tools your team already runs.
+
+- **[Metrics](/guides/observability/metrics)** — Prometheus-compatible counters, histograms, and gauges for workflow and task execution monitoring
+- **[Tracing](/guides/observability/tracing)** — Distributed tracing with OpenTelemetry for end-to-end visibility across workflow steps
+- **[Logging](/guides/observability/logging)** — Structured, JSON-formatted logs with correlation IDs for efficient debugging
+
+## Easy Deployment
+
+Workers compile to self-contained binaries that include everything needed to connect to the orchestrator and execute workflows. There's no separate runtime to install, no JVM to configure, and no external dependencies to manage — just deploy the binary, point it at your Orcher server, and start processing.
+
+- **Self-Contained Binaries** — Workers include the SDK, gRPC client, and all workflow definitions in a single executable
+- **Docker Support** — Official Docker images for containerized deployments with minimal image size
+- **Kubernetes Ready** — Horizontal scaling with standard Kubernetes deployments; workers are stateless and disposable
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/getting-started/architecture" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Architecture</h3>
+      <p className="text-sm text-scale-1100">
+        Understand Orcher's modular crate structure and execution model.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/getting-started/quickstart" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Quickstart</h3>
+      <p className="text-sm text-scale-1100">
+        Build and run your first Orcher workflow in minutes.
+      </p>
+    </div>
+  </Link>
+</div>

@@ -1,0 +1,121 @@
+---
+id: orchestrator-deployment
+title: Orchestrator Deployment
+description: Start and deploy the Orcher orchestrator server using development mode, Docker Compose, or systemd
+---
+
+## Development
+
+```bash
+# Start the orchestrator: gRPC on 127.0.0.1:50051, REST API on 127.0.0.1:8080
+DATABASE_URL=postgresql://orcher:orcher@localhost:5432/orcher ./target/release/orchestrator
+
+# Or use the CLI
+orcher server start --foreground
+```
+
+## Docker Compose
+
+A Compose file for the full stack. The orchestrator serves both gRPC (`50051`) and the REST API (`8080`), so it is the only Orcher service:
+
+```yaml
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: orcher
+      POSTGRES_USER: orcher
+      POSTGRES_PASSWORD: orcher
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orcher"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pgbouncer:
+    image: bitnami/pgbouncer:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "6432:6432"
+
+  orchestrator:
+    image: ghcr.io/orcher-io/orcher
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://orcher:orcher@pgbouncer:6432/orcher
+      LOG_LEVEL: info
+      # The image listens on 0.0.0.0, which requires authentication.
+      # For a local, unauthenticated stack only; configure [security] for production.
+      ORCHER_INSECURE: "true"
+    ports:
+      - "127.0.0.1:50051:50051"
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health/live"]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+```
+
+```bash
+docker compose up -d
+
+# View logs
+docker compose logs -f orchestrator
+
+# Scale orchestrators for high availability
+docker compose up -d --scale orchestrator=3
+```
+
+## Using systemd
+
+Create `/etc/systemd/system/orcher-orchestrator.service`:
+
+```ini
+[Unit]
+Description=Orcher Orchestrator Server
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=orcher
+Group=orcher
+EnvironmentFile=/etc/orcher/orchestrator.env
+ExecStart=/usr/local/bin/orchestrator
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=orcher-orchestrator
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable orcher-orchestrator
+sudo systemctl start orcher-orchestrator
+sudo journalctl -u orcher-orchestrator -f
+```
+
+---
+
+## Next Steps
+
+- [Orchestrator Overview](/guides/operations/orchestrator) — Architecture and components
+- [Configuration](/guides/operations/orchestrator/configuration) — Environment variables and database connection
+- [High Availability](/guides/operations/orchestrator/high-availability) — Multi-instance deployment and load balancing
+- [Monitoring](/guides/operations/orchestrator/monitoring) — Health checks, performance tuning, and troubleshooting

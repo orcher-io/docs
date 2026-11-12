@@ -1,0 +1,82 @@
+---
+id: rust-sessions
+title: Sessions
+description: Run a series of tasks on one worker with sessions — models loaded in memory, files on local disk, held connections
+sidebar_label: 'Sessions'
+---
+
+A session runs a series of tasks on the **same worker**. Use one when later tasks depend on something an earlier task left on that worker: a model loaded into memory or onto a GPU, a file downloaded to local disk, a connection held open.
+
+---
+
+## Creating a Session
+
+<$CodeSample path="rust/sdk-sessions/src/lib.rs" region="session" />
+
+`ctx.create_session(options)` returns a `SessionContext`. `session.execute_task(task, input)` takes the same task references and string names as `ctx.execute_task`, and sends the task to the session's worker. `session.complete()` releases the worker's session slot; tasks run through the session after that fail.
+
+`SessionOptions` is in `orcher_sdk::workflow`, not the prelude.
+
+---
+
+## SessionOptions
+
+| Method | Default | Effect in 0.7 |
+|--------|---------|---------------|
+| `with_creation_timeout(duration)` | 30 s | Limit on the internal task that creates the session |
+| `with_execution_timeout(duration)` | 600 s | Sent to the worker, not enforced |
+| `with_max_concurrent_tasks(n)` | 1 | Sent to the worker, not enforced |
+| `with_heartbeat_interval(duration)` | 5 s | How often the session's worker reports the session alive |
+
+---
+
+## Session Information
+
+<$CodeSample path="rust/sdk-sessions/src/lib.rs" region="info" />
+
+`session.info()` returns the same values as a `SessionInfo`, with the session's `state`.
+
+---
+
+## Worker Capacity
+
+Each worker accepts at most `max_sessions` sessions at once (10 by default; [Worker](/guides/sdk/rust/worker)). Creating a session doesn't wait for a free slot: if the worker that picks up the creation task has none, creation fails at once and `create_session` returns an error. Size `max_sessions` for the sessions you expect, and run more workers on the queue if they fill up.
+
+---
+
+## When the Session's Worker Dies
+
+Nothing moves a session to another worker. Tasks sent to the session wait for a worker that is gone; each attempt fails when its timeout passes, and once its retries are used up the workflow receives `WorkflowError::TaskFailed`. Whatever the worker held, a loaded model or a downloaded file, is gone with it.
+
+Give session tasks timeouts that fit the work, and start over on a new session, a bounded number of times:
+
+<$CodeSample path="rust/sdk-sessions/src/lib.rs" region="recover" />
+
+---
+
+## How It Works
+
+Sessions are built on task queues; the server has no session concept of its own.
+
+1. `ctx.create_session()` schedules an internal `__orcher_create_session` task on the workflow's task queue.
+2. A worker picks it up, takes a session slot and starts polling a queue of its own, named `{task_queue}__session__{worker_id}`. The queue name is the task's result, and is journaled.
+3. `session.execute_task` sends each task to that queue, which only that worker polls.
+4. `session.complete()` schedules an internal `__orcher_complete_session` task that releases the slot and stops the polling.
+
+On replay, the session's queue name is read from the journal and the session is not created again.
+
+---
+
+## Limitations
+
+- **No migration**: a session lives and dies with its worker.
+- **One worker**: everything in a session runs on one worker. For work that can run anywhere, use ordinary tasks.
+- **Bounded slots**: each worker has `max_sessions` slots, and creation fails rather than waits when they are full.
+
+---
+
+## Next Steps
+
+- [Tasks](/guides/sdk/rust/tasks): timeouts and retries for session tasks
+- [Worker](/guides/sdk/rust/worker): `max_sessions` and scaling
+- [Workflows](/guides/sdk/rust/workflows): handling task failures

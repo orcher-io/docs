@@ -1,0 +1,63 @@
+---
+id: 'storage-redis'
+title: 'Redis'
+description: 'Configure optional Redis for fast queue notification and query caching'
+---
+
+Redis is **optional**. When configured, it provides two benefits:
+
+1. **Fast queue notification** — The orchestrator pushes execution IDs to Redis lists (`LPUSH`). Workers use `BRPOP` to wake as soon as work is queued, instead of periodic PostgreSQL polling.
+2. **Query caching** — Frequently accessed data is cached in Redis with configurable TTL (default: 5 minutes).
+
+## Enabling Redis
+
+Set the `REDIS_URL` environment variable on the orchestrator:
+
+```bash
+REDIS_URL=redis://localhost:6379
+```
+
+Default Redis connection settings:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `pool_size` | `10` | Number of connections |
+| `min_idle` | `2` | Minimum idle connections |
+| `connection_timeout` | `10s` | Timeout for establishing a connection |
+| `command_timeout` | `5s` | Timeout for individual commands |
+| `key_prefix` | `orcher:` | Prefix for all Redis keys |
+| `database` | `0` | Redis database number |
+
+## What Redis Stores
+
+```
+orcher:queue:{namespace}:{task_queue}  →  List of execution IDs (LPUSH/BRPOP)
+```
+
+Redis is used exclusively as a **notification layer**. All durable state lives in PostgreSQL. If Redis goes down, workers automatically fall back to PostgreSQL polling — no work is lost.
+
+## Redis in Docker Compose
+
+```yaml
+services:
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+```
+
+Enable AOF (Append-Only File) persistence with `--appendonly yes` so Redis survives restarts. However, even without persistence, no data is lost — PostgreSQL is authoritative.
+
+---
+
+## Next Steps
+
+- [Storage Overview](/guides/operations/storage) — PostgreSQL configuration and migrations
+- [Caching & Schema](/guides/operations/storage/caching) — In-memory cache tiers and database schema details
+- [Operations & Troubleshooting](/guides/operations/storage/operations) — Docker Compose setup and troubleshooting

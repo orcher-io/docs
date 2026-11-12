@@ -1,0 +1,134 @@
+---
+id: 'queue-monitoring'
+title: 'Queue Monitoring & Troubleshooting'
+description: 'Monitor queue depth, configure auto-scaling, and troubleshoot common queue issues'
+sidebar_label: 'Monitoring'
+---
+
+## Queue Monitoring
+
+### CLI Commands
+
+Use the CLI to inspect queue state:
+
+```bash
+# List all queues with connected workers
+orcher queue list
+
+# Check queue depth across all queues
+orcher queue depth --watch
+
+# Queue statistics for a specific queue
+orcher queue stats payments
+
+# Show connected pollers for a queue
+orcher queue pollers payments --verbose
+```
+
+### Scaling Based on Queue Depth
+
+Monitor queue depth to decide when to scale workers:
+
+**Scale up when:**
+- Queue depth is consistently growing
+- Task latency exceeds your SLA
+- Workers are at max concurrency (all slots full)
+
+**Scale down when:**
+- Queue depth is consistently zero
+- Most pollers are idle (no work returned)
+- CPU usage is below 30% for several minutes
+
+### Kubernetes Auto-Scaling
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: payment-worker-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: payment-worker
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+```
+
+---
+
+## Troubleshooting
+
+### Tasks Not Being Picked Up
+
+1. **Wrong task queue** — Ensure the worker's `task_queue` matches what the workflow dispatches to
+2. **Wrong namespace** — Worker and orchestrator namespace must match
+3. **Handler not registered** — In Rust, ensure `#[workflow]` and `#[task]` macros are applied. In Python, ensure `auto_discover` paths include your handler files
+4. **No workers running** — Check `orcher queue pollers <queue-name>` for connected workers
+
+```bash
+# Verify workers are connected to the right queue
+orcher queue pollers payments --verbose
+
+# Check queue depth to see if work is queued
+orcher queue depth
+
+# Test gRPC connectivity
+grpcurl -plaintext localhost:50051 list
+```
+
+### High Queue Latency
+
+1. **Not enough pollers** — Increase `workflow_poller_count` / `task_poller_count` (default: 4 each)
+2. **Not enough concurrency** — Increase `max_concurrent_tasks` if tasks are I/O-bound
+3. **Not enough workers** — Add more Worker instances if queue depth is growing
+4. **No Redis** — Enable Redis so workers are notified of work instead of finding it at the next poll
+
+### Queue Depth Growing
+
+Common causes and fixes:
+
+- **Input rate exceeds capacity** — Scale workers horizontally (more instances) or vertically (higher `max_concurrent_tasks`)
+- **Slow tasks blocking workers** — Move slow tasks to a dedicated queue with its own workers
+- **Worker crashes** — Check worker logs; unclaimed tasks are automatically re-queued after claim timeout expires
+- **Database contention** — Use PgBouncer for connection multiplexing
+
+---
+
+## Best Practices
+
+**Use descriptive queue names** that reflect the workload:
+
+```
+payments          # Payment processing
+email-sendgrid    # Email via SendGrid
+ml-inference      # ML model inference
+video-encoding    # Video transcoding
+```
+
+**Separate queues by resource profile.** CPU-bound tasks (ML inference, encoding) should run on different workers than I/O-bound tasks (API calls, email). This lets you tune concurrency and instance types independently.
+
+**One queue per Worker instance.** Each Worker polls a single `task_queue`. To handle multiple workloads, run multiple Worker instances — one per queue.
+
+**Use namespaces for environment isolation.** Development, staging, and production should use different namespaces, not different queue names. This keeps queue names consistent across environments.
+
+**Monitor queue depth.** A consistently growing queue depth means workers can't keep up. Either scale workers or investigate slow task execution.
+
+---
+
+## Next Steps
+
+- [Queues Overview](/guides/operations/queue) — How queues work in Orcher
+- [Configuring Queues](/guides/operations/queue/configuration) — Assign workers, isolate workloads, and use namespaces
+- [Polling & Dead Letter Queue](/guides/operations/queue/polling) — Tune pollers, configure retries, and enable Redis fast path
+- [Workers](/guides/operations/workers) — Deploy and manage workers
+- [Orchestrator Server](/guides/operations/orchestrator) — How the coordination engine works
+- [Storage Setup](/guides/operations/storage) — Configure PostgreSQL and Redis
+- [Observability](/guides/observability/metrics) — Metrics, tracing, and logging

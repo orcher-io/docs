@@ -1,0 +1,198 @@
+---
+id: rust-client
+title: Client API
+description: Connect with an API key and TLS, start workflows, handle duplicate starts, and send events, queries and updates with the Rust SDK client
+sidebar_label: 'Client'
+---
+
+The `Client` connects to the Orcher server over gRPC. It starts workflows and returns `WorkflowHandle`s, through which you wait for results, send events, run queries and updates, and cancel, terminate or reset workflows. It also lists workflows, calls [actors](/guides/sdk/rust/actors) and manages namespaces.
+
+---
+
+## Connecting
+
+<$CodeSample path="rust/sdk-client/src/lib.rs" region="connect" />
+
+`Client::connect(url)` uses the defaults: namespace `default`, a 30-second timeout per request and no credentials, with TLS for an `https://` URL only. For anything else, build a `ClientConfig`:
+
+<$CodeSample path="rust/sdk-client/src/lib.rs" region="config" />
+
+| `ClientConfig` method | Default | Description |
+|-----------------------|---------|-------------|
+| `ClientConfig::new(url)` | `http://localhost:50051` | Server URL, with its scheme |
+| `with_namespace(name)` | `default` | Namespace for starts and handles that don't name one |
+| `with_api_key(key)` | None | Sent as `authorization: Bearer <key>` on every call |
+| `with_organization_id(id)` | None | Sent as `x-organization-id`; only for an API key that doesn't belong to an organization itself |
+| `with_tls(ClientTlsConfig)` | None (follows the URL scheme) | A private CA, a client certificate for mutual TLS, or another server name ([below](#tls-and-mutual-tls)) |
+| `with_timeout(duration)` | 30 s | Timeout for each request |
+| `with_identity(name)` | `orcher-client-<uuid>` | Identity reported to the server |
+
+The SDK doesn't read `ORCHER_API_KEY` or any other variable for the client; pass the key in yourself. A client that is already connected can also take a key: `Client::with_api_key` returns a client that sends it from the next call on, over the same connection (since 0.7.1; earlier it changed nothing that was sent). Clones taken before the call keep their old credentials.
+
+<$CodeSample path="rust/sdk-client/src/lib.rs" region="api-key-later" />
+
+TLS belongs to the connection, so set it on the `ClientConfig` before `Client::with_config`. `Client::with_tls` is deprecated: it never changed a connected client.
+
+### TLS and mutual TLS
+
+TLS follows the URL scheme. An `https://` URL connects over TLS and verifies the server against the system trust store, with no other setting. An `http://` URL connects in plaintext, even with a `ClientTlsConfig` set (the SDK logs a warning), so use `https://` whenever the server expects TLS.
+
+A `ClientTlsConfig` adds certificates. Give a CA only for a private or self-signed authority, and a client certificate and key for mutual TLS:
+
+<$CodeSample path="rust/sdk-client/src/lib.rs" region="mtls" />
+
+| `ClientTlsConfig` method | Description |
+|--------------------------|-------------|
+| `new()` | Verify the server against the system trust store, with no client certificate |
+| `with_ca_cert_file(path)?` / `with_ca_cert(pem)` | Verify the server against this CA instead |
+| `with_client_identity_files(cert, key)?` / `with_client_identity(cert, key)` | Present this client certificate and key, for mutual TLS |
+| `with_domain_name(name)` | The name used for SNI and certificate verification, instead of the URL's host |
+
+The `_file` and `_files` methods read PEM files and return an `std::io::Error` naming the path if one can't be read; the others take PEM bytes you already have:
+
+<$CodeSample path="rust/sdk-client/src/lib.rs" region="tls-bytes" />
+
+A client certificate without its key, or PEM that doesn't parse, makes `Client::with_config` return `ClientError::ConnectionFailed`. When a handshake fails, the error names the cause, such as a certificate the client doesn't trust or a client certificate the server requires. The [worker](/guides/sdk/rust/worker#tls-and-mutual-tls) takes the same `ClientTlsConfig`.
+
+Automatic TLS for `https://` URLs needs `orcher-sdk` 0.7.1 or later; in 0.7.0 an `https://` URL connected only with `with_tls` set.
+
+---
+
+## Starting Workflows
+
+<$CodeSample path="rust/sdk-client/src/lib.rs" region="start" />
+
+`start_workflow(type, input)` generates the workflow id and puts the workflow on the task queue named `default`. Make sure a worker polls that queue, or use `start_workflow_with_options`:
+
+<$CodeSample path="rust/sdk-client/src/lib.rs" region="start-options" />
+
+| `StartWorkflowOptions` method | Description |
+|-------------------------------|-------------|
+| `StartWorkflowOptions::new(task_queue)` | The task queue; everything else unset |
+| `with_workflow_id(id)` | Your own id; generated when unset |
+| `with_namespace(name)` | Start in this namespace instead of the client's |
+| `with_workflow_execution_timeout(duration)` | Deadline for the whole execution ([below](#execution-deadline)) |
+| `with_workflow_run_timeout(duration)` | Limit on a single run |
+| `with_id_reuse_policy(policy)` | What to do if the id is already in use ([below](#duplicate-starts-and-id-reuse)) |
+| `with_retry_policy(policy)` | Retry a failed workflow as a fresh run ([below](#retrying-a-workflow)) |
+| `with_cron_schedule(expr)` | Run on a cron schedule |
+
+The handle returned by a start keeps the namespace the workflow was started in, so later calls through it go to the same namespace.
+
+### Execution deadline
+
+`with_workflow_execution_timeout` bounds the whole workflow, retries and fresh restarts included. When it passes, the workflow is marked timed out and stops. Without it a workflow runs until it finishes, however long that takes.
+
+<Admonition type="note">
+
+A deadline is a safety net for work that should never run unbounded, not a
+substitute for task-level timeouts. Bounding the tasks tells you *which* step
+hung; bounding only the workflow tells you the whole thing was too slow.
+
+</Admonition>
+
+### Duplicate starts and id reuse
+
+A workflow id names at most one open run in a namespace. Starting an id whose run is still open fails with `ClientError::WorkflowAlreadyExists`, which carries the open run's id, under every policy except `TerminateIfRunning`. The policies differ in what they allow once earlier runs have closed:
+
+| `WorkflowIdReusePolicy` | A start with an id already used |
+|-------------------------|---------------------------------|
+| `AllowDuplicate` | Starts once the previous run has closed, however it closed |
+| `AllowDuplicateFailedOnly` | Starts only if the previous run failed, was cancelled, terminated or timed out |
+| `RejectDuplicate` | Never starts an id any run has carried |
+| `TerminateIfRunning` | Terminates the open run, if there is one, and starts |
+
+With no policy, the server allows a new run once the previous one has closed. To make a start idempotent, choose the workflow id from your own data, and attach to the existing run when the id is taken:
+
+<$CodeSample path="rust/sdk-client/src/lib.rs" region="start-once" />
+
+### Retrying a workflow
+
+A workflow that fails is not retried by default; recover with task retries and compensation. With a retry policy, a failed run is retried as a fresh run with its own history:
+
+<$CodeSample path="rust/sdk-client/src/lib.rs" region="workflow-retry" />
+
+### Cron schedules
+
+<$CodeSample path="rust/sdk-client/src/lib.rs" region="cron" />
+
+### Starting many workflows
+
+`client.batch_start_workflows(type, inputs, options)` starts one workflow per input in a single request. The server generates the ids, the inputs are sent as plain JSON (without a codec), and the options' workflow id, cron schedule and reuse policy are not applied.
+
+---
+
+## Workflow Handles
+
+<$CodeSample path="rust/sdk-client/src/lib.rs" region="handle" />
+
+`get_workflow_handle(id)` targets the latest run in the client's namespace, and `get_workflow_handle_with_run_id(id, Some(run_id))` a specific run. Neither makes a request; an unknown id shows up on the first call through the handle.
+
+<$CodeSample path="rust/sdk-client/src/lib.rs" region="stop" />
+
+`cancel()` asks the workflow to cancel and lets it clean up; `terminate(reason)` ends it at once.
+
+### Resetting a workflow
+
+`reset(event_id, reason)` keeps the journal up to and including `event_id`, ends the current execution with the status `reset`, and continues in a new execution that replays the kept events and makes fresh decisions from there. It returns the new execution's id. Find the event id in the workflow's history (`orcher workflow history <workflow-id>` on the CLI).
+
+<$CodeSample path="rust/sdk-client/src/lib.rs" region="reset" />
+
+---
+
+## Listing Workflows
+
+<$CodeSample path="rust/sdk-client/src/lib.rs" region="list" />
+
+`search_workflows(query, SearchWorkflowsOptions)` takes an SQL-like query instead of filters.
+
+---
+
+## Errors
+
+Client calls return `orcher_sdk::Error`. The variants you will match most are `Error::Client(ClientError::...)` for connection, authentication and request failures (including `WorkflowAlreadyExists`) and `Error::Workflow(WorkflowError::...)` for the workflow's own outcome. `error.code()` gives a stable `ErrorCode`, such as `WORKFLOW_ALREADY_EXISTS`, and `error.is_retryable()` says whether repeating the call can help. Both enums are `#[non_exhaustive]`, so end a `match` with a catch-all arm.
+
+<$CodeSample path="rust/sdk-client/src/lib.rs" region="errors" />
+
+---
+
+## Payload Encoding
+
+`client.with_gzip_compression()` and `client.with_encryption(&key)` encode workflow inputs before they are sent, with gzip or AES-256-GCM. The worker must decode them with the matching `WorkerBuilder::with_gzip_compression()` or `with_encryption(&key)`. The server decodes payloads and stores plain JSON, so encryption protects data in transit only; it is not end-to-end encryption.
+
+---
+
+## Client Reference
+
+| Method | Description |
+|--------|-------------|
+| `Client::connect(url)` / `Client::with_config(config)` | Connect |
+| `start_workflow(type, input)` | Start with a generated id on the `default` queue |
+| `start_workflow_with_options(type, input, options)` | Start with `StartWorkflowOptions` |
+| `batch_start_workflows(type, inputs, options)` | Start one workflow per input |
+| `get_workflow_handle(id)` / `get_workflow_handle_with_run_id(id, run_id)` | Handle to an existing workflow |
+| `query_workflow(id, query, args)` | Query without getting a handle first |
+| `list_workflows(options)` / `search_workflows(query, options)` | List executions, a page at a time |
+| `actor::<A>(key)` / `invoke_actor(...)` / `send_actor(...)` | Call actors |
+| `create_namespace`, `get_namespace`, `list_namespaces`, `update_namespace`, `deprecate_namespace`, `delete_namespace` | Manage namespaces |
+
+### WorkflowHandle
+
+| Method | Description |
+|--------|-------------|
+| `id()` / `run_id()` | The workflow id; the run id, if the handle has one (`Option`) |
+| `result::<T>()` / `result_with_timeout::<T>(duration)` | Wait for the result |
+| `status()` / `describe()` | Current status; full metadata |
+| `send_event(name, payload)` | Send an event |
+| `query(name, ())` | Run a query handler |
+| `update(name, args)` | Run an update handler and wait for its result |
+| `cancel()` / `terminate(reason)` | Stop the workflow |
+| `reset(event_id, reason)` | Reset to a journal event; returns the new execution id |
+
+---
+
+## Next Steps
+
+- [Workflows](/guides/sdk/rust/workflows): receiving events, answering queries and updates
+- [Worker](/guides/sdk/rust/worker): connecting workers to the same server and namespace
+- [Patterns](/guides/sdk/rust/patterns): approvals and other event-driven workflows

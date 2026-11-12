@@ -1,0 +1,97 @@
+---
+id: 'aggregation'
+title: 'Log Aggregation'
+description: 'Integrate Orcher logs with Kubernetes, Grafana Loki, Elasticsearch, and CloudWatch'
+sidebar_label: 'Log Aggregation'
+---
+
+Since Orcher outputs structured JSON to stdout, it integrates with any log aggregation system that can read container or process output.
+
+## Kubernetes
+
+In Kubernetes, stdout logs are automatically collected by the node's log driver. Use a DaemonSet-based collector:
+
+- **Fluentd / Fluent Bit** — Parse JSON from container stdout, ship to Elasticsearch, CloudWatch, or Loki
+- **Vector** — High-performance log collection with built-in JSON parsing
+- **Promtail** — Ship logs to Grafana Loki for PromQL-like querying
+
+No sidecar or file output is needed — JSON to stdout is the standard pattern.
+
+## Grafana Loki
+
+Query Orcher logs with LogQL:
+
+```promql
+# All error logs
+{job="orcher-orchestrator"} | json | level="ERROR"
+
+# Workflow execution events
+{job="orcher-orchestrator"} | json | target="orcher_core"
+
+# Rate of errors over time
+rate({job="orcher-orchestrator"} | json | level="ERROR" [5m])
+```
+
+## Elasticsearch / CloudWatch
+
+JSON logs are natively parseable by Elasticsearch and CloudWatch Insights without additional transformation.
+
+```
+# CloudWatch Insights example
+fields @timestamp, level, message
+| filter level = "ERROR"
+| sort @timestamp desc
+| limit 100
+```
+
+---
+
+## Performance
+
+The logging system is designed for minimal overhead:
+
+| Format | Approximate Cost |
+|--------|-----------------|
+| Compact | ~5-10 us per log statement |
+| JSON | ~10-15 us per log statement |
+| Pretty | ~20-30 us per log statement |
+
+Disabled log levels have near-zero runtime cost thanks to `tracing`'s compile-time callsite optimization. A `debug!()` call at `info` level compiles to a single branch check.
+
+---
+
+## Troubleshooting
+
+### Logs Not Appearing
+
+1. **Check log level** — Ensure `LOG_LEVEL` is set low enough (e.g., `debug` to see `debug!()` messages)
+2. **Check `RUST_LOG`** — If set, it overrides `LOG_LEVEL`. Unset it to use the simpler config.
+3. **Check initialization order** — Logging must be initialized before any `tracing` macros are called
+
+### Too Much Noise from Dependencies
+
+Use `RUST_LOG` to quiet noisy crates while keeping Orcher verbose:
+
+```bash
+RUST_LOG="orcher=debug,sqlx=warn,hyper=warn,tower=warn,tonic=warn"
+```
+
+### Logs Not JSON in Production
+
+Set `LOG_FORMAT=json` explicitly. The default format is `compact` (not JSON):
+
+```bash
+LOG_FORMAT=json ./orcher-orchestrator
+```
+
+---
+
+## Next Steps
+
+- [Logging Overview](/guides/observability/logging) — Configuration, formats, and log levels
+- [Structured Logging](/guides/observability/logging/structured-logging) — Using tracing fields, `#[instrument]`, and span context
+- [Viewing Logs](/guides/observability/logging/viewing-logs) — CLI commands, Docker, and database queries
+- [Metrics](/guides/observability/metrics) — Prometheus metrics for monitoring
+- [Tracing](/guides/observability/tracing) — Distributed tracing with OpenTelemetry
+- [Debugging](/guides/observability/debugging) — Debug workflow execution
+- [Storage](/guides/operations/storage) — PostgreSQL and Redis configuration

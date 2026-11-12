@@ -1,0 +1,146 @@
+---
+id: 'distributed-systems'
+title: 'Microservice Orchestration & Distributed Systems'
+description: 'Coordinate microservices and distributed systems with Orcher. Build reliable distributed workflows with child workflows, saga patterns, and event gates for human approvals.'
+sidebar_label: 'Microservice Orchestration'
+---
+
+Coordinating multiple microservices into a reliable end-to-end transaction is one of the hardest problems in distributed systems. A payment service might succeed while the inventory service fails, leaving your data inconsistent and your customers confused. Orcher solves this by letting you write distributed workflows as regular code — with every cross-service call journaled to PostgreSQL.
+
+### The transaction state, made explicit
+
+The classic distributed failure isn't that a service goes down — it's that afterwards *nobody knows where the transaction stands*. When every service call runs through a journaled task, that question always has an answer.
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">One Transaction, Three Services</div>
+  </div>
+  {[
+    { label: 'payment-service', detail: 'Charge accepted — journaled', icon: '✓', state: 'done' },
+    { label: 'inventory-service', detail: 'Call fails — service is down', icon: '✗', state: 'crash' },
+    { label: 'the journal knows', detail: 'Payment done, inventory not, shipping never called', icon: '=', state: 'resume' },
+    { label: 'resume or roll back', detail: 'Retry inventory when it recovers — or compensate the payment', icon: '→', state: 'done' },
+  ].map((row, i, arr) => (
+    <div key={i}>
+      <div className={`px-4 py-2 flex items-center gap-3 ${row.state === 'crash' ? 'bg-red-500/5' : ''} ${row.state === 'resume' ? 'bg-surface-75' : ''}`}>
+        <span className={`w-5 h-5 flex items-center justify-center text-[10px] shrink-0 ${row.state === 'crash' ? 'text-red-400' : 'text-foreground-muted'}`}>{row.icon}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{row.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{row.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">No reconciliation jobs, no "did it happen?" — both recovery paths start from a known state.</span>
+  </div>
+</div>
+
+Either recovery path is durable: retries pick up exactly the calls that never completed, and rollback runs [saga compensations](/guides/use-cases/distributed-systems/saga-pattern) in reverse order — themselves journaled, so an interrupted rollback resumes instead of restarting.
+
+### Compose along service boundaries
+
+Child workflows let the orchestration mirror your architecture: one child per service, each owning its service's steps, retries, and failure handling — independently testable, reusable across parent workflows.
+
+<div className="not-prose my-8 max-w-xl mx-auto">
+  <div className="flex justify-center">
+    <div className="border bg-surface-100 px-6 py-3 text-center">
+      <div className="text-xs font-medium font-mono text-foreground">order_fulfillment</div>
+      <div className="text-[10px] text-foreground-muted mt-1">parent — owns the end-to-end transaction</div>
+    </div>
+  </div>
+  <div className="flex justify-center">
+    <div className="flex items-center gap-1.5">
+      <div className="w-px h-6 bg-border-strong" />
+      <span className="text-[10px] font-mono text-foreground-muted">start_child_workflow × 3</span>
+    </div>
+  </div>
+  <div className="grid grid-cols-3 gap-3">
+    {[
+      { name: 'payment_flow', svc: 'payment-service' },
+      { name: 'inventory_flow', svc: 'inventory-service' },
+      { name: 'shipping_flow', svc: 'shipping-service' },
+    ].map((c) => (
+      <div key={c.name} className="flex flex-col">
+        <div className="border bg-surface-75 px-2 py-2.5 text-center flex-1">
+          <div className="text-[11px] font-medium font-mono text-foreground">{c.name}</div>
+          <div className="text-[10px] text-foreground-muted mt-1">own journal · retries · tests</div>
+        </div>
+        <div className="flex justify-center">
+          <div className="flex items-center gap-1.5">
+            <div className="w-px h-4 bg-border-strong" />
+            <span className="text-[9px] font-mono text-foreground-muted">gRPC</span>
+          </div>
+        </div>
+        <div className="border bg-background px-2 py-1.5 text-center">
+          <div className="text-[10px] text-foreground-light">{c.svc}</div>
+        </div>
+      </div>
+    ))}
+  </div>
+  <p className="text-[10px] text-foreground-muted text-center mt-3 mb-0">
+    The services stay stateless — the transaction's state lives in the workflows that call them.
+  </p>
+</div>
+
+See [Child Workflows for Service Composition](/guides/use-cases/distributed-systems/child-workflows) for the composition mechanics, and [Multi-Service Deployment](/guides/use-cases/distributed-systems/multi-service-deployment) for running the children in parallel across services or regions.
+
+### Waiting on other systems
+
+Distributed transactions rarely stay inside your infrastructure. A step may need a webhook from a third party, a human approval, or a callback that arrives hours later — [event gates](/guides/use-cases/distributed-systems/event-gates) pause the workflow at zero resource cost until the answer arrives or a timeout decides for it.
+
+---
+
+### Patterns
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/use-cases/distributed-systems/child-workflows" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors h-full">
+      <h3 className="text-lg font-semibold mb-2">Child Workflows</h3>
+      <p className="text-sm text-foreground-light">
+        Break complex orchestrations into smaller, independently testable components mapped to microservice boundaries.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/use-cases/distributed-systems/saga-pattern" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors h-full">
+      <h3 className="text-lg font-semibold mb-2">Saga Pattern</h3>
+      <p className="text-sm text-foreground-light">
+        Track completed steps and run compensating actions in reverse order when a multi-service transaction fails.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/use-cases/distributed-systems/event-gates" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors h-full">
+      <h3 className="text-lg font-semibold mb-2">Event Gates</h3>
+      <p className="text-sm text-foreground-light">
+        Pause workflows until external input arrives, with timeouts that automatically escalate or reject.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/use-cases/distributed-systems/multi-service-deployment" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors h-full">
+      <h3 className="text-lg font-semibold mb-2">Multi-Service Deployment</h3>
+      <p className="text-sm text-foreground-light">
+        Coordinate operations across multiple services or regions in parallel, with rollback on failure.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/use-cases/distributed-systems/best-practices" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors h-full">
+      <h3 className="text-lg font-semibold mb-2">Best Practices & Performance</h3>
+      <p className="text-sm text-foreground-light">
+        Guidelines for idempotent compensation, shallow hierarchies, timeouts, and performance benchmarks.
+      </p>
+    </div>
+  </Link>
+</div>

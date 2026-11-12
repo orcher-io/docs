@@ -1,0 +1,537 @@
+---
+id: 'journaling-replay'
+title: 'Replay Safety Rules'
+description: 'Understand which operations are safe inside Orcher workflows, how to wrap non-deterministic code, and see practical journaling examples.'
+sidebar_label: 'Replay Safety'
+---
+
+To ensure correct replay behavior, workflows must be **deterministic** — the same inputs must always produce the same control flow. Any operation that could return a different result on replay must be wrapped in a journaled step.
+
+## Safe Operations (Deterministic)
+
+These operations are safe inside workflow code because they produce the same result on every replay. Pure computation, conditional logic on deterministic data, and journaled SDK calls (`execute_task`, `sleep`) are all replay-safe.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[task]
+pub async fn process_order(_ctx: TaskContext, total: f64) -> Result<String> {
+    // ...
+}
+
+#[task]
+pub async fn apply_vip_discount(_ctx: TaskContext, total: f64) -> Result<()> {
+    // ...
+}
+
+#[workflow]
+pub async fn safe_workflow(
+    ctx: WorkflowContext,
+    input: OrderInput,
+) -> Result<String> {
+    // SAFE: Pure computation (same result every time)
+    let total = input.quantity as f64 * input.price;
+
+    // SAFE: Task execution (journaled — result cached on replay)
+    let result: String = ctx
+        .execute_task(process_order, total)
+        .await?;
+
+    // SAFE: Sleep (journaled — timer recorded in journal)
+    ctx.sleep(Duration::from_secs(60)).await?;
+
+    // SAFE: Conditional on deterministic data
+    if total > 1000.0 {
+        ctx.execute_task(apply_vip_discount, total).await?;
+    }
+
+    Ok(result)
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, WorkflowContext, TaskContext, Duration, createTaskRefs } from '@orcher/sdk';
+
+@Tasks({ taskQueue: 'orders' })
+class OrderTasks {
+  @Task()
+  async processOrder(ctx: TaskContext, total: number): Promise<string> { /* ... */ }
+
+  @Task()
+  async applyVipDiscount(ctx: TaskContext, total: number): Promise<void> { /* ... */ }
+}
+
+const taskRefs = createTaskRefs(OrderTasks);
+
+@Workflow()
+class SafeWorkflow {
+  async run(ctx: WorkflowContext, input: OrderInput): Promise<string> {
+    // SAFE: Pure computation (same result every time)
+    const total = input.quantity * input.price;
+
+    // SAFE: Task execution (journaled — result cached on replay)
+    const result = await ctx.executeTask(taskRefs.processOrder, total);
+
+    // SAFE: Sleep (journaled — timer recorded in journal)
+    await ctx.sleep(Duration.fromSeconds(60));
+
+    // SAFE: Conditional on deterministic data
+    if (total > 1000) {
+      await ctx.executeTask(taskRefs.applyVipDiscount, total);
+    }
+
+    return result;
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext, TaskContext
+from datetime import timedelta
+
+
+@task(name="process_order")
+async def process_order(ctx: TaskContext, total: float) -> str:
+    ...
+
+@task(name="apply_vip_discount")
+async def apply_vip_discount(ctx: TaskContext, total: float) -> None:
+    ...
+
+
+@workflow(name="safe_workflow")
+async def safe_workflow(ctx: WorkflowContext, input: OrderInput) -> str:
+    # SAFE: Pure computation (same result every time)
+    total = input.quantity * input.price
+
+    # SAFE: Task execution (journaled — result cached on replay)
+    result = await ctx.execute_task(process_order, total=total)
+
+    # SAFE: Sleep (journaled — timer recorded in journal)
+    await ctx.sleep(timedelta(seconds=60))
+
+    # SAFE: Conditional on deterministic data
+    if total > 1000:
+        await ctx.execute_task(apply_vip_discount, total=total)
+
+    return result
+```
+
+</TabPanel>
+
+</Tabs>
+
+## Unsafe Operations (Non-Deterministic)
+
+These operations break replay because they can return different results each time. Direct API calls, reading the current time, generating random values, and accessing environment variables must always be wrapped inside a journaled task — never called directly in workflow code.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[task]
+pub async fn get_current_time(_ctx: TaskContext) -> Result<u64> {
+    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
+}
+
+#[task]
+pub async fn fetch_api_data(_ctx: TaskContext, url: String) -> Result<ApiResponse> {
+    let resp = reqwest::get(&url).await?.json().await?;
+    Ok(resp)
+}
+
+#[workflow]
+pub async fn example_workflow(ctx: WorkflowContext, input: OrderInput) -> Result<String> {
+    // UNSAFE: Current time differs on replay
+    // let now = SystemTime::now();
+
+    // UNSAFE: Random values differ on replay
+    // let random_id = rand::thread_rng().gen::<u32>();
+
+    // UNSAFE: Direct API call (not journaled — will re-execute on replay)
+    // let response = reqwest::get("https://api.example.com").await?;
+
+    // CORRECT: Wrap non-deterministic operations in tasks
+    let current_time: u64 = ctx.execute_task(get_current_time, ()).await?;
+    let api_data: ApiResponse = ctx.execute_task(fetch_api_data, url).await?;
+
+    // Or use ctx.execute() for inline journaled closures
+    let timestamp: u64 = ctx.execute("get_timestamp", || async {
+        Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
+    }).await?;
+
+    Ok("result".to_string())
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, WorkflowContext } from '@orcher/sdk';
+
+@Workflow()
+class ExampleWorkflow {
+  async run(ctx: WorkflowContext, input: OrderInput): Promise<string> {
+    // UNSAFE: Current time differs on replay
+    // const now = Date.now();
+
+    // UNSAFE: Random values differ on replay
+    // const randomId = Math.random();
+
+    // UNSAFE: Direct API call (not journaled — will re-execute)
+    // const response = await fetch('https://api.example.com');
+
+    // CORRECT: Wrap in ctx.execute() for inline journaled closures
+    const timestamp = await ctx.execute('getTimestamp', async () => {
+      return Date.now();
+    });
+
+    const apiData = await ctx.execute('fetchApi', async () => {
+      const resp = await fetch('https://api.example.com');
+      return resp.json();
+    });
+
+    return 'result';
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext, TaskContext
+
+
+@task
+async def get_current_time(ctx: TaskContext) -> float:
+    from time import time
+    return time()
+
+@task
+async def fetch_api_data(ctx: TaskContext, url: str) -> dict:
+    import aiohttp
+    async with aiohttp.ClientSession() as session:
+        resp = await session.get(url)
+        return await resp.json()
+
+
+@workflow
+async def example_workflow(ctx: WorkflowContext, input: OrderInput) -> str:
+    # UNSAFE: Current time differs on replay
+    # now = datetime.now()
+
+    # UNSAFE: Random values differ on replay
+    # random_id = random.random()
+
+    # UNSAFE: Direct API call (not journaled — will re-execute)
+    # async with aiohttp.ClientSession() as session:
+    #     resp = await session.get("https://api.example.com")
+
+    # CORRECT: Wrap non-deterministic operations in tasks
+    current_time = await ctx.execute_task(get_current_time)
+    api_data = await ctx.execute_task(fetch_api_data, input=url)
+
+    return "result"
+```
+
+</TabPanel>
+
+</Tabs>
+
+**Rule of Thumb:** Any operation that could produce different results on replay must be wrapped in `ctx.execute()` or `ctx.execute_task()`.
+
+---
+
+## Viewing the Journal
+
+Since the journal is stored in standard PostgreSQL tables, you can query it directly using SQL. This is useful for debugging workflow executions, auditing step results, and understanding the timeline of events.
+
+### SQL Query
+
+You can query the journal directly from PostgreSQL:
+
+```sql
+-- View all journal entries for a workflow execution
+SELECT
+  event_id,
+  event_type,
+  timestamp,
+  payload
+FROM workflow_execution_journal
+WHERE
+  workflow_id = 'order-processing-abc123'
+  AND execution_id = 'exec_xyz789'
+ORDER BY event_id ASC;
+
+-- View only step completions
+SELECT
+  event_id,
+  payload->>'step_name' AS step_name,
+  payload->'result' AS result,
+  timestamp
+FROM workflow_execution_journal
+WHERE
+  workflow_id = 'order-processing-abc123'
+  AND event_type = 'StepCompleted'
+ORDER BY event_id;
+
+-- View step-level idempotency cache
+SELECT
+  step_name,
+  step_type,
+  status,
+  result,
+  execution_attempt,
+  duration_ms,
+  created_at
+FROM execution_log
+WHERE workflow_id = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890'::uuid
+ORDER BY created_at;
+
+-- View workflow timeline with step durations
+SELECT
+  event_id,
+  event_type,
+  timestamp,
+  timestamp - LAG(timestamp) OVER (ORDER BY event_id) AS duration
+FROM workflow_execution_journal
+WHERE workflow_id = 'order-processing-abc123'
+ORDER BY event_id;
+```
+
+---
+
+## Practical Examples
+
+### Example 1: API Call with Automatic Idempotency
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+/// Task: Charge credit card via Stripe
+#[task(retry = 3)]
+pub async fn charge_card(
+    _ctx: TaskContext,
+    input: PaymentInput,
+) -> Result<ChargeResult> {
+    let charge = stripe::Charge::create(
+        &stripe_client,
+        ChargeParams {
+            amount: input.amount,
+            currency: "usd",
+            source: input.card_token,
+            idempotency_key: Some(format!("order_{}", input.order_id)),
+        }
+    ).await?;
+
+    Ok(ChargeResult {
+        charge_id: charge.id,
+        amount: charge.amount,
+    })
+}
+
+/// Workflow: Process payment
+#[workflow]
+pub async fn process_payment(
+    ctx: WorkflowContext,
+    input: PaymentInput,
+) -> Result<PaymentResult> {
+    // Once its result is journaled, replay never runs this again
+    // Even if workflow crashes and replays multiple times
+    let charge: ChargeResult = ctx
+        .execute_task(charge_card, input)
+        .await?;
+
+    Ok(PaymentResult {
+        charge_id: charge.charge_id,
+        success: true,
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, WorkflowContext, TaskContext, createTaskRefs } from '@orcher/sdk';
+import Stripe from 'stripe';
+
+@Tasks({ taskQueue: 'payments' })
+class PaymentTasks {
+  @Task({ retryPolicy: { maxAttempts: 3 } })
+  async chargeCard(ctx: TaskContext, input: PaymentInput): Promise<ChargeResult> {
+    const stripe = new Stripe(process.env.STRIPE_KEY!);
+    const charge = await stripe.charges.create({
+      amount: input.amount,
+      currency: 'usd',
+      source: input.cardToken,
+    }, {
+      idempotencyKey: `order_${input.orderId}`,
+    });
+
+    return { chargeId: charge.id, amount: charge.amount };
+  }
+}
+
+const taskRefs = createTaskRefs(PaymentTasks);
+
+@Workflow()
+class ProcessPayment {
+  async run(ctx: WorkflowContext, input: PaymentInput): Promise<PaymentResult> {
+    // Once its result is journaled, replay never runs this again
+    // Even if workflow crashes and replays multiple times
+    const charge = await ctx.executeTask(taskRefs.chargeCard, input);
+
+    return { chargeId: charge.chargeId, success: true };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+import stripe
+
+from orcher import workflow, task, WorkflowContext, TaskContext
+from dataclasses import dataclass
+
+
+@dataclass
+class PaymentInput:
+    order_id: str
+    amount: int
+    card_token: str
+
+
+@dataclass
+class ChargeResult:
+    charge_id: str
+    amount: int
+
+
+@dataclass
+class PaymentResult:
+    charge_id: str
+    success: bool
+
+
+@task(retry=3)
+async def charge_card(ctx: TaskContext, input: PaymentInput) -> ChargeResult:
+    charge = stripe.Charge.create(
+        amount=input.amount,
+        currency="usd",
+        source=input.card_token,
+        idempotency_key=f"order_{input.order_id}",
+    )
+    return ChargeResult(charge_id=charge.id, amount=charge.amount)
+
+
+@workflow
+async def process_payment(ctx: WorkflowContext, input: PaymentInput) -> PaymentResult:
+    # Once its result is journaled, replay never runs this again
+    # Even if workflow crashes and replays multiple times
+    charge = await ctx.execute_task(charge_card, input=input)
+
+    return PaymentResult(charge_id=charge.charge_id, success=True)
+```
+
+</TabPanel>
+
+</Tabs>
+
+### Example 2: Multi-Step Saga with Replay
+
+<div className="not-prose my-8 max-w-2xl mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-[10px] font-mono uppercase tracking-wide text-foreground-muted">Scenario · e-commerce order processing</div>
+  <div className="p-4">
+    <div className="text-[10px] font-mono uppercase tracking-wide text-foreground-muted mb-2">First execution</div>
+    <div className="space-y-1 text-[11px]">
+      <div className="text-foreground-muted"><span className="font-mono text-foreground">1 · Validate Order</span> → journal <span className="font-mono">{'{ valid: true }'}</span></div>
+      <div className="text-foreground-muted"><span className="font-mono text-foreground">2 · Charge Payment</span> → journal <span className="font-mono">{'{ charge_id: "ch_123" }'}</span></div>
+      <div className="text-foreground-muted"><span className="font-mono text-foreground">3 · Reserve Inventory</span> → journal <span className="font-mono">{'{ reserved: true }'}</span></div>
+    </div>
+  </div>
+  <div className="bg-red-500/5 border-y px-4 py-2 text-[11px] font-mono text-red-400">💥 Crash</div>
+  <div className="p-4">
+    <div className="text-[10px] font-mono uppercase tracking-wide text-foreground-muted mb-2">Replay after crash</div>
+    <div className="space-y-1 text-[11px]">
+      <div className="text-foreground-muted"><span className="font-mono text-foreground">1 · Validate Order</span> — cache HIT, skip</div>
+      <div className="text-foreground-muted"><span className="font-mono text-foreground">2 · Charge Payment</span> — cache HIT, skip</div>
+      <div className="text-foreground-muted"><span className="font-mono text-foreground">3 · Reserve Inventory</span> — cache HIT, skip</div>
+      <div className="text-foreground"><span className="font-mono">4 · Arrange Shipment</span> — cache MISS, execute (new)</div>
+      <div className="text-foreground"><span className="font-mono">5 · Send Confirmation</span> — cache MISS, execute (new)</div>
+    </div>
+  </div>
+  <div className="bg-surface-75 px-4 py-3 border-t text-[11px] text-foreground-muted">Payment charged <span className="text-foreground">once</span> · inventory reserved <span className="text-foreground">once</span> · workflow completes successfully</div>
+</div>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/journaling/best-practices" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Best Practices and Performance</h3>
+      <p className="text-sm text-foreground-light">
+        Optimize journal performance, monitor storage growth, and troubleshoot common issues
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/journaling/how-it-works" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">How It Works</h3>
+      <p className="text-sm text-foreground-light">
+        Understand the storage layers, journal entry structure, and entry types
+      </p>
+    </div>
+  </Link>
+</div>

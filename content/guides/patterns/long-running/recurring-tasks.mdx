@@ -1,0 +1,372 @@
+---
+id: 'long-running-recurring-tasks'
+title: 'Recurring Tasks'
+sidebar_label: 'Recurring Tasks'
+---
+
+## Recurring Tasks
+
+Recurring task workflows execute operations on a schedule — daily reports, weekly cleanups, hourly health checks — while maintaining state across iterations. Unlike external cron schedulers, the workflow itself owns the schedule, making it easy to add conditional logic, skip iterations, or gracefully shut down.
+
+<div className="not-prose my-8 max-w-xs mx-auto">
+  <div className="flex flex-col items-center">
+    <div className="border bg-surface-75 px-5 py-2 text-center w-full">
+      <div className="text-xs font-medium text-foreground">Start Loop</div>
+      <div className="text-[10px] text-foreground-muted">iteration = 0</div>
+    </div>
+    <div className="w-px h-3 bg-border-strong" />
+    {/* Loop body */}
+    <div className="border border-dashed w-full p-3 relative">
+      <div className="text-[10px] font-mono uppercase tracking-wider text-foreground-muted mb-2">loop</div>
+      <div className="flex flex-col items-center gap-0">
+        <div className="border bg-background px-4 py-2 text-center w-full">
+          <div className="text-[10px] font-medium text-foreground">Execute Task</div>
+          <div className="text-[10px] text-foreground-muted">e.g. generate_report()</div>
+        </div>
+        <div className="w-px h-2 bg-border-strong" />
+        <div className="border bg-surface-100 px-4 py-1.5 text-center w-full">
+          <div className="text-[10px] font-medium text-foreground">Should continue?</div>
+        </div>
+        <div className="w-px h-2 bg-border-strong" />
+        <div className="border border-dashed bg-surface-75 px-4 py-1.5 text-center w-full">
+          <div className="text-[10px] font-mono text-foreground-muted italic">sleep(interval)</div>
+        </div>
+      </div>
+      {/* Loop arrow on the right */}
+      <div className="absolute -right-6 top-1/2 -translate-y-1/2 text-foreground-muted text-xs">↻</div>
+    </div>
+    <div className="w-px h-3 bg-border-strong" />
+    <div className="border bg-surface-75 px-5 py-2 text-center w-full">
+      <div className="text-xs font-medium text-foreground">Complete</div>
+      <div className="text-[10px] text-foreground-muted">max iterations or cancelled</div>
+    </div>
+  </div>
+</div>
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use std::time::Duration;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RecurringTaskConfig {
+    task_name: String,
+    interval_hours: u64,
+    max_iterations: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RecurringTaskResult {
+    task_name: String,
+    iterations_completed: u32,
+    total_hours: u64,
+}
+
+#[task]
+async fn execute_recurring_task(task_name: String) -> Result<()> {
+    // Execute the recurring task
+    Ok(())
+}
+
+#[task]
+async fn generate_report(report_type: String) -> Result<()> { Ok(()) }
+
+#[task]
+async fn email_report(report_type: String) -> Result<()> { Ok(()) }
+
+#[task]
+async fn check_report_active(report_type: String) -> Result<bool> { Ok(true) }
+
+// Recurring task workflow
+#[workflow(name = "recurring_task", version = "1.0.0")]
+pub async fn recurring_task(
+    ctx: WorkflowContext,
+    config: RecurringTaskConfig,
+) -> Result<RecurringTaskResult> {
+    println!("Starting recurring task: {} every {} hours",
+        config.task_name, config.interval_hours);
+
+    let interval = Duration::from_secs(config.interval_hours * 3600);
+    let mut iteration = 0;
+
+    loop {
+        // Execute the task
+        println!("Executing {} (iteration {})", config.task_name, iteration + 1);
+        ctx.execute_task(execute_recurring_task, config.task_name.clone()).await?;
+
+        iteration += 1;
+
+        // Check if we've reached max iterations
+        if iteration >= config.max_iterations {
+            println!("Reached max iterations ({}) - stopping", config.max_iterations);
+            break;
+        }
+
+        // Wait until next execution
+        println!("Waiting {} hours until next execution", config.interval_hours);
+        ctx.sleep(interval).await?;
+    }
+
+    Ok(RecurringTaskResult {
+        task_name: config.task_name,
+        iterations_completed: iteration,
+        total_hours: config.interval_hours * iteration as u64,
+    })
+}
+
+// Daily report generation
+#[workflow(name = "daily_report", version = "1.0.0")]
+pub async fn daily_report(
+    ctx: WorkflowContext,
+    report_type: String,
+) -> Result<()> {
+    loop {
+        // Generate report
+        println!("Generating daily {} report", report_type);
+        ctx.execute_task(generate_report, report_type.clone()).await?;
+        ctx.execute_task(email_report, report_type.clone()).await?;
+
+        // Wait 24 hours until next report
+        ctx.sleep(Duration::from_secs(86400)).await?;
+
+        // Check if report should continue
+        let should_continue: bool = ctx
+            .execute_task(check_report_active, report_type.clone())
+            .await?;
+
+        if !should_continue {
+            println!("Report {} has been disabled - stopping", report_type);
+            break;
+        }
+    }
+
+    Ok(())
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, WorkflowContext, createTaskRefs, Duration } from '@orcher/sdk';
+
+interface RecurringTaskConfig {
+  taskName: string;
+  intervalHours: number;
+  maxIterations: number;
+}
+
+interface RecurringTaskResult {
+  taskName: string;
+  iterationsCompleted: number;
+  totalHours: number;
+}
+
+@Tasks()
+class RecurringTasks {
+  @Task()
+  async executeRecurringTask(taskName: string): Promise<void> {
+    // Execute the recurring task
+  }
+
+  @Task()
+  async generateReport(reportType: string): Promise<void> {}
+
+  @Task()
+  async emailReport(reportType: string): Promise<void> {}
+
+  @Task()
+  async checkReportActive(reportType: string): Promise<boolean> { return true; }
+}
+
+const tasks = createTaskRefs(RecurringTasks);
+
+// Recurring task workflow
+@Workflow({ name: 'recurring_task', version: '1.0.0' })
+class RecurringTaskWorkflow {
+  async run(ctx: WorkflowContext, config: RecurringTaskConfig): Promise<RecurringTaskResult> {
+    console.log(
+      `Starting recurring task: ${config.taskName} every ${config.intervalHours} hours`
+    );
+
+    const interval = config.intervalHours * 3600000; // milliseconds
+    let iteration = 0;
+
+    while (true) {
+      // Execute the task
+      console.log(`Executing ${config.taskName} (iteration ${iteration + 1})`);
+      await ctx.executeTask(tasks.executeRecurringTask, config.taskName);
+
+      iteration++;
+
+      // Check if we've reached max iterations
+      if (iteration >= config.maxIterations) {
+        console.log(`Reached max iterations (${config.maxIterations}) - stopping`);
+        break;
+      }
+
+      // Wait until next execution
+      console.log(`Waiting ${config.intervalHours} hours until next execution`);
+      await ctx.sleep(interval);
+    }
+
+    return {
+      taskName: config.taskName,
+      iterationsCompleted: iteration,
+      totalHours: config.intervalHours * iteration,
+    };
+  }
+}
+
+// Daily report generation
+@Workflow({ name: 'daily_report', version: '1.0.0' })
+class DailyReportWorkflow {
+  async run(ctx: WorkflowContext, reportType: string): Promise<void> {
+    while (true) {
+      // Generate report
+      console.log(`Generating daily ${reportType} report`);
+      await ctx.executeTask(tasks.generateReport, reportType);
+      await ctx.executeTask(tasks.emailReport, reportType);
+
+      // Wait 24 hours until next report
+      await ctx.sleep(Duration.fromDays(1));
+
+      // Check if report should continue
+      const shouldContinue = await ctx.executeTask<boolean>(
+        tasks.checkReportActive,
+        reportType
+      );
+
+      if (!shouldContinue) {
+        console.log(`Report ${reportType} has been disabled - stopping`);
+        break;
+      }
+    }
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from datetime import timedelta
+
+from orcher import workflow, task, WorkflowContext
+from dataclasses import dataclass
+
+@dataclass
+class RecurringTaskConfig:
+    task_name: str
+    interval_hours: int
+    max_iterations: int
+
+@dataclass
+class RecurringTaskResult:
+    task_name: str
+    iterations_completed: int
+    total_hours: int
+
+@task
+async def execute_recurring_task(task_name: str) -> None:
+    """Execute the recurring task."""
+    pass
+
+@task
+async def generate_report(report_type: str) -> None: pass
+
+@task
+async def email_report(report_type: str) -> None: pass
+
+@task
+async def check_report_active(report_type: str) -> bool: return True
+
+# Recurring task workflow
+@workflow(name="recurring_task", version="1.0.0")
+async def recurring_task(ctx: WorkflowContext, config: RecurringTaskConfig) -> RecurringTaskResult:
+    print(f"Starting recurring task: {config.task_name} every {config.interval_hours} hours")
+
+    interval = config.interval_hours * 3600  # seconds
+    iteration = 0
+
+    while True:
+        # Execute the task
+        print(f"Executing {config.task_name} (iteration {iteration + 1})")
+        await ctx.execute_task(execute_recurring_task, config.task_name)
+
+        iteration += 1
+
+        # Check if we've reached max iterations
+        if iteration >= config.max_iterations:
+            print(f"Reached max iterations ({config.max_iterations}) - stopping")
+            break
+
+        # Wait until next execution
+        print(f"Waiting {config.interval_hours} hours until next execution")
+        await ctx.sleep(interval)
+
+    return RecurringTaskResult(
+        task_name=config.task_name,
+        iterations_completed=iteration,
+        total_hours=config.interval_hours * iteration,
+    )
+
+# Daily report generation
+@workflow(name="daily_report", version="1.0.0")
+async def daily_report(ctx: WorkflowContext, report_type: str) -> None:
+    while True:
+        # Generate report
+        print(f"Generating daily {report_type} report")
+        await ctx.execute_task(generate_report, report_type)
+        await ctx.execute_task(email_report, report_type)
+
+        # Wait 24 hours until next report
+        await ctx.sleep(timedelta(days=1))
+
+        # Check if report should continue
+        should_continue = await ctx.execute_task(check_report_active, report_type)
+
+        if not should_continue:
+            print(f"Report {report_type} has been disabled - stopping")
+            break
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/patterns/long-running/order-fulfillment" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Order Fulfillment Process</h3>
+      <p className="text-sm text-scale-1100">
+        Multi-day order processing with stage tracking.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/long-running/best-practices" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Best Practices & Performance</h3>
+      <p className="text-sm text-scale-1100">
+        Guidelines for production long-running workflows.
+      </p>
+    </div>
+  </Link>
+</div>

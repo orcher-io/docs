@@ -1,0 +1,460 @@
+---
+id: 'error-retry'
+title: 'Retry & Compensation'
+sidebar_label: 'Retry & Compensation'
+---
+
+## Automatic Retry
+
+When a task fails due to a transient error — such as a network timeout, a temporary service outage, or a rate limit — Orcher can automatically retry it according to a configurable retry policy. You specify the maximum number of attempts, the delay bounds (initial and max interval), and a backoff coefficient that grows the delay exponentially (set it to `1.0` for fixed-interval retries). Inside the task, you can use `ctx.attempt()` to check which attempt you're on and `ctx.is_retry()` / `ctx.isRetry()` to detect whether this is a retry execution.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+// Simple retry with exponential backoff
+#[task(
+  name = "fetch_data",
+  retry = 5  // Retry up to 5 times
+)]
+pub async fn fetch_data(
+  ctx: TaskContext,
+  url: String,
+) -> Result<ApiResponse> {
+  if ctx.is_retry() {
+    tracing::warn!("Retrying fetch (attempt {})", ctx.attempt());
+  }
+
+  let response = reqwest::get(&url)
+    .await
+    .context("Failed to fetch data")?;
+
+  if response.status().is_server_error() {
+    // 5xx errors will trigger retry
+    return Err(anyhow::anyhow!("Server error: {}", response.status()));
+  }
+
+  let data = response.json().await?;
+  Ok(data)
+}
+
+// Advanced retry policy
+#[task(
+  name = "critical_operation",
+  retry_policy(
+    max_attempts = 5,
+    initial_interval = 1,       // 1 second
+    max_interval = 60,          // Cap at 60 seconds
+    backoff_coefficient = 2.0   // Double each time (1.0 = fixed intervals)
+  )
+)]
+pub async fn critical_operation(
+  _ctx: TaskContext,
+  input: OperationInput,
+) -> Result<OperationResult> {
+  // Retry delays: 1s, 2s, 4s, 8s, 16s
+  external_service::call(input).await
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, TaskContext, createTaskRefs } from '@orcher/sdk';
+
+@Tasks()
+class DataTasks {
+  // Simple retry with exponential backoff
+  @Task({
+    name: 'fetchData',
+    retryPolicy: {
+      maxAttempts: 5,
+    },
+  })
+  async fetchData(ctx: TaskContext, url: string): Promise<ApiResponse> {
+    if (ctx.isRetry()) {
+      console.warn(`Retrying fetch (attempt ${ctx.attempt()})`);
+    }
+
+    const response = await fetch(url);
+
+    if (response.status >= 500) {
+      // 5xx errors will trigger retry
+      throw new Error(`Server error: ${response.status}`);
+    }
+
+    return response.json();
+  }
+
+  // Advanced retry policy
+  @Task({
+    name: 'criticalOperation',
+    retryPolicy: {
+      maxAttempts: 5,
+      initialInterval: 1000,      // 1 second
+      maxInterval: 60000,         // 60 seconds
+      backoffCoefficient: 2.0,    // Double each time
+    },
+  })
+  async criticalOperation(
+    ctx: TaskContext,
+    input: OperationInput,
+  ): Promise<OperationResult> {
+    // Retry delays: 1s, 2s, 4s, 8s, 16s
+    return await externalService.call(input);
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import task, TaskContext
+
+# Simple retry with exponential backoff
+@task(
+  name="fetch_data",
+  retry_policy={"max_attempts": 5},
+)
+async def fetch_data(ctx: TaskContext, url: str) -> dict:
+  if ctx.is_retry:
+    print(f"Retrying fetch (attempt {ctx.attempt})")
+
+  import httpx
+  async with httpx.AsyncClient() as client:
+    response = await client.get(url)
+
+  if response.status_code >= 500:
+    # 5xx errors will trigger retry
+    raise Exception(f"Server error: {response.status_code}")
+
+  return response.json()
+
+
+# Advanced retry policy
+@task(
+  name="critical_operation",
+  retry_policy={
+    "max_attempts": 5,
+    "initial_interval_seconds": 1,   # 1 second
+    "max_interval_seconds": 60,      # Cap at 60 seconds
+    "backoff_coefficient": 2.0,      # Double each time (1.0 = fixed intervals)
+  },
+)
+async def critical_operation(ctx: TaskContext, input: dict) -> dict:
+  # Retry delays: 1s, 2s, 4s, 8s, 16s
+  return await external_service_call(input)
+```
+
+</TabPanel>
+
+</Tabs>
+
+### Retry Backoff
+
+Orcher computes the delay between retry attempts with exponential backoff: each delay is the previous one multiplied by `backoff_coefficient`, starting from `initial_interval` and capped at `max_interval`. A coefficient of `2.0` doubles the delay each time; a coefficient of `1.0` keeps the interval fixed. Exponential backoff (coefficient > 1.0) is recommended for most external service calls, while a fixed interval (coefficient = 1.0) works well for predictable transient failures.
+
+<div className="not-prose my-8 max-w-md mx-auto">
+  <div className="grid grid-cols-2 gap-px bg-border-default border">
+    <div className="bg-surface-75 p-3">
+      <div className="text-[10px] font-mono uppercase tracking-wide text-foreground mb-1">Exponential</div>
+      <div className="text-[10px] text-foreground-muted mb-2">backoff_coefficient = 2.0 · recommended</div>
+      <div className="space-y-1 text-[11px] font-mono text-foreground-muted">
+        <div>1 · immediate</div>
+        <div>2 · 1s</div>
+        <div>3 · 2s</div>
+        <div>4 · 4s</div>
+        <div>5 · 8s</div>
+        <div>6 · 16s <span className="not-italic">(capped)</span></div>
+      </div>
+    </div>
+    <div className="bg-background p-3">
+      <div className="text-[10px] font-mono uppercase tracking-wide text-foreground mb-1">Fixed</div>
+      <div className="text-[10px] text-foreground-muted mb-2">backoff_coefficient = 1.0 · constant gap</div>
+      <div className="space-y-1 text-[11px] font-mono text-foreground-muted">
+        <div>1 · immediate</div>
+        <div>2 · initial_interval</div>
+        <div>3 · initial_interval</div>
+        <div>4 · initial_interval</div>
+        <div>5 · initial_interval</div>
+      </div>
+    </div>
+  </div>
+  <p className="text-xs text-foreground-muted text-center mt-2">Delay before each attempt. Exponential multiplies by <span className="font-mono">backoff_coefficient</span> up to <span className="font-mono">max_interval</span>; a coefficient of <span className="font-mono">1.0</span> holds a constant gap. There is no separate linear mode.</p>
+</div>
+
+---
+
+## Compensation (Saga Pattern)
+
+The Saga pattern provides a way to maintain data consistency across multiple steps without distributed transactions. Each forward step is paired with a compensation action that undoes its effect. When a later step fails, you run the compensations for the completed steps in reverse order — your own logic, made durable by Orcher. Done consistently, this keeps the system from being stuck partially committed: either every step succeeds, or the completed ones are undone.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[workflow(name = "booking_saga", version = "1.0.0")]
+pub async fn booking_saga(
+  ctx: WorkflowContext,
+  input: BookingInput,
+) -> Result<BookingResult> {
+  // Step 1: Book hotel
+  let hotel_booking = match ctx
+    .execute_task(book_hotel, input.hotel.clone())
+    .await
+  {
+    Ok(booking) => booking,
+    Err(e) => {
+      // First step failed, no compensation needed
+      return Err(anyhow::anyhow!("Hotel booking failed: {}", e));
+    }
+  };
+
+  // Step 2: Book flight
+  let flight_booking = match ctx
+    .execute_task(book_flight, input.flight.clone())
+    .await
+  {
+    Ok(booking) => booking,
+    Err(e) => {
+      // Compensate: Cancel hotel
+      tracing::error!("Flight booking failed, canceling hotel");
+      let _ = ctx
+        .execute_task(cancel_hotel, hotel_booking.id)
+        .await;
+
+      return Err(anyhow::anyhow!("Flight booking failed: {}", e));
+    }
+  };
+
+  // Step 3: Book car rental
+  let car_booking = match ctx
+    .execute_task(book_car, input.car.clone())
+    .await
+  {
+    Ok(booking) => booking,
+    Err(e) => {
+      // Compensate: Cancel flight and hotel (reverse order)
+      tracing::error!("Car booking failed, canceling flight and hotel");
+
+      let _ = ctx
+        .execute_task(cancel_flight, flight_booking.id)
+        .await;
+
+      let _ = ctx
+        .execute_task(cancel_hotel, hotel_booking.id)
+        .await;
+
+      return Err(anyhow::anyhow!("Car booking failed: {}", e));
+    }
+  };
+
+  Ok(BookingResult {
+    hotel: hotel_booking,
+    flight: flight_booking,
+    car: car_booking,
+    status: "completed".to_string(),
+  })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, WorkflowContext, createTaskRefs } from '@orcher/sdk';
+
+@Tasks()
+class BookingTasks {
+  @Task({ name: 'bookHotel' })
+  async bookHotel(ctx: TaskContext, input: HotelInput): Promise<HotelBooking> { /* ... */ }
+
+  @Task({ name: 'bookFlight' })
+  async bookFlight(ctx: TaskContext, input: FlightInput): Promise<FlightBooking> { /* ... */ }
+
+  @Task({ name: 'bookCar' })
+  async bookCar(ctx: TaskContext, input: CarInput): Promise<CarBooking> { /* ... */ }
+
+  @Task({ name: 'cancelHotel' })
+  async cancelHotel(ctx: TaskContext, bookingId: string): Promise<void> { /* ... */ }
+
+  @Task({ name: 'cancelFlight' })
+  async cancelFlight(ctx: TaskContext, bookingId: string): Promise<void> { /* ... */ }
+}
+
+const tasks = createTaskRefs(BookingTasks);
+
+@Workflow()
+class BookingSaga {
+  async execute(ctx: WorkflowContext, input: BookingInput): Promise<BookingResult> {
+    // Step 1: Book hotel
+    let hotelBooking: HotelBooking;
+    try {
+      hotelBooking = await ctx.executeTask(tasks.bookHotel, input.hotel);
+    } catch (e) {
+      // First step failed, no compensation needed
+      throw new Error(`Hotel booking failed: ${e}`);
+    }
+
+    // Step 2: Book flight
+    let flightBooking: FlightBooking;
+    try {
+      flightBooking = await ctx.executeTask(tasks.bookFlight, input.flight);
+    } catch (e) {
+      // Compensate: Cancel hotel
+      console.error('Flight booking failed, canceling hotel');
+      await ctx.executeTask(tasks.cancelHotel, hotelBooking.id);
+
+      throw new Error(`Flight booking failed: ${e}`);
+    }
+
+    // Step 3: Book car rental
+    let carBooking: CarBooking;
+    try {
+      carBooking = await ctx.executeTask(tasks.bookCar, input.car);
+    } catch (e) {
+      // Compensate: Cancel flight and hotel (reverse order)
+      console.error('Car booking failed, canceling flight and hotel');
+
+      await ctx.executeTask(tasks.cancelFlight, flightBooking.id);
+      await ctx.executeTask(tasks.cancelHotel, hotelBooking.id);
+
+      throw new Error(`Car booking failed: ${e}`);
+    }
+
+    return {
+      hotel: hotelBooking,
+      flight: flightBooking,
+      car: carBooking,
+      status: 'completed',
+    };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, WorkflowContext
+
+@workflow(name="booking_saga", version="1.0.0")
+async def booking_saga(ctx: WorkflowContext, input: dict) -> dict:
+  # Step 1: Book hotel
+  try:
+    hotel_booking = await ctx.execute_task(book_hotel, input["hotel"])
+  except Exception as e:
+    # First step failed, no compensation needed
+    raise Exception(f"Hotel booking failed: {e}")
+
+  # Step 2: Book flight
+  try:
+    flight_booking = await ctx.execute_task(book_flight, input["flight"])
+  except Exception as e:
+    # Compensate: Cancel hotel
+    print("Flight booking failed, canceling hotel")
+    await ctx.execute_task(cancel_hotel, hotel_booking["id"])
+
+    raise Exception(f"Flight booking failed: {e}")
+
+  # Step 3: Book car rental
+  try:
+    car_booking = await ctx.execute_task(book_car, input["car"])
+  except Exception as e:
+    # Compensate: Cancel flight and hotel (reverse order)
+    print("Car booking failed, canceling flight and hotel")
+
+    await ctx.execute_task(cancel_flight, flight_booking["id"])
+    await ctx.execute_task(cancel_hotel, hotel_booking["id"])
+
+    raise Exception(f"Car booking failed: {e}")
+
+  return {
+    "hotel": hotel_booking,
+    "flight": flight_booking,
+    "car": car_booking,
+    "status": "completed",
+  }
+```
+
+</TabPanel>
+
+</Tabs>
+
+### Saga Visualization
+
+The following diagrams illustrate how a saga executes forward steps and triggers compensations on failure. When a step fails, all previously completed steps are compensated in reverse order to maintain data consistency.
+
+<div className="not-prose my-8 max-w-2xl mx-auto grid grid-cols-1 sm:grid-cols-2 gap-4">
+  <div className="border">
+    <div className="bg-surface-75 px-3 py-2 border-b text-[10px] font-mono uppercase tracking-wide text-foreground-muted">Successful saga</div>
+    <div className="p-3 space-y-1.5 text-[11px]">
+      <div className="text-foreground-muted"><span className="text-foreground">Book Hotel</span> → success</div>
+      <div className="text-foreground-muted"><span className="text-foreground">Book Flight</span> → success</div>
+      <div className="text-foreground-muted"><span className="text-foreground">Book Car</span> → success</div>
+    </div>
+    <div className="bg-surface-75 px-3 py-2 border-t text-[11px] text-foreground-muted">All bookings confirmed</div>
+  </div>
+  <div className="border">
+    <div className="bg-surface-75 px-3 py-2 border-b text-[10px] font-mono uppercase tracking-wide text-foreground-muted">Failed saga · with compensation</div>
+    <div className="p-3 space-y-1.5 text-[11px]">
+      <div className="text-foreground-muted"><span className="text-foreground">Book Hotel</span> → success</div>
+      <div className="text-foreground-muted"><span className="text-foreground">Book Flight</span> → success</div>
+      <div className="text-red-400"><span className="font-medium">Book Car</span> → failure</div>
+      <div className="pt-1 text-[10px] font-mono uppercase tracking-wide text-red-400">compensation · reverse order</div>
+      <div className="text-red-400/90">Cancel Flight → done</div>
+      <div className="text-red-400/90">Cancel Hotel → done</div>
+    </div>
+    <div className="bg-red-500/5 px-3 py-2 border-t text-[11px] text-red-400">All bookings rolled back</div>
+  </div>
+</div>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/error-handling/resilience-patterns" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Resilience Patterns</h3>
+      <p className="text-sm text-foreground-light">
+        Circuit breakers, graceful degradation, and timeout handling
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/error-handling/dead-letter-queue" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Dead Letter Queue</h3>
+      <p className="text-sm text-foreground-light">
+        Route persistent failures to a DLQ for manual inspection and replay
+      </p>
+    </div>
+  </Link>
+</div>

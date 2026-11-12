@@ -1,0 +1,171 @@
+---
+id: python-client
+title: Client API
+description: Start workflows, wait for results, send events, query state and list executions with the Python SDK client
+sidebar_label: 'Client'
+---
+
+The `Client` talks to the engine over gRPC. Use it from any process (a web handler, a script, a test) to start workflows, wait for their results, send them events, query them, and list or search executions.
+
+---
+
+## Connecting
+
+<$CodeSample path="python/client/connect.py" region="connect" />
+
+`async with` connects and closes the connection for you. Without it, call `connect()` before the first request and `close()` when done:
+
+<$CodeSample path="python/client/connect.py" region="manual" />
+
+### ClientConfig
+
+| Option | Default | Description |
+|---|---|---|
+| `server_url` | required | The engine's gRPC address; must start with `http://`, `https://` or `grpc://` |
+| `namespace` | `"default"` | The namespace the client works in |
+| `api_key` | `ORCHER_API_KEY` | Sent as `authorization: Bearer <key>` on every request; `None` or blank sends none; never shown by `repr` |
+| `identity` | `None` | A name for this client |
+| `tls_ca_cert_path` | `None` | CA certificate (PEM) to verify the engine against, instead of the system trust store |
+| `tls_client_cert_path` | `None` | Client certificate (PEM), for mutual TLS |
+| `tls_client_key_path` | `None` | Client private key (PEM), for mutual TLS |
+| `connection_timeout` | `timedelta(seconds=10)` | How long connecting may take |
+| `request_timeout` | `timedelta(seconds=30)` | Default timeout for requests |
+
+Like the worker builder, `ClientConfig` reads `ORCHER_API_KEY` when `api_key` isn't given.
+
+### API keys and TLS
+
+An engine that requires authentication rejects requests without a valid API key. `api_key` defaults to the `ORCHER_API_KEY` environment variable, so a client whose environment sets it needs no code. Pass a key to use another one, or `None` to send none:
+
+<$CodeSample path="python/client/connect.py" region="api-key" />
+
+TLS follows the URL scheme. An `https://` URL connects over TLS and verifies the engine against the system trust store, with no other setting. An `http://` URL connects in plaintext, even with certificates set, so use `https://` whenever the engine expects TLS. The `tls_*` paths add certificates: give a CA certificate to trust a private or self-signed authority, and a client certificate and key for mutual TLS:
+
+<$CodeSample path="python/client/connect.py" region="tls" />
+
+The client certificate and key go together: `ClientConfig` raises `ConfigurationError` if only one is given. The [worker](/guides/sdk/python/worker#authentication-and-tls) takes the same settings.
+
+---
+
+## Starting workflows
+
+<$CodeSample path="python/client/start.py" region="start" />
+
+| Option | Default | Description |
+|---|---|---|
+| `workflow_type` | required | The `name` given to `@workflow` |
+| `workflow_id` | a random UUID | Your id for the run; see [duplicate starts](#duplicate-starts) |
+| `task_queue` | `"default"` | The queue whose workers run the workflow |
+| `args` | `()` | The input; see below |
+| `retry_policy` | none | A `RetryPolicy` (or dict) for the workflow itself |
+| `execution_timeout` | none | Bounds the whole workflow, retries included |
+| `run_timeout`, `task_timeout` | none | Accepted, but the current engine ignores them |
+| `cron_schedule` | none | Create a schedule instead of a run; not available on the current engine, see [cron schedules](#cron-schedules) |
+| `id_reuse_policy` | engine default | What to do when `workflow_id` was used before |
+
+`args` follows the rules in [Inputs and results](/guides/sdk/python/workflows#inputs-and-results): pass a one-element tuple holding a dict to call the workflow with keyword arguments, or holding a single value to pass one positional argument. Several values arrive as a single list.
+
+### Execution deadline
+
+`execution_timeout` bounds the whole workflow. When it passes, the workflow is marked timed out and stops; without one, a workflow runs until it finishes, however long that takes. A deadline is a safety net for work that should never run unbounded, not a substitute for task timeouts: a bounded task tells you which step hung.
+
+### Cron schedules
+
+A start with `cron_schedule` asks the engine to create a schedule instead of starting a run. The current engine image does not have schedules turned on, so it rejects such a start with "Schedule support not configured on this server instance". Until it does, start runs on a schedule from your own scheduler, or have a workflow loop on `ctx.sleep()` and [restart with fresh history](/guides/sdk/python/workflows#restart-with-fresh-history) between rounds.
+
+### Duplicate starts
+
+A workflow id names at most one open run. Starting a workflow whose id belongs to a run that's still open raises `WorkflowError` with the code `ErrorCode.WORKFLOW_ALREADY_EXISTS`, and its `run_id` names the run in the way. That makes the id an idempotency key for starts: a retried request starts nothing new, and can attach to the existing run instead:
+
+<$CodeSample path="python/client/start.py" region="reuse" />
+
+`id_reuse_policy` decides what happens once the previous run with that id has closed:
+
+| `WorkflowIdReusePolicy` | A new run may start when |
+|---|---|
+| `ALLOW_DUPLICATE` | The previous run has closed, however it ended |
+| `ALLOW_DUPLICATE_FAILED_ONLY` | The previous run failed, was canceled or terminated, or timed out |
+| `REJECT_DUPLICATE` | Never: the id can be used once |
+| `TERMINATE_IF_RUNNING` | Always: an open run with the id is terminated first |
+
+Leave it unset and the engine allows a new run once the previous one has closed.
+
+---
+
+## Workflow handles
+
+`start_workflow` returns a `WorkflowHandle`; `get_workflow(workflow_id, run_id=None)` returns one for an existing workflow (its latest run unless you give a `run_id`):
+
+<$CodeSample path="python/client/handle.py" region="handle" />
+
+`query` and `update` arguments follow the same rules as workflow input: a dict reaches the handler as keyword arguments, any other single value as one positional argument. See [State, queries and updates](/guides/sdk/python/workflows#state-queries-and-updates).
+
+<Admonition type="caution">
+
+In `orcher-sdk` 0.4.4, `result()` returns `None` for a workflow whose result is `0`, `False`, `""`, `[]` or `{}` ([sdk-py#6](https://github.com/orcher-io/sdk-py/issues/6)).
+
+</Admonition>
+
+To stop a workflow:
+
+<$CodeSample path="python/client/handle.py" region="stop" />
+
+`cancel()` asks the workflow to stop; `terminate()` ends it at once, with no further workflow code running. `reset()` rewinds a run to an event in its journal; see [Reset](/guides/sdk/python/workflows#reset).
+
+---
+
+## Listing and searching
+
+`list_workflows` filters by type, task queue and status (`RUNNING`, `COMPLETED`, `FAILED`, `CANCELLED`, `TERMINATED`, `TIMED_OUT`, `RESTARTED_FRESH`), a page at a time:
+
+<$CodeSample path="python/client/listing.py" region="list" />
+
+`search_workflows` takes conditions of the form `Key = 'value'` joined with `AND`. `WorkflowType`, `Status` and `WorkflowVersion` filter on those fields; any other key matches a label:
+
+<$CodeSample path="python/client/listing.py" region="search" />
+
+---
+
+## Errors
+
+Handle methods raise `WorkflowError` when the workflow ended without a result and `ClientError` when the request itself failed. Both derive from `OrcherError` and carry a `code` (an `ErrorCode`) and a `message`:
+
+<$CodeSample path="python/client/errors.py" region="errors" />
+
+---
+
+## Reference
+
+### Client
+
+| Method | Description |
+|---|---|
+| `Client(config)` | Create a client; connect with `async with` or `connect()` |
+| `await client.start_workflow(workflow_type, **options)` | Start a workflow and return its handle |
+| `await client.get_workflow(workflow_id, run_id=None)` | A handle to an existing workflow |
+| `await client.list_workflows(**filters)` | A `WorkflowListPage` of executions |
+| `await client.search_workflows(query, page_size=100, next_page_token=None)` | Executions matching a query |
+| `await client.close()` | Close the connection |
+
+### WorkflowHandle
+
+| Method or property | Description |
+|---|---|
+| `handle.workflow_id`, `handle.run_id` | The run's ids |
+| `await handle.result(timeout=None)` | Wait for the result; `timeout` in seconds |
+| `await handle.status()` | A `WorkflowStatus` |
+| `await handle.describe()` | A `WorkflowExecutionDescription`: type, queue, status, times, journal length, attempt |
+| `await handle.send_event(name, data=None)` | Send an event |
+| `await handle.query(name, *args)` | Run a query handler and return its result |
+| `await handle.update(name, *args)` | Run an update handler and return its result |
+| `await handle.cancel()` | Ask the workflow to stop |
+| `await handle.terminate(reason="")` | End the workflow now |
+| `await handle.reset(target_event_id, reason="")` | Rewind the run; returns the new execution's id |
+
+---
+
+## Next steps
+
+- [Workflows](/guides/sdk/python/workflows): the code these calls drive
+- [Worker](/guides/sdk/python/worker): run the workflows you start
+- [Patterns](/guides/sdk/python/patterns): approvals and other event-driven workflows

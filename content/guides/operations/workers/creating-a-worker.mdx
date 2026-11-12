@@ -1,0 +1,176 @@
+---
+id: creating-a-worker
+title: Creating a Worker
+description: Build and configure an Orcher worker using the SDK builder APIs across Rust, Python, and TypeScript
+---
+
+## Creating a Worker
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+
+#[workflow]
+async fn process_order(ctx: WorkflowContext, order: Order) -> Result<Receipt> {
+    let payment = ctx.execute_task(charge_payment, order.amount).await?;
+    ctx.execute_task(send_confirmation, payment.id).await
+}
+
+#[task]
+async fn charge_payment(ctx: TaskContext, amount: f64) -> Result<PaymentId> {
+    Ok(PaymentId::new("pay_123"))
+}
+
+#[task]
+async fn send_confirmation(ctx: TaskContext, payment_id: PaymentId) -> Result<Receipt> {
+    Ok(Receipt { id: payment_id })
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<()> {
+    let worker = Worker::builder()
+        .server_url("http://localhost:50051")
+        .namespace("default")
+        .task_queue("orders")
+        .identity("order-worker-1")
+        .max_concurrent_workflows(100)
+        .max_concurrent_tasks(200)
+        .build()
+        .await?;
+
+    worker.run().await
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, Worker
+
+@workflow(name="process_order")
+async def process_order(ctx, order):
+    payment = await ctx.execute_task(charge_payment, amount=order["amount"])
+    return await ctx.execute_task(send_confirmation, payment_id=payment["id"])
+
+@task(name="charge_payment")
+async def charge_payment(ctx, amount):
+    return {"id": "pay_123"}
+
+@task(name="send_confirmation")
+async def send_confirmation(ctx, payment_id):
+    return {"id": payment_id}
+
+async def main():
+    worker = (
+        Worker.builder()
+        .server_url("http://localhost:50051")
+        .namespace("default")
+        .task_queue("orders")
+        .identity("order-worker-1")
+        .max_concurrent_workflows(100)
+        .max_concurrent_tasks(100)
+        .build()
+    )
+    await worker.run()
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+<$CodeSample path="typescript/src/creating-a-worker/worker.ts" region="worker" />
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Configuration
+
+All SDKs support the same core configuration through their builder APIs. Defaults vary slightly between SDKs.
+
+### Core Options
+
+| Option | Rust | Python | TypeScript | Description |
+|--------|------|--------|-----------|-------------|
+| `server_url` | `localhost:50051` | (required) | (required) | Orchestrator gRPC address |
+| `namespace` | `default` | `default` | (required) | Multi-tenancy namespace |
+| `task_queue` | (required) | (required) | (required) | Queue this worker polls |
+| `identity` | auto (UUID) | auto (timestamp) | auto (host-pid-ts) | Human-readable worker identity |
+| `max_concurrent_workflows` | `100` | `100` | `100` | Max workflows executing simultaneously |
+| `max_concurrent_tasks` | `200` | `100` | `100` | Max tasks executing simultaneously |
+| `workflow_poller_count` | `4` | `2` | `4` | Parallel workflow pollers |
+| `task_poller_count` | `4` | `4` | `4` | Parallel task pollers |
+| `actor_poller_count` | `4` | `4` | `2` | Parallel actor pollers |
+| `heartbeat_interval` | `10s` | `10s` | — (not configurable) | Registration heartbeat interval |
+| `organization_id` | — | — | — | Organization for multi-tenancy |
+| `api_key` | — | — | — | API key authentication |
+| `build_id` | — | — | `versionId` (default `ORCHER_VERSION_ID`) | Version identifier for deployments |
+
+### Security Options
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+Worker::builder()
+    .server_url("https://orchestrator:50051")
+    .task_queue("orders")
+    // AES-256-GCM payload encryption
+    .with_encryption(&encryption_key)
+    // gRPC compression
+    .with_gzip_compression()
+    // Custom interceptor for logging/auth
+    .interceptor(LoggingInterceptor::new())
+    .build()
+    .await?
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+Worker.builder()
+    # TLS is enabled by using an https:// server URL (verified against system root CAs)
+    .server_url("https://orchestrator:50051")
+    .task_queue("orders")
+    .build()
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+<$CodeSample path="typescript/src/creating-a-worker/security.ts" region="security" />
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Next Steps
+
+- [Connectivity](/guides/operations/workers/connectivity) — Registration, polling, heartbeats, and eager dispatch
+- [Scaling](/guides/operations/workers/scaling) — Horizontal scaling, recovery, and performance tuning
+- [Operations](/guides/operations/workers/operations) — Graceful shutdown, monitoring, and troubleshooting

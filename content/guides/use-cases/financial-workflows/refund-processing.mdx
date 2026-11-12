@@ -1,0 +1,283 @@
+---
+id: 'financial-refund'
+title: 'Refund Processing'
+description: 'Reverse charges, return inventory, update ledgers, and notify customers as an independent workflow.'
+sidebar_label: 'Refund Processing'
+---
+
+Refunds are their own workflow — they need to reverse the original charge, return inventory to stock, update the accounting ledger, and notify the customer. By modeling refunds as a separate workflow, you get independent retry logic, a dedicated audit trail, and the ability to handle partial refunds.
+
+Don't confuse this with the `refund_charge` compensation in [payment processing](/guides/use-cases/financial-workflows/payment-processing) — that's an immediate undo inside a payment that's still failing. This is a business process in its own right, usually started days later by a support tool or customer portal:
+
+<div className="not-prose my-8 max-w-lg mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Compensation vs. Refund Workflow</div>
+  </div>
+  <div className="grid grid-cols-2 gap-px bg-border-default">
+    <div className="bg-background px-4 py-3">
+      <div className="text-[10px] font-mono uppercase tracking-widest text-foreground-muted mb-2">Saga compensation</div>
+      <div className="text-xs font-medium text-foreground mb-1">Undo, immediately</div>
+      <p className="m-0 text-[10px] text-foreground-muted leading-relaxed">Runs inside the failing payment workflow. System-triggered, full amount, part of the original saga's journal.</p>
+    </div>
+    <div className="bg-background px-4 py-3">
+      <div className="text-[10px] font-mono uppercase tracking-widest text-foreground-muted mb-2">Refund workflow</div>
+      <div className="text-xs font-medium text-foreground mb-1">A process of its own</div>
+      <p className="m-0 text-[10px] text-foreground-muted leading-relaxed">Started days later by support or the customer. Full or partial amount, own retries, own journal, own audit trail.</p>
+    </div>
+  </div>
+</div>
+
+## How it works
+
+The four steps run in a deliberate order: the only step that can be *declined* goes first, and the bookkeeping that must never diverge from the money follows it.
+
+<div className="not-prose my-8 max-w-lg mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Money Moves First, Books Always Follow</div>
+  </div>
+  {[
+    { label: 'process_gateway_refund', detail: 'The one step that can be refused — do it before recording anything', icon: '1' },
+    { label: 'return_inventory', detail: 'Retries until done — stock reflects the reversal', icon: '2' },
+    { label: 'update_ledger', detail: 'Books follow the money, never lead it', icon: '3' },
+    { label: 'send_refund_notification', detail: 'Last — the customer hears about facts, not intentions', icon: '4' },
+  ].map((step, i, arr) => (
+    <div key={i}>
+      <div className="px-4 py-2 flex items-center gap-3">
+        <span className="w-5 h-5 flex items-center justify-center text-[10px] font-mono text-foreground-muted border border-default shrink-0">{step.icon}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{step.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{step.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Once step 1 succeeds, steps 2–4 are inevitable — replayed and retried through any crash until complete.</span>
+  </div>
+</div>
+
+That inevitability is the point. The failure mode this design eliminates is *divergence*: a refund issued at the gateway that never reaches the ledger. If the gateway refuses the refund, nothing was recorded anywhere; once it succeeds, the journaled `refund_id` guarantees the remaining bookkeeping runs to completion — a crash can delay the ledger entry, but it can never lose it.
+
+## Example: reverse, restock, record, notify
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RefundRequest {
+    order_id: String,
+    charge_id: String,
+    amount: f64,        // Full or partial amount
+    reason: String,
+    customer_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RefundResult {
+    refund_id: String,
+    status: String,
+    amount_refunded: f64,
+}
+
+#[task]
+async fn process_gateway_refund(charge_id: String, amount: f64) -> Result<String> {
+    let refund = gateway::create_refund(&charge_id, amount).await?;
+    Ok(refund.id)
+}
+
+#[task]
+async fn return_inventory(order_id: String) -> Result<()> {
+    warehouse::release_reservation(&order_id).await?;
+    Ok(())
+}
+
+#[task]
+async fn update_ledger(order_id: String, refund_id: String, amount: f64) -> Result<()> {
+    accounting::record_refund(&order_id, &refund_id, amount).await?;
+    Ok(())
+}
+
+#[task]
+async fn send_refund_notification(customer_id: String, amount: f64) -> Result<()> {
+    email::send_refund_confirmation(&customer_id, amount).await?;
+    Ok(())
+}
+
+#[workflow(name = "process_refund", version = "1.0.0")]
+pub async fn process_refund(
+    ctx: WorkflowContext,
+    request: RefundRequest,
+) -> Result<RefundResult> {
+    // Step 1: Process refund with payment gateway
+    let refund_id = ctx.execute_task(
+        process_gateway_refund, (request.charge_id.clone(), request.amount)
+    ).await?;
+
+    // Step 2: Return inventory to stock
+    ctx.execute_task(return_inventory, request.order_id.clone()).await?;
+
+    // Step 3: Update accounting ledger
+    ctx.execute_task(update_ledger, (
+        request.order_id.clone(), refund_id.clone(), request.amount
+    )).await?;
+
+    // Step 4: Notify customer
+    ctx.execute_task(
+        send_refund_notification, (request.customer_id.clone(), request.amount)
+    ).await?;
+
+    Ok(RefundResult {
+        refund_id,
+        status: "completed".to_string(),
+        amount_refunded: request.amount,
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, WorkflowContext, createTaskRefs } from '@orcher/sdk';
+
+interface RefundRequest {
+  orderId: string;
+  chargeId: string;
+  amount: number;
+  reason: string;
+  customerId: string;
+}
+
+interface RefundResult {
+  refundId: string;
+  status: string;
+  amountRefunded: number;
+}
+
+@Tasks()
+class RefundTasks {
+  @Task()
+  async processGatewayRefund(chargeId: string, amount: number): Promise<string> {
+    const refund = await gateway.createRefund(chargeId, amount);
+    return refund.id;
+  }
+
+  @Task()
+  async returnInventory(orderId: string): Promise<void> {
+    await warehouse.releaseReservation(orderId);
+  }
+
+  @Task()
+  async updateLedger(orderId: string, refundId: string, amount: number): Promise<void> {
+    await accounting.recordRefund(orderId, refundId, amount);
+  }
+
+  @Task()
+  async sendRefundNotification(customerId: string, amount: number): Promise<void> {
+    await email.sendRefundConfirmation(customerId, amount);
+  }
+}
+
+const tasks = createTaskRefs(RefundTasks);
+
+@Workflow({ name: 'process_refund', version: '1.0.0' })
+class ProcessRefundWorkflow {
+  async run(ctx: WorkflowContext, request: RefundRequest): Promise<RefundResult> {
+    const refundId = await ctx.executeTask(tasks.processGatewayRefund, request.chargeId, request.amount);
+    await ctx.executeTask(tasks.returnInventory, request.orderId);
+    await ctx.executeTask(tasks.updateLedger, request.orderId, refundId, request.amount);
+    await ctx.executeTask(tasks.sendRefundNotification, request.customerId, request.amount);
+
+    return { refundId, status: 'completed', amountRefunded: request.amount };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext
+from dataclasses import dataclass
+
+@dataclass
+class RefundRequest:
+    order_id: str
+    charge_id: str
+    amount: float
+    reason: str
+    customer_id: str
+
+@dataclass
+class RefundResult:
+    refund_id: str
+    status: str
+    amount_refunded: float
+
+@task
+async def process_gateway_refund(charge_id: str, amount: float) -> str:
+    refund = await gateway.create_refund(charge_id, amount)
+    return refund.id
+
+@task
+async def return_inventory(order_id: str) -> None:
+    await warehouse.release_reservation(order_id)
+
+@task
+async def update_ledger(order_id: str, refund_id: str, amount: float) -> None:
+    await accounting.record_refund(order_id, refund_id, amount)
+
+@task
+async def send_refund_notification(customer_id: str, amount: float) -> None:
+    await email.send_refund_confirmation(customer_id, amount)
+
+@workflow(name="process_refund", version="1.0.0")
+async def process_refund(ctx: WorkflowContext, request: RefundRequest) -> RefundResult:
+    refund_id = await ctx.execute_task(process_gateway_refund, request.charge_id, request.amount)
+    await ctx.execute_task(return_inventory, request.order_id)
+    await ctx.execute_task(update_ledger, request.order_id, refund_id, request.amount)
+    await ctx.execute_task(send_refund_notification, request.customer_id, request.amount)
+
+    return RefundResult(
+        refund_id=refund_id,
+        status="completed",
+        amount_refunded=request.amount,
+    )
+```
+
+</TabPanel>
+
+</Tabs>
+
+## Design notes
+
+- **Idempotency, same two layers as the charge.** A worker can die inside `process_gateway_refund` after the gateway accepted it — pass an idempotency key derived from the refund request so the retry gets the original refund back instead of issuing a second one. The mechanics are identical to [the charge-side diagram](/guides/use-cases/financial-workflows/payment-processing#two-layers-of-idempotency).
+- **Validate partial refunds against what's left.** `amount` supports partial refunds, and one charge may see several. `process_gateway_refund` should check the remaining refundable balance so two support agents processing the same request can't over-refund — the gateway's per-request idempotency key handles duplicates, the balance check handles genuinely distinct requests.
+- **Keep the reason in the request.** `request.reason` flows into the workflow's journal and your audit trail — refund analytics and chargeback disputes both want to know *why*, and the field costs nothing.
+- **Decide what a failed notification means.** As written, a permanently failing email fails the whole workflow *after* the money and books are already consistent. If that's not what you want, make the last step best-effort — the same policy call as [the confirmation email in payment processing](/guides/use-cases/financial-workflows/payment-processing#how-it-works).
+
+---
+
+## Next Steps
+
+- Next: [Best Practices & Compliance](/guides/use-cases/financial-workflows/best-practices)
+- Previous: [Fraud Detection with Human Review](/guides/use-cases/financial-workflows/fraud-detection)
+- Back to [Payment Workflows overview](/guides/use-cases/financial-workflows)

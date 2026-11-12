@@ -1,0 +1,474 @@
+---
+id: 'patterns'
+title: 'Developer Patterns'
+description: 'Learn proven workflow patterns for building robust distributed systems with Orcher'
+sidebar_label: 'Overview'
+---
+
+Orcher provides powerful primitives for building distributed systems. These patterns show you how to compose workflows, handle failures, process data at scale, and build resilient applications.
+
+## Pattern Categories
+
+### Orchestration Patterns
+
+**[Parent-Child Orchestration](/guides/patterns/parent-child)**  
+Compose complex workflows from reusable child components. Coordinate distributed services, process items in parallel, and build hierarchical orchestration trees.
+
+• Sequential and parallel child execution
+• Dynamic child spawning
+• Event-based coordination
+• Hierarchical workflows
+• Map-reduce processing
+
+**[Saga & Compensation](/guides/patterns/saga)**  
+Implement distributed transactions with the saga pattern and compensating actions. Ensure data consistency across multiple services without distributed locks.
+
+• Forward recovery
+• Backward compensation
+• Saga coordinators
+• Idempotent operations
+
+**[Fan-Out/Fan-In](/guides/patterns/fan-out-fan-in)**  
+Split work across multiple parallel operations and aggregate results. Perfect for batch processing, multi-service calls, and data aggregation.
+
+• Parallel task execution
+• Result aggregation
+• Partial failure handling
+• Rate limiting
+
+**[Long-Running Processes](/guides/patterns/long-running)**  
+Build workflows that span hours, days, or weeks. Handle human approvals, scheduled operations, and multi-stage business processes.
+
+• Durable timers
+• Human-in-the-loop
+• State persistence
+• Process checkpoints
+
+---
+
+## Resilience Patterns
+
+### Error Handling
+
+**Retry Policies**  
+Configure automatic retries with exponential backoff and jitter.
+
+```rust
+#[task(
+    name = "flaky_api_call",
+    retry = 5,
+    retry_delay = "exponential",
+    max_retry_delay = 300
+)]
+pub async fn flaky_api_call(ctx: TaskContext, input: Data) -> Result<Response> {
+    // Automatically retried on failure
+    external_api::call(input).await
+}
+```
+
+**Circuit Breaker**  
+Prevent cascading failures by detecting when a service is down.
+
+```rust
+#[workflow(name = "with_circuit_breaker", version = "1.0.0")]
+pub async fn with_circuit_breaker(
+    ctx: WorkflowContext,
+    input: Data,
+) -> Result<Response> {
+    let circuit = ctx.get_state::<CircuitState>("circuit").await?;
+    
+    if circuit.is_open() {
+        return Err(Error::CircuitOpen);
+    }
+    
+    match ctx.execute_task("call_service", input).await {
+        Ok(response) => {
+            circuit.record_success();
+            Ok(response)
+        }
+        Err(e) => {
+            circuit.record_failure();
+            Err(e)
+        }
+    }
+}
+```
+
+**Graceful Degradation**  
+Provide fallback responses when primary services fail.
+
+```rust
+#[workflow(name = "resilient_workflow", version = "1.0.0")]
+pub async fn resilient_workflow(
+    ctx: WorkflowContext,
+    query: String,
+) -> Result<Response> {
+    // Try primary service
+    match ctx.execute_task("primary_service", query.clone()).await {
+        Ok(response) => Ok(response),
+        Err(_) => {
+            // Fall back to cached response
+            ctx.execute_task("get_cached_response", query).await
+        }
+    }
+}
+```
+
+---
+
+## Data Processing Patterns
+
+### Batch Processing
+
+Process large datasets by splitting work across multiple workers.
+
+```rust
+#[workflow(name = "batch_processor", version = "1.0.0")]
+pub async fn batch_processor(
+    ctx: WorkflowContext,
+    items: Vec<Item>,
+) -> Result<BatchResult> {
+    const BATCH_SIZE: usize = 100;
+    
+    let batches: Vec<_> = items
+        .chunks(BATCH_SIZE)
+        .map(|chunk| chunk.to_vec())
+        .collect();
+    
+    let mut handles = Vec::new();
+    for batch in batches {
+        let handle = ctx
+            .start_child_workflow("process_batch", batch)
+            .await?;
+        handles.push(handle);
+    }
+    
+    // Collect results
+    let mut results = Vec::new();
+    for handle in handles {
+        results.push(handle.result::<Result>().await?);
+    }
+    
+    Ok(BatchResult::from(results))
+}
+```
+
+### Stream Processing
+
+Process continuous streams of events with durable state.
+
+```rust
+#[workflow(name = "stream_processor", version = "1.0.0")]
+pub async fn stream_processor(
+    ctx: WorkflowContext,
+    stream_id: String,
+) -> Result<()> {
+    loop {
+        // Wait for next batch of events
+        let events = ctx
+            .wait_for_event_with_timeout::<Vec<Event>>(
+                "batch",
+                Duration::from_secs(60)
+            )
+            .await?;
+        
+        if let Some(events) = events {
+            // Process batch
+            for event in events {
+                ctx.execute_task("process_event", event).await?;
+            }
+            
+            // Update checkpoint
+            ctx.set_state("last_processed", ctx.now()).await?;
+        }
+    }
+}
+```
+
+---
+
+## Integration Patterns
+
+### External API Calls
+
+Make reliable API calls with automatic retries and timeouts.
+
+```rust
+#[task(
+    name = "call_external_api",
+    retry = 3,
+    timeout = 30
+)]
+pub async fn call_external_api(
+    ctx: TaskContext,
+    request: ApiRequest,
+) -> Result<ApiResponse> {
+    let client = reqwest::Client::new();
+    
+    let response = client
+        .post(&request.url)
+        .json(&request.body)
+        .send()
+        .await?
+        .json()
+        .await?;
+    
+    Ok(response)
+}
+```
+
+### Webhook Handling
+
+Wait for webhook callbacks with timeouts.
+
+```rust
+#[workflow(name = "payment_with_webhook", version = "1.0.0")]
+pub async fn payment_with_webhook(
+    ctx: WorkflowContext,
+    payment: PaymentData,
+) -> Result<PaymentResult> {
+    // Initiate payment
+    let transaction_id = ctx
+        .execute_task("initiate_payment", payment)
+        .await?;
+    
+    // Wait for webhook callback (30 minute timeout)
+    let callback = ctx
+        .wait_for_event_with_timeout::<WebhookData>(
+            "payment_callback",
+            Duration::from_secs(1800)
+        )
+        .await?;
+    
+    match callback {
+        Some(data) if data.success => {
+            Ok(PaymentResult::success(transaction_id))
+        }
+        Some(data) => {
+            Ok(PaymentResult::failed(data.error))
+        }
+        None => {
+            // Timeout - check payment status
+            ctx.execute_task("check_payment_status", transaction_id).await
+        }
+    }
+}
+```
+
+---
+
+## Coordination Patterns
+
+### Leader Election
+
+Ensure only one workflow instance is active at a time.
+
+```rust
+#[workflow(name = "singleton_job", version = "1.0.0")]
+pub async fn singleton_job(
+    ctx: WorkflowContext,
+    job_id: String,
+) -> Result<()> {
+    // Try to acquire lock
+    let lock_acquired = ctx
+        .execute_task("try_acquire_lock", job_id.clone())
+        .await?;
+    
+    if !lock_acquired {
+        return Err(Error::AlreadyRunning);
+    }
+    
+    // Do work
+    ctx.execute_task("perform_job", job_id.clone()).await?;
+    
+    // Release lock
+    ctx.execute_task("release_lock", job_id).await?;
+    
+    Ok(())
+}
+```
+
+### Mutex Pattern
+
+Coordinate access to shared resources across workflows.
+
+```rust
+#[workflow(name = "with_mutex", version = "1.0.0")]
+pub async fn with_mutex(
+    ctx: WorkflowContext,
+    resource: String,
+) -> Result<()> {
+    // Acquire mutex
+    loop {
+        let acquired = ctx
+            .execute_task("try_acquire_mutex", resource.clone())
+            .await?;
+        
+        if acquired {
+            break;
+        }
+        
+        // Wait and retry
+        ctx.sleep(Duration::from_secs(1)).await?;
+    }
+    
+    // Critical section
+    ctx.execute_task("use_resource", resource.clone()).await?;
+    
+    // Release mutex
+    ctx.execute_task("release_mutex", resource).await?;
+    
+    Ok(())
+}
+```
+
+---
+
+## Testing Patterns
+
+### Unit Testing Workflows
+
+Test workflows in isolation with mock dependencies.
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orcher::testing::*;
+    
+    #[tokio::test]
+    async fn test_workflow() {
+        let runtime = OrcherTestRuntime::new();
+        let ctx = runtime.workflow_context();
+        
+        // Mock task responses
+        runtime
+            .mock_task("external_api_call")
+            .returns(ApiResponse { status: "ok" });
+        
+        // Execute workflow
+        let result = my_workflow(ctx, input).await;
+        
+        assert!(result.is_ok());
+    }
+}
+```
+
+### Integration Testing
+
+Test workflows end-to-end with real dependencies.
+
+```rust
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    
+    #[tokio::test]
+    async fn test_full_workflow() {
+        let client = OrcherClient::new("postgresql://localhost/test").await?;
+        
+        // Start workflow
+        let handle = client
+            .start_workflow("my_workflow", "test-123", input)
+            .await?;
+        
+        // Send events
+        client
+            .send_event(handle.id(), "approval", true)
+            .await?;
+        
+        // Wait for completion
+        let result = handle.result::<Output>().await?;
+        
+        assert_eq!(result.status, "completed");
+    }
+}
+```
+
+---
+
+## Best Practices
+
+### Pattern Selection Guide
+
+| Scenario | Pattern | Why |
+|----------|---------|-----|
+| Multi-service coordination | Parent-Child | Independent lifecycles |
+| Distributed transaction | Saga | Compensating actions |
+| Batch processing | Fan-Out/Fan-In | Parallel execution |
+| Human approval | Long-Running | Durable waits |
+| External webhook | Event-based | Async callbacks |
+| Retry with backoff | Task retry policy | Automatic recovery |
+
+### Performance Tips
+
+1. **Use tasks for fast operations** (under 1 second)
+2. **Use child workflows for long operations** (over 1 second)
+3. **Limit parallel children** (max 50-100 concurrent)
+4. **Batch small items** (group into chunks)
+5. **Use timeouts everywhere** (prevent infinite waits)
+
+### Common Anti-Patterns
+
+**Don't use workflows for CPU-intensive work**
+Use background jobs or serverless functions instead.
+
+**Don't create deep hierarchies** (>3 levels)
+Flatten the structure for better observability.
+
+**Don't share state between workflows**
+Use events or database for communication.
+
+**Don't spawn unlimited children**
+Use batching and rate limiting.
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/patterns/parent-child" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Parent-Child Orchestration</h3>
+      <p className="text-sm text-scale-1100">
+        Start with the most fundamental pattern for composing workflows.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/workflows" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Workflow Fundamentals</h3>
+      <p className="text-sm text-scale-1100">
+        Learn the basics of workflows, tasks, and execution model.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/events" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Event Handling</h3>
+      <p className="text-sm text-scale-1100">
+        Master events and signals for workflow coordination.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/error-handling" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Error Handling</h3>
+      <p className="text-sm text-scale-1100">
+        Build resilient workflows with retry policies and circuit breakers.
+      </p>
+    </div>
+  </Link>
+</div>
+
+---
+
+## Related Resources
+
+• [Core Workflows](/guides/core/workflows) - Workflow fundamentals
+• [Tasks](/guides/core/tasks) - Task definition and configuration
+• [State Management](/guides/core/state-management) - Managing workflow state
+• [Use Cases](/guides/use-cases/data-processing) - Real-world examples

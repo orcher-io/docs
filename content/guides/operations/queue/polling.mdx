@@ -1,0 +1,183 @@
+---
+id: 'queue-polling'
+title: 'Polling Configuration'
+description: 'Configure pollers, dead letter queues, and the Redis fast path for task dispatch'
+sidebar_label: 'Polling'
+---
+
+## Polling Configuration
+
+Each Worker spawns multiple parallel pollers to maximize throughput:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `workflow_poller_count` | `4` | Parallel workflow pollers |
+| `task_poller_count` | `4` | Parallel task pollers |
+| `actor_poller_count` | `4` | Parallel actor pollers (if actors registered) |
+| `poll_interval` | `100ms` | Interval between poll attempts |
+| `max_concurrent_workflows` | `100` | Max simultaneous workflow executions |
+| `max_concurrent_tasks` | `200` (Rust), `100` (Python) | Max simultaneous task executions |
+
+Concurrency is controlled through **channel backpressure**, not explicit semaphores. Each driver creates a channel with capacity equal to the max concurrency setting:
+
+```
+Pollers → [channel (capacity=100)] → Handler executors
+```
+
+If all slots are occupied by in-flight handlers, the pollers block on send — naturally capping concurrency without coordination overhead.
+
+### Tuning Poller Count
+
+Increase poller count when you have high-throughput queues where a single poller can't claim work fast enough:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+let worker = WorkerBuilder::new()
+    .task_queue("high-throughput")
+    .workflow_poller_count(8)   // More workflow pollers
+    .task_poller_count(8)       // More task pollers
+    .max_concurrent_tasks(500)  // Higher task capacity
+    .build()
+    .await?;
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+worker = (
+    Worker.builder()
+    .task_queue("high-throughput")
+    .workflow_poller_count(8)
+    .task_poller_count(8)
+    .max_concurrent_tasks(200)
+    .build()
+)
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+const worker = new Worker({
+  serverUrl: 'http://localhost:50051',
+  namespace: 'default',
+  taskQueue: 'high-throughput',
+  workflowPollerCount: 8,
+  taskPollerCount: 8,
+});
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Dead Letter Queue
+
+Tasks that exceed their maximum retry count are moved to the **dead letter queue** (DLQ) in PostgreSQL. The DLQ preserves the full task payload, error details, and execution history for debugging.
+
+Tasks are retried with exponential backoff before reaching the DLQ. The retry policy is configured per-task:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[task(retry = 3)]
+async fn charge_payment(ctx: TaskContext, amount: f64) -> Result<PaymentId> {
+    // Retried up to 3 times with exponential backoff
+    // After 3 failures → moved to DLQ
+    Ok(PaymentId::new("pay_123"))
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+@task(name="charge_payment", retry=3)
+async def charge_payment(ctx, amount):
+    # Retried up to 3 times with exponential backoff
+    # After 3 failures → moved to DLQ
+    return {"id": "pay_123"}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+@Tasks()
+class PaymentTasks {
+  @Task({ retryPolicy: { maxAttempts: 3 } })
+  async charge(ctx, amount) {
+    // Retried up to 3 times with exponential backoff
+    // After 3 failures → moved to DLQ
+    return { id: 'pay_123' };
+  }
+}
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Redis Fast Path
+
+Redis is **optional** but recommended for high-throughput production deployments. It provides near-instant task notification instead of periodic PostgreSQL polling.
+
+### How It Works
+
+1. When new work is available, the orchestrator pushes the execution ID to a Redis list (`LPUSH`)
+2. Workers block on `BRPOP` — Redis handles the blocking efficiently at the connection level
+3. When an ID arrives, the worker claims the execution in PostgreSQL with `SELECT FOR UPDATE SKIP LOCKED`
+4. If Redis is unavailable, workers automatically fall back to PostgreSQL polling
+
+### Enabling Redis
+
+Configure the orchestrator with a Redis URL:
+
+```bash
+# Orchestrator environment variable
+REDIS_URL=redis://localhost:6379
+```
+
+No worker-side configuration is needed — the orchestrator handles the Redis integration.
+
+### Reliability
+
+Redis is used only as a **notification layer**. All durable state lives in PostgreSQL. If Redis goes down:
+
+- Workers fall back to PostgreSQL polling automatically
+- No work is lost — PostgreSQL is the source of truth
+- When Redis recovers, workers switch back to the fast path
+
+---
+
+## Next Steps
+
+- [Queues Overview](/guides/operations/queue) — How queues work in Orcher
+- [Configuring Queues](/guides/operations/queue/configuration) — Assign workers, isolate workloads, and use namespaces
+- [Monitoring & Troubleshooting](/guides/operations/queue/monitoring) — CLI commands, auto-scaling, and common issues

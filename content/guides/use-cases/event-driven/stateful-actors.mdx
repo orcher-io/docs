@@ -1,0 +1,361 @@
+---
+id: 'event-stateful-actors'
+title: 'Stateful Actors with Event Sourcing'
+sidebar_label: 'Stateful Actors'
+---
+
+Actors maintain per-entity state with single-writer guarantees — only one operation runs at a time for a given actor ID, preventing race conditions. Combined with event sourcing, every state change is recorded as an event in the actor's journal. You can rebuild the full state of any entity by replaying its event history, and the journal serves as a complete audit trail.
+
+## How it works
+
+The [overview](/guides/use-cases/event-driven#one-writer-per-entity) showed that same-entity operations serialize. The refinement is that not every operation is a writer: mark the ones that mutate state `exclusive`, and let read-only operations run concurrently. It's a reader/writer lock scoped to one actor ID — but you never write the lock.
+
+<div className="not-prose my-8 max-w-lg mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Exclusive vs. Non-Exclusive Operations</div>
+  </div>
+  <div className="grid grid-cols-2 gap-px bg-border-default">
+    <div className="bg-background px-4 py-3">
+      <div className="text-[10px] font-mono uppercase tracking-widest text-foreground-muted mb-2">#[operation(exclusive)]</div>
+      <div className="text-xs font-medium text-foreground mb-1">Writers — serialized</div>
+      <p className="m-0 text-[10px] text-foreground-muted leading-relaxed"><code className="text-[9px]">add_item</code>, <code className="text-[9px]">remove_item</code>. One at a time for this actor; each sees the previous write. Nothing else — reader or writer — runs meanwhile.</p>
+    </div>
+    <div className="bg-background px-4 py-3">
+      <div className="text-[10px] font-mono uppercase tracking-widest text-foreground-muted mb-2">#[operation]</div>
+      <div className="text-xs font-medium text-foreground mb-1">Readers — concurrent</div>
+      <p className="m-0 text-[10px] text-foreground-muted leading-relaxed">Read-only views can run together for the same actor. They still wait for an in-flight writer, so a read never sees a half-applied change.</p>
+    </div>
+  </div>
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Concurrency scoped per actor ID — cart:42 and cart:99 never wait on each other.</span>
+  </div>
+</div>
+
+## Example: an event-sourced shopping cart
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="typescript"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+// Actor: Shopping cart with event-sourced state
+#[actor(name = "shopping_cart")]
+pub struct ShoppingCart;
+
+#[task]
+async fn calculate_shipping(items: Vec<CartItem>) -> Result<f64> {
+    shipping_calculator::estimate(items).await
+}
+
+#[task]
+async fn apply_discount(input: DiscountInput) -> Result<f64> {
+    pricing_engine::apply_discount(input.subtotal, &input.code).await
+}
+
+#[operations]
+impl ShoppingCart {
+    #[operation(exclusive)]
+    pub async fn add_item(
+        ctx: ActorContext,
+        item: CartItem,
+    ) -> Result<CartState> {
+        let mut state = ctx.state().get::<CartState>("cart")
+            .await?
+            .unwrap_or_default();
+
+        state.items.push(item.clone());
+        state.subtotal += item.price * item.quantity as f64;
+        state.updated_at = chrono::Utc::now();
+
+        ctx.state().set("cart", &state).await?;
+        Ok(state)
+    }
+
+    #[operation(exclusive)]
+    pub async fn remove_item(
+        ctx: ActorContext,
+        item_id: String,
+    ) -> Result<CartState> {
+        let mut state = ctx.state().get::<CartState>("cart")
+            .await?
+            .unwrap_or_default();
+
+        if let Some(pos) = state.items.iter().position(|i| i.id == item_id) {
+            let removed = state.items.remove(pos);
+            state.subtotal -= removed.price * removed.quantity as f64;
+        }
+        state.updated_at = chrono::Utc::now();
+
+        ctx.state().set("cart", &state).await?;
+        Ok(state)
+    }
+
+    #[operation]
+    pub async fn checkout(
+        ctx: ActorContext,
+        payment: PaymentMethod,
+    ) -> Result<CheckoutResult> {
+        let state = ctx.state().get::<CartState>("cart")
+            .await?
+            .unwrap_or_default();
+
+        if state.items.is_empty() {
+            return Err(anyhow::anyhow!("Cart is empty"));
+        }
+
+        // Calculate shipping (task within actor)
+        let shipping = ctx.execute_task(calculate_shipping, state.items.clone()).await?;
+
+        // Start checkout workflow
+        let order_id = ctx.start_child_workflow(process_checkout, CheckoutInput {
+            items: state.items,
+            subtotal: state.subtotal,
+            shipping,
+            payment,
+        }).await?;
+
+        // Clear cart
+        ctx.state().set("cart", &CartState::default()).await?;
+
+        Ok(CheckoutResult { order_id })
+    }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import {
+  Actor,
+  Operation,
+  Tasks,
+  Task,
+  ActorContext,
+  createTaskRefs,
+} from '@orcher/sdk';
+
+@Tasks()
+class CartTasks {
+  @Task()
+  async calculateShipping(items: CartItem[]): Promise<number> {
+    return await shippingCalculator.estimate(items);
+  }
+
+  @Task()
+  async applyDiscount(input: DiscountInput): Promise<number> {
+    return await pricingEngine.applyDiscount(input.subtotal, input.code);
+  }
+}
+
+const tasks = createTaskRefs(CartTasks);
+
+// Actor: Shopping cart with event-sourced state
+@Actor({ name: 'shopping_cart' })
+class ShoppingCart {
+  @Operation({ exclusive: true })
+  async addItem(ctx: ActorContext, item: CartItem): Promise<CartState> {
+    const state = (await ctx.state().get<CartState>('cart')) ?? {
+      items: [], subtotal: 0, updatedAt: new Date(),
+    };
+
+    state.items.push(item);
+    state.subtotal += item.price * item.quantity;
+    state.updatedAt = new Date();
+
+    await ctx.state().set('cart', state);
+    return state;
+  }
+
+  @Operation({ exclusive: true })
+  async removeItem(ctx: ActorContext, itemId: string): Promise<CartState> {
+    const state = (await ctx.state().get<CartState>('cart')) ?? {
+      items: [], subtotal: 0, updatedAt: new Date(),
+    };
+
+    const index = state.items.findIndex((i) => i.id === itemId);
+    if (index !== -1) {
+      const removed = state.items.splice(index, 1)[0];
+      state.subtotal -= removed.price * removed.quantity;
+    }
+    state.updatedAt = new Date();
+
+    await ctx.state().set('cart', state);
+    return state;
+  }
+
+  @Operation()
+  async checkout(
+    ctx: ActorContext,
+    payment: PaymentMethod,
+  ): Promise<CheckoutResult> {
+    const state = (await ctx.state().get<CartState>('cart')) ?? {
+      items: [], subtotal: 0, updatedAt: new Date(),
+    };
+
+    if (state.items.length === 0) {
+      throw new Error('Cart is empty');
+    }
+
+    // Calculate shipping (task within actor)
+    const shipping = await ctx.executeTask(
+      tasks.calculateShipping, state.items,
+    );
+
+    // Start checkout workflow
+    const orderId = await ctx.startChildWorkflow(ProcessCheckout, {
+      items: state.items,
+      subtotal: state.subtotal,
+      shipping,
+      payment,
+    });
+
+    // Clear cart
+    await ctx.state().set('cart', { items: [], subtotal: 0, updatedAt: new Date() });
+
+    return { orderId };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import actor, operation, task, ActorContext
+
+@task
+async def calculate_shipping(items: list[CartItem]) -> float:
+    return await shipping_calculator.estimate(items)
+
+@task
+async def apply_discount(input: DiscountInput) -> float:
+    return await pricing_engine.apply_discount(input.subtotal, input.code)
+
+# Actor: Shopping cart with event-sourced state
+@actor(name="shopping_cart")
+class ShoppingCart:
+
+    @operation(exclusive=True)
+    async def add_item(self, ctx: ActorContext, item: CartItem) -> CartState:
+        state = await ctx.state().get("cart") or CartState.default()
+
+        state.items.append(item)
+        state.subtotal += item.price * item.quantity
+        state.updated_at = datetime.utcnow()
+
+        await ctx.state().set("cart", state)
+        return state
+
+    @operation(exclusive=True)
+    async def remove_item(self, ctx: ActorContext, item_id: str) -> CartState:
+        state = await ctx.state().get("cart") or CartState.default()
+
+        for i, item in enumerate(state.items):
+            if item.id == item_id:
+                removed = state.items.pop(i)
+                state.subtotal -= removed.price * removed.quantity
+                break
+        state.updated_at = datetime.utcnow()
+
+        await ctx.state().set("cart", state)
+        return state
+
+    @operation()
+    async def checkout(
+        self, ctx: ActorContext, payment: PaymentMethod
+    ) -> CheckoutResult:
+        state = await ctx.state().get("cart") or CartState.default()
+
+        if not state.items:
+            raise ValueError("Cart is empty")
+
+        # Calculate shipping (task within actor)
+        shipping = await ctx.execute_task(calculate_shipping, state.items)
+
+        # Start checkout workflow
+        order_id = await ctx.start_child_workflow(process_checkout, CheckoutInput(
+            items=state.items,
+            subtotal=state.subtotal,
+            shipping=shipping,
+            payment=payment,
+        ))
+
+        # Clear cart
+        await ctx.state().set("cart", CartState.default())
+
+        return CheckoutResult(order_id=order_id)
+```
+
+</TabPanel>
+
+</Tabs>
+
+Each actor instance is identified by a key (e.g., `shopping_cart:user_123`). The `exclusive` flag ensures that `add_item` and `remove_item` operations are serialized — no two exclusive operations run concurrently for the same actor ID, eliminating race conditions on the cart state. Non-exclusive operations like `checkout` can read state concurrently with other non-exclusive operations.
+
+## State is the fold of its events
+
+Event sourcing stores the *changes*, not just the latest snapshot. The current cart is what you get by replaying its events in order — which means the journal isn't only crash recovery, it's the source of truth and a complete audit trail in one.
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Rebuilding cart:42 From Its Journal</div>
+  </div>
+  {[
+    { label: 'add_item(Book, $12)', detail: 'event 1', icon: '1', st: 'items: [Book] · $12' },
+    { label: 'add_item(Pen, $3)', detail: 'event 2', icon: '2', st: 'items: [Book, Pen] · $15' },
+    { label: 'remove_item(Book)', detail: 'event 3', icon: '3', st: 'items: [Pen] · $3' },
+  ].map((row, i, arr) => (
+    <div key={i}>
+      <div className="px-4 py-2 flex items-center gap-3">
+        <span className="w-5 h-5 flex items-center justify-center text-[10px] font-mono text-foreground-muted border border-default shrink-0">{row.icon}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{row.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{row.detail}</span>
+        </div>
+        <span className="text-[10px] font-mono text-foreground-light shrink-0">{row.st}</span>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Replay the events → current state. Keep the events → answer "how did it get here?"</span>
+  </div>
+</div>
+
+## Design notes
+
+- **Mutations belong in `exclusive` operations.** Any operation that calls `state().set` is a writer and should be `exclusive` — otherwise it can interleave with another writer and lose an update. Audit each operation by whether it mutates, not by what it's named. (A `checkout` that clears the cart mutates, so it needs the same protection as `add_item`.)
+- **Keep exclusive operations short.** An exclusive op holds the actor's writer slot until it returns, so every other write to that entity waits behind it. Do the fast state change in the operation and offload slow work — payment, shipping — to a [child workflow](/guides/use-cases/distributed-systems/child-workflows), exactly as `checkout` starts `process_checkout` rather than charging inline.
+- **Snapshot when the history gets long.** Rebuilding from thousands of events is slow. Periodically persist a snapshot of the folded state and replay only the events since — the same journal-growth pressure as a long [scheduled-job loop](/guides/use-cases/background-tasks/scheduled-jobs), solved by checkpointing the fold.
+- **Actors partition; they don't parallelize one entity.** Throughput scales with the number of *distinct* actors, because same-ID operations are serial by design. If one entity is a hotspot (a viral product's inventory counter), that single actor is your ceiling — shard it into sub-counters if you must.
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-4 not-prose">
+  <Link href="/guides/use-cases/event-driven/stream-aggregation" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Stream Aggregation</h3>
+    <p className="text-sm text-foreground-light">Aggregate high-volume event streams over time windows with durable timers.</p>
+  </Link>
+  <Link href="/guides/core/actors" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Actors Guide</h3>
+    <p className="text-sm text-foreground-light">Deep dive into actor definitions, operations, state API, concurrency modes, and the execution model.</p>
+  </Link>
+</div>

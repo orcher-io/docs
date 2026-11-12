@@ -1,0 +1,758 @@
+---
+id: 'understanding-orcher'
+title: 'Understanding Orcher'
+description: 'Core concepts, architecture, and mental models for building reliable distributed systems with Orcher'
+sidebar_label: 'Understanding Orcher'
+---
+
+Orcher is a **durable execution engine** — it makes your code survive failures automatically. You write normal functions, and Orcher records each step's result to PostgreSQL as it runs. If a process crashes, another worker picks up the execution and replays completed steps from the saved results without re-executing them.
+
+- **Automatic checkpointing** — Every task result is saved before being returned to your workflow
+- **Crash recovery** — Any worker can resume any workflow from its last checkpoint
+- **No duplicate side effects** — Completed tasks return cached results on replay
+- **Complete audit trail** — The journal records every step, its result, and when it happened
+
+---
+
+## The Problem Orcher Solves
+
+Traditional code execution is ephemeral. When your process crashes, you lose all in-memory state, your position in the execution flow, and any partial results:
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+<TabPanel id="rust" label="Rust">
+
+```rust
+// Without Orcher — loses state on crash
+async fn process_order(order: Order) -> Result<()> {
+    let payment = charge_card(order.total).await?;      // ← Succeeds
+    update_inventory(&order.items).await?;               // ← Succeeds
+    send_confirmation_email(&order.email).await?;        // ← CRASHES HERE
+    notify_warehouse(&order.id).await?;                  // ← Never runs
+
+    // Customer was charged but never got confirmation.
+    // You don't know which steps completed. No automatic way to resume.
+    Ok(())
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Without Orcher — loses state on crash
+async function processOrder(order: Order) {
+  const payment = await chargeCard(order.total);      // ← Succeeds
+  await updateInventory(order.items);                 // ← Succeeds
+  await sendConfirmationEmail(order.email);           // ← CRASHES HERE
+  await notifyWarehouse(order.id);                    // ← Never runs
+
+  // Customer was charged but never got confirmation.
+  // You don't know which steps completed. No automatic way to resume.
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+# Without Orcher — loses state on crash
+async def process_order(order: Order):
+    payment = await charge_card(order.total)      # ← Succeeds
+    await update_inventory(order.items)            # ← Succeeds
+    await send_confirmation_email(order.email)     # ← CRASHES HERE
+    await notify_warehouse(order.id)               # ← Never runs
+
+    # Customer was charged but never got confirmation.
+    # You don't know which steps completed. No automatic way to resume.
+```
+
+</TabPanel>
+</Tabs>
+
+With Orcher, every step is journaled. After a crash, the workflow resumes from the first incomplete step:
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+
+#[workflow(name = "process_order")]
+async fn process_order(ctx: WorkflowContext, order: Order) -> Result<OrderResult> {
+    let payment = ctx.execute_task("charge_card", order.total).await?;       // Journaled
+    ctx.execute_task("update_inventory", &order.items).await?;               // Journaled
+    ctx.execute_task("send_confirmation", &order.email).await?;              // Journaled
+    ctx.execute_task("notify_warehouse", &order.id).await?;                  // Journaled
+
+    // If crash happens after step 2, next run:
+    // - charge_card: returns cached result (no duplicate charge)
+    // - update_inventory: returns cached result
+    // - send_confirmation: executes for the first time
+    // - notify_warehouse: executes next
+    Ok(OrderResult { order_id: order.id, payment_id: payment.id })
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, WorkflowContext, TaskContext } from '@orcher/sdk';
+
+@Workflow({ name: 'process-order' })
+class ProcessOrderWorkflow {
+  async run(ctx: WorkflowContext, order: Order): Promise<OrderResult> {
+    const payment = await ctx.executeTask(OrderTasks.chargeCard, order.total);  // Journaled
+    await ctx.executeTask(OrderTasks.updateInventory, order.items);             // Journaled
+    await ctx.executeTask(OrderTasks.sendConfirmation, order.email);            // Journaled
+    await ctx.executeTask(OrderTasks.notifyWarehouse, order.id);               // Journaled
+
+    // If crash happens after step 2, next run:
+    // - chargeCard: returns cached result (no duplicate charge)
+    // - updateInventory: returns cached result
+    // - sendConfirmation: executes for the first time
+    // - notifyWarehouse: executes next
+    return { orderId: order.id, paymentId: payment.id };
+  }
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, task_handler, WorkflowContext, TaskContext
+
+@workflow(name="process-order")
+class ProcessOrderWorkflow:
+    async def run(self, ctx: WorkflowContext, order: Order) -> OrderResult:
+        payment = await ctx.execute_task(OrderTasks.charge_card, total=order.total)   # Journaled
+        await ctx.execute_task(OrderTasks.update_inventory, items=order.items)         # Journaled
+        await ctx.execute_task(OrderTasks.send_confirmation, email=order.email)        # Journaled
+        await ctx.execute_task(OrderTasks.notify_warehouse, order_id=order.id)         # Journaled
+
+        # If crash happens after step 2, next run:
+        # - charge_card: returns cached result (no duplicate charge)
+        # - update_inventory: returns cached result
+        # - send_confirmation: executes for the first time
+        # - notify_warehouse: executes next
+        return OrderResult(order_id=order.id, payment_id=payment.id)
+```
+
+</TabPanel>
+</Tabs>
+
+---
+
+## Core Concepts
+
+### Workflows
+
+A workflow is a durable function that orchestrates tasks into a business process. It defines the order of operations, makes decisions, and handles errors — but never performs I/O directly. All external work is delegated to **tasks**.
+
+Workflow code must be **deterministic** — given the same inputs and task results, it always follows the same execution path. This is what makes replay work. I/O operations are non-deterministic (they can return different results each time), so they must go through tasks whose results are cached in the journal.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+
+#[workflow(name = "onboard_customer")]
+async fn onboard_customer(ctx: WorkflowContext, customer: NewCustomer) -> Result<OnboardResult> {
+    // Workflows make decisions
+    if customer.tier == "enterprise" {
+        ctx.execute_task("assign_account_manager", &customer.id).await?;
+    }
+
+    // Workflows orchestrate tasks
+    let account_id = ctx.execute_task("create_account", &customer).await?;
+    ctx.execute_task("send_welcome_email", &customer.email).await?;
+    ctx.execute_task("provision_resources", &account_id).await?;
+
+    // Workflows handle errors with compensation
+    match ctx.execute_task("charge_setup_fee", &customer.payment_method).await {
+        Ok(_) => {}
+        Err(e) => {
+            ctx.execute_task("delete_account", &account_id).await?;
+            return Err(e);
+        }
+    }
+
+    Ok(OnboardResult { account_id, status: "active".into() })
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, WorkflowContext, TaskContext } from '@orcher/sdk';
+
+@Workflow({ name: 'onboard-customer' })
+class OnboardCustomerWorkflow {
+  async run(ctx: WorkflowContext, customer: NewCustomer): Promise<OnboardResult> {
+    // Workflows make decisions
+    if (customer.tier === 'enterprise') {
+      await ctx.executeTask(CustomerTasks.assignAccountManager, customer.id);
+    }
+
+    // Workflows orchestrate tasks
+    const accountId = await ctx.executeTask(CustomerTasks.createAccount, customer);
+    await ctx.executeTask(CustomerTasks.sendWelcomeEmail, customer.email);
+    await ctx.executeTask(CustomerTasks.provisionResources, accountId);
+
+    // Workflows handle errors with compensation
+    try {
+      await ctx.executeTask(CustomerTasks.chargeSetupFee, customer.paymentMethod);
+    } catch (error) {
+      await ctx.executeTask(CustomerTasks.deleteAccount, accountId);
+      throw error;
+    }
+
+    return { accountId, status: 'active' };
+  }
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task_handler, WorkflowContext
+
+@workflow(name="onboard-customer")
+class OnboardCustomerWorkflow:
+    async def run(self, ctx: WorkflowContext, customer: NewCustomer) -> OnboardResult:
+        # Workflows make decisions
+        if customer.tier == "enterprise":
+            await ctx.execute_task(CustomerTasks.assign_account_manager, customer_id=customer.id)
+
+        # Workflows orchestrate tasks
+        account_id = await ctx.execute_task(CustomerTasks.create_account, customer=customer)
+        await ctx.execute_task(CustomerTasks.send_welcome_email, email=customer.email)
+        await ctx.execute_task(CustomerTasks.provision_resources, account_id=account_id)
+
+        # Workflows handle errors with compensation
+        try:
+            await ctx.execute_task(CustomerTasks.charge_setup_fee, payment=customer.payment_method)
+        except Exception as e:
+            await ctx.execute_task(CustomerTasks.delete_account, account_id=account_id)
+            raise e
+
+        return OnboardResult(account_id=account_id, status="active")
+```
+
+</TabPanel>
+</Tabs>
+
+**Workflows should:**
+- Orchestrate tasks — decide which tasks to run and in what order
+- Make decisions — branch logic based on task results
+- Handle errors — catch task failures and run compensation tasks
+- Coordinate systems — chain tasks that talk to different services
+
+**Workflows should NOT:**
+- Perform I/O directly — network calls, file reads, database queries must go through tasks
+- Use non-deterministic functions — `Math.random()`, `Date.now()`, `Uuid::new_v4()` produce different values on replay; wrap them in tasks so the result is cached
+- Store large data in workflow state — pass references (URLs, IDs) instead of large payloads
+
+### Tasks
+
+A task is a unit of work that performs one specific action — calling an API, writing to a database, or sending an email. Tasks are where all **side effects** happen. By isolating side effects in tasks, Orcher can cache their results for replay, retry them independently, and run them on different workers.
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+
+#[task(name = "charge_card", timeout = 30, retry_policy(max_attempts = 3, backoff_coefficient = 2.0))]
+async fn charge_card(ctx: TaskContext, input: ChargeInput) -> Result<ChargeResult> {
+    let stripe = Stripe::new(&std::env::var("STRIPE_SECRET_KEY")?);
+
+    let charge = stripe.charges().create(CreateCharge {
+        amount: input.amount,
+        currency: &input.currency,
+        source: &input.payment_method,
+        idempotency_key: Some(&input.idempotency_key),
+        ..Default::default()
+    }).await?;
+
+    Ok(ChargeResult { charge_id: charge.id, status: charge.status })
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Tasks, Task, TaskContext } from '@orcher/sdk';
+
+@Tasks()
+class PaymentTasks {
+  @Task({ name: 'chargeCard', timeout: 30000 })
+  async chargeCard(ctx: TaskContext, input: ChargeInput): Promise<ChargeResult> {
+    const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
+
+    const charge = await stripe.charges.create({
+      amount: input.amount,
+      currency: input.currency,
+      source: input.paymentMethod,
+      idempotency_key: input.idempotencyKey,
+    });
+
+    return { chargeId: charge.id, status: charge.status };
+  }
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import task, task_handler, TaskContext
+
+@task_handler
+class PaymentTasks:
+    @task(name="charge-card", timeout=30.0, retry_policy={"max_attempts": 3})
+    async def charge_card(self, ctx: TaskContext, input: ChargeInput) -> ChargeResult:
+        stripe.api_key = os.environ["STRIPE_SECRET_KEY"]
+
+        charge = stripe.Charge.create(
+            amount=input.amount,
+            currency=input.currency,
+            source=input.payment_method,
+            idempotency_key=input.idempotency_key,
+        )
+
+        return ChargeResult(charge_id=charge.id, status=charge.status)
+```
+
+</TabPanel>
+</Tabs>
+
+**Task design principles:**
+
+- **Idempotent** — Running the same task twice with the same input should produce the same result. Use idempotency keys for external APIs (e.g., Stripe). This matters because Orcher may retry tasks that fail partway through.
+- **Focused** — One task, one action. "Charge the card" not "charge the card, update inventory, and send email." Smaller tasks mean more granular checkpoints.
+- **Stateless** — Each invocation is independent. State across steps is managed by the workflow.
+- **Serializable** — Input and output must be JSON-serializable (stored in PostgreSQL JSONB and sent over gRPC).
+
+### The Journal
+
+The journal is an append-only event log in PostgreSQL that records every step of a workflow execution. It is the source of truth for what has happened.
+
+<div className="not-prose my-8 max-w-2xl mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-[11px] text-foreground-muted">
+    Workflow <span className="font-mono text-foreground">process_payment</span> · execution <span className="font-mono">exec_abc123</span>
+  </div>
+  <div className="divide-y divide-border-default">
+    <div className="flex gap-3 px-4 py-2 text-[11px]">
+      <div className="w-16 shrink-0 font-mono text-foreground-muted">Event 1</div>
+      <div className="w-32 shrink-0 font-mono text-foreground">WorkflowStarted</div>
+      <div className="text-foreground-muted font-mono">input: {'{ orderId: "ord_456", total: 5000 }'}</div>
+    </div>
+    <div className="flex gap-3 px-4 py-2 text-[11px]">
+      <div className="w-16 shrink-0 font-mono text-foreground-muted">Event 2</div>
+      <div className="w-32 shrink-0 font-mono text-foreground">StepCompleted</div>
+      <div className="text-foreground-muted font-mono">validate_card → {'{ valid: true }'}</div>
+    </div>
+    <div className="flex gap-3 px-4 py-2 text-[11px]">
+      <div className="w-16 shrink-0 font-mono text-foreground-muted">Event 3</div>
+      <div className="w-32 shrink-0 font-mono text-foreground">StepCompleted</div>
+      <div className="text-foreground-muted font-mono">check_fraud → {'{ score: 0.15, risk: "low" }'}</div>
+    </div>
+    <div className="flex gap-3 px-4 py-2 text-[11px]">
+      <div className="w-16 shrink-0 font-mono text-foreground-muted">Event 4</div>
+      <div className="w-32 shrink-0 font-mono text-foreground">StepCompleted</div>
+      <div className="text-foreground-muted font-mono">charge_stripe → {'{ id: "ch_xyz", status: "succeeded" }'}</div>
+    </div>
+    <div className="flex gap-3 px-4 py-2 text-[11px]">
+      <div className="w-16 shrink-0 font-mono text-foreground-muted">Event 5</div>
+      <div className="w-32 shrink-0 font-mono text-foreground">StepCompleted</div>
+      <div className="text-foreground-muted font-mono">save_payment → {'{ payment_id: "pay_123" }'}</div>
+    </div>
+    <div className="flex gap-3 px-4 py-2 text-[11px] bg-red-500/5">
+      <div className="w-16 shrink-0 font-mono text-red-400">Event 6</div>
+      <div className="w-32 shrink-0 font-mono text-red-400">StepCompleted</div>
+      <div className="text-red-400 font-mono">send_receipt → FAILED: "SMTP timeout" ← crash here</div>
+    </div>
+  </div>
+</div>
+
+When the workflow resumes on a different worker, `ctx.execute_task()` checks the journal before executing:
+
+<div className="not-prose my-8 max-w-md mx-auto">
+  <div className="flex flex-col items-center">
+    {/* Call */}
+    <div className="border bg-surface-75 px-4 py-2 text-xs font-mono text-foreground">
+      ctx.execute_task(charge_card, input)
+    </div>
+    {/* Line down */}
+    <div className="w-px h-6 bg-border-strong" />
+    {/* Decision */}
+    <div className="border bg-surface-100 px-6 py-3 text-center">
+      <div className="text-xs font-medium text-foreground">StepCompleted entry exists</div>
+      <div className="text-xs text-foreground-light">in journal for this step?</div>
+    </div>
+    {/* Horizontal bar + branches */}
+    <div className="relative w-full mt-6">
+      {/* Vertical stem from decision to horizontal bar */}
+      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-px -mt-6 h-6 bg-border-strong" />
+      {/* Horizontal connector line */}
+      <div className="absolute top-0 h-px bg-border-strong" style={{ left: 'calc(25% - 0.40rem)', right: 'calc(25% - 0.40rem)' }} />
+      {/* Two vertical drops */}
+      <div className="flex gap-6">
+        <div className="flex-1 flex flex-col items-center">
+          <div className="w-px h-6 bg-border-strong" />
+          <div className="text-[10px] font-mono font-bold text-foreground-muted mb-1">YES</div>
+          <div className="w-px h-4 bg-border-strong" />
+          <div className="border border-foreground/20 bg-background px-5 py-4 text-center w-full flex flex-col justify-center min-h-[5rem]">
+            <div className="text-xs font-medium text-foreground">Return cached result</div>
+            <div className="text-[11px] text-foreground-muted mt-1">No API call — instant</div>
+          </div>
+        </div>
+        <div className="flex-1 flex flex-col items-center">
+          <div className="w-px h-5 bg-border-strong" />
+          <div className="text-[10px] font-mono font-bold text-foreground-muted mb-1">NO</div>
+          <div className="w-px h-4 bg-border-strong" />
+          <div className="border border-foreground/20 bg-background px-5 py-4 text-center w-full flex flex-col justify-center min-h-[5rem]">
+            <div className="text-xs font-medium text-foreground">Execute task</div>
+            <div className="text-[11px] text-foreground-muted mt-1">Save to journal → return result</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+### Deterministic Replay
+
+When a workflow resumes after a crash, it re-runs the entire workflow function from the beginning. Completed steps return cached results from the journal instantly. Because the same task results lead to the same decisions, the workflow follows the exact same execution path and reaches the point where the crash occurred.
+
+<ReplayTimeline
+  title="Deterministic Replay"
+  firstRunSteps={[
+    { step: 1, task: 'validate_card', result: '{valid: true}', status: 'executed' },
+    { step: 2, task: 'check_fraud', result: '{score: 0.15}', status: 'executed' },
+    { step: 3, task: 'charge_stripe', result: '{id: "ch_xyz"}', status: 'executed' },
+    { step: 4, task: 'send_receipt', status: 'crashed' },
+  ]}
+  replaySteps={[
+    { step: 1, task: 'validate_card', result: '{valid: true}', status: 'cached' },
+    { step: 2, task: 'check_fraud', result: '{score: 0.15}', status: 'cached' },
+    { step: 3, task: 'charge_stripe', result: '{id: "ch_xyz"}', status: 'cached' },
+    { step: 4, task: 'send_receipt', status: 'fresh' },
+  ]}
+/>
+
+This is why workflow code must be deterministic. If you use `Math.random()` directly in a workflow, the original run might take one branch and the replay might take a different branch, causing the replay to diverge from the journal. Anything non-deterministic must go inside a task:
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+
+// BAD: Non-deterministic — different value on replay breaks journal alignment
+#[workflow(name = "bad_workflow")]
+async fn bad_workflow(ctx: WorkflowContext, input: Input) -> Result<Output> {
+    let random: f64 = rand::random(); // Different each run!
+    if random > 0.5 {
+        ctx.execute_task("do_something", &input).await?;
+    }
+    Ok(Output {})
+}
+
+// GOOD: Random value captured in a task and cached in journal
+#[workflow(name = "good_workflow")]
+async fn good_workflow(ctx: WorkflowContext, input: Input) -> Result<Output> {
+    let random: f64 = ctx.execute_task("generate_random", &()).await?;
+    if random > 0.5 {
+        ctx.execute_task("do_something", &input).await?; // Same branch on replay
+    }
+    Ok(Output {})
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, WorkflowContext } from '@orcher/sdk';
+
+// BAD: Non-deterministic
+@Workflow({ name: 'bad-workflow' })
+class BadWorkflow {
+  async run(ctx: WorkflowContext, input: Input) {
+    const random = Math.random(); // Different each run!
+    if (random > 0.5) {
+      await ctx.executeTask(SomeTasks.doSomething, input);
+    }
+  }
+}
+
+// GOOD: Random value captured in a task
+@Workflow({ name: 'good-workflow' })
+class GoodWorkflow {
+  async run(ctx: WorkflowContext, input: Input) {
+    const random = await ctx.executeTask(UtilTasks.generateRandom, null);
+    if (random > 0.5) {
+      await ctx.executeTask(SomeTasks.doSomething, input); // Same branch on replay
+    }
+  }
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, WorkflowContext
+
+# BAD: Non-deterministic
+@workflow(name="bad-workflow")
+class BadWorkflow:
+    async def run(self, ctx: WorkflowContext, input: Input):
+        import random
+        rand_val = random.random()  # Different each run!
+        if rand_val > 0.5:
+            await ctx.execute_task(SomeTasks.do_something, input=input)
+
+# GOOD: Use ctx.random for deterministic randomness
+@workflow(name="good-workflow")
+class GoodWorkflow:
+    async def run(self, ctx: WorkflowContext, input: Input):
+        rand_val = ctx.random.random()  # Deterministic — same on replay
+        if rand_val > 0.5:
+            await ctx.execute_task(SomeTasks.do_something, input=input)
+```
+
+</TabPanel>
+</Tabs>
+
+**Non-deterministic operations to avoid in workflows:**
+- Random values — `Math.random()`, `rand::random()`, `random.random()`
+- Current time — `Date.now()`, `Instant::now()`, `datetime.now()`
+- UUID generation — `Uuid::new_v4()`, `crypto.randomUUID()`
+- Direct I/O — HTTP requests, file reads, database queries
+- Global mutable state — reading from variables that change between runs
+
+---
+
+## Architecture
+
+Orcher follows a client-server model with three components:
+
+<div className="not-prose my-8 max-w-lg mx-auto">
+  <div className="flex flex-col items-center">
+    {/* Your Application */}
+    <div className="border bg-surface-75 w-full p-4">
+      <div className="text-[10px] font-mono uppercase tracking-wider text-foreground-muted mb-3">Your Application (SDK Workers)</div>
+      <div className="grid grid-cols-3 gap-3">
+        {['Worker 1', 'Worker 2', 'Worker N'].map((name) => (
+          <div key={name} className="border border-foreground/15 bg-background p-3 text-center">
+            <div className="text-xs font-medium text-foreground">{name}</div>
+            <div className="text-[10px] text-foreground-muted mt-1">Workflows · Tasks</div>
+          </div>
+        ))}
+      </div>
+    </div>
+    {/* gRPC connection */}
+    <div className="flex flex-col items-center">
+      <div className="w-px h-4 bg-border-strong" />
+      <div className="text-[10px] font-mono text-foreground-muted px-2 py-0.5 border bg-background">gRPC</div>
+      <div className="w-px h-4 bg-border-strong" />
+    </div>
+    {/* Orchestrator */}
+    <div className="border bg-surface-100 w-full p-4">
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-sm font-medium text-foreground">Orchestrator</div>
+        <div className="flex gap-2">
+          <span className="text-[10px] font-mono text-foreground-muted">:50051</span>
+          <span className="text-[10px] font-mono text-foreground-muted">:8080</span>
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+        {['Workflow scheduling', 'Task dispatch', 'Journal management', 'Claim-based locking', 'Timeout detection', 'Eager return'].map((item) => (
+          <div key={item} className="text-[11px] text-foreground-light flex items-center gap-1.5">
+            <span className="w-1 h-1 bg-foreground-muted shrink-0" />
+            {item}
+          </div>
+        ))}
+      </div>
+    </div>
+    {/* Connection to storage */}
+    <div className="w-px h-6 bg-border-strong" />
+    {/* Storage layer */}
+    <div className="relative w-full">
+      <div className="absolute top-0 h-px bg-border-strong" style={{ left: 'calc(25% - 0.30rem)', right: 'calc(25% - 0.30rem)' }} />
+      <div className="flex gap-4">
+        <div className="flex-1 flex flex-col items-center">
+          <div className="w-px h-6 bg-border-strong" />
+          <div className="border bg-background w-full p-3 text-center flex flex-col justify-center min-h-[4.5rem]">
+            <div className="text-xs font-medium text-foreground">PostgreSQL</div>
+            <div className="text-[10px] text-foreground-muted mt-1">Journal · State · Queue</div>
+          </div>
+        </div>
+        <div className="flex-1 flex flex-col items-center">
+          <div className="w-px h-6 bg-border-strong" />
+          <div className="border border-dashed bg-background w-full p-3 text-center flex flex-col justify-center min-h-[4.5rem]">
+            <div className="text-xs font-medium text-foreground">Redis</div>
+            <div className="text-[10px] text-foreground-muted mt-1">Fast dispatch · optional</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+**Orchestrator** — A stateless server (gRPC on port 50051, REST API on port 8080) that coordinates workflow execution, task scheduling, and worker polling. All state lives in PostgreSQL, so you can run multiple orchestrator instances for high availability.
+
+**SDK Workers** — Your application processes running the Orcher SDK. Workers register with the orchestrator, poll for work via gRPC long-polling, execute your workflow and task handlers, and report results. Workers are stateless — if one crashes, another picks up the work.
+
+**PostgreSQL** — The primary data store for workflow state, journal entries, task executions, and the work queue (`SELECT FOR UPDATE SKIP LOCKED`).
+
+**Redis** (optional) — Wakes workers via `LPUSH`/`BRPOP` as soon as work is queued. Without Redis, the system falls back to PostgreSQL-based polling.
+
+### Execution Flow
+
+1. **Start workflow** — Your application calls the orchestrator's `StartWorkflowExecution` gRPC endpoint (or `POST /api/v1/workflows/execute` on the orchestrator's REST API). The orchestrator creates a workflow execution record in PostgreSQL.
+
+2. **Worker polls** — SDK workers long-poll the orchestrator via `PollWorkflowExecution`. When work is available, the orchestrator assigns the workflow to a worker using `SELECT FOR UPDATE SKIP LOCKED`.
+
+3. **Replay and execute** — The worker loads the journal from the orchestrator, replays completed steps (returning cached results), and executes the next pending step. Each `ctx.execute_task()` call schedules a task on the orchestrator.
+
+4. **Task dispatch** — The orchestrator places the task on the worker's task queue. A worker polls via `PollTaskExecution`, executes the task handler, and reports the result via `CompleteTaskExecution`.
+
+5. **Continue or complete** — After a task completes, the orchestrator re-queues the workflow for the next step. This repeats until the workflow finishes or fails.
+
+---
+
+## Compensation Pattern (Sagas)
+
+When operations span multiple services, you can't use a single database transaction. Workflows solve this with compensation — if a later step fails, you run "undo" tasks for the steps that already succeeded:
+
+<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+
+#[workflow(name = "transfer_money")]
+async fn transfer_money(ctx: WorkflowContext, transfer: Transfer) -> Result<TransferResult> {
+    // Debit source account
+    ctx.execute_task("debit_account", &DebitInput {
+        account_id: transfer.from.clone(),
+        amount: transfer.amount,
+    }).await?;
+
+    // Credit destination — if this fails, compensate
+    match ctx.execute_task("credit_account", &CreditInput {
+        account_id: transfer.to.clone(),
+        amount: transfer.amount,
+    }).await {
+        Ok(_) => Ok(TransferResult { status: "completed".into() }),
+        Err(e) => {
+            // Refund the debit
+            ctx.execute_task("refund_account", &RefundInput {
+                account_id: transfer.from.clone(),
+                amount: transfer.amount,
+            }).await?;
+            Err(e)
+        }
+    }
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, WorkflowContext } from '@orcher/sdk';
+
+@Workflow({ name: 'transfer-money' })
+class TransferMoneyWorkflow {
+  async run(ctx: WorkflowContext, transfer: Transfer): Promise<TransferResult> {
+    // Debit source account
+    await ctx.executeTask(AccountTasks.debit, {
+      accountId: transfer.from,
+      amount: transfer.amount,
+    });
+
+    // Credit destination — if this fails, compensate
+    try {
+      await ctx.executeTask(AccountTasks.credit, {
+        accountId: transfer.to,
+        amount: transfer.amount,
+      });
+      return { status: 'completed' };
+    } catch (error) {
+      // Refund the debit
+      await ctx.executeTask(AccountTasks.refund, {
+        accountId: transfer.from,
+        amount: transfer.amount,
+      });
+      throw error;
+    }
+  }
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, WorkflowContext
+
+@workflow(name="transfer-money")
+class TransferMoneyWorkflow:
+    async def run(self, ctx: WorkflowContext, transfer: Transfer) -> TransferResult:
+        # Debit source account
+        await ctx.execute_task(
+            AccountTasks.debit, account_id=transfer.from_account, amount=transfer.amount
+        )
+
+        # Credit destination — if this fails, compensate
+        try:
+            await ctx.execute_task(
+                AccountTasks.credit, account_id=transfer.to_account, amount=transfer.amount
+            )
+            return TransferResult(status="completed")
+        except Exception as e:
+            # Refund the debit
+            await ctx.execute_task(
+                AccountTasks.refund, account_id=transfer.from_account, amount=transfer.amount
+            )
+            raise e
+```
+
+</TabPanel>
+</Tabs>
+
+---
+
+## When to Use Orcher
+
+**Good fit:**
+- **Multi-step business processes** — order processing, user onboarding, payment flows
+- **Distributed transactions** — cross-service operations with compensation (Saga pattern)
+- **Long-running operations** — data migrations, batch processing, report generation
+- **External dependencies** — API integrations with retries, human approvals that take days
+- **Critical operations** — financial transactions, data pipelines, compliance workflows
+
+**Not ideal for:**
+- **Real-time streaming** — use a stream processor; journaling every step adds latency a per-event stream may not afford
+- **Simple CRUD** — direct database access is simpler when the operation is already atomic
+- **Stateless HTTP APIs** — no orchestration needed if each request is independent
+
+---
+
+## Next Steps
+
+- [Workflows](/guides/core/workflows) — Workflow patterns and best practices
+- [Tasks](/guides/core/tasks) — Task design, idempotency, and retry policies
+- [Events & Signals](/guides/core/events) — Inter-workflow communication
+- [Error Handling](/guides/core/error-handling) — Retry policies and compensation
+- [Quick Start](/guides/getting-started/quickstart) — Build your first workflow

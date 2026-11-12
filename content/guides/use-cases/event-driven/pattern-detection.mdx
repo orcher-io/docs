@@ -1,0 +1,363 @@
+---
+id: 'event-pattern-detection'
+title: 'Pattern Detection with Correlated Events'
+sidebar_label: 'Pattern Detection'
+---
+
+Some event-driven scenarios require correlating multiple events that arrive over time — detecting fraud by matching a password change followed by a large transfer within 10 minutes, or identifying abandoned carts by checking if a checkout event doesn't follow an add-to-cart within 30 minutes. Orcher models this with event gates that wait for correlated events with timeouts.
+
+## How it works
+
+A first event starts a workflow that opens a gate for the correlated second event, with a deadline. The powerful part is that one primitive — `wait_for_event_with_timeout` — detects two opposite things depending on which branch you treat as the signal: an event *arriving* inside the window, or an event *failing to*.
+
+<div className="not-prose my-8 max-w-lg mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">The Same Gate, Two Opposite Signals</div>
+  </div>
+  <div className="grid grid-cols-2 gap-px bg-border-default">
+    <div className="bg-background px-4 py-3">
+      <div className="text-[10px] font-mono uppercase tracking-widest text-foreground-muted mb-2">Presence · fraud</div>
+      <div className="text-xs font-medium text-foreground mb-1">The event is the alert</div>
+      <p className="m-0 text-[10px] text-foreground-muted leading-relaxed">password change → wait 10 min for <code className="text-[9px]">large_transfer</code>. Event arrives → flag &amp; lock. Timeout → clear.</p>
+    </div>
+    <div className="bg-background px-4 py-3">
+      <div className="text-[10px] font-mono uppercase tracking-widest text-foreground-muted mb-2">Absence · abandoned cart</div>
+      <div className="text-xs font-medium text-foreground mb-1">The timeout is the alert</div>
+      <p className="m-0 text-[10px] text-foreground-muted leading-relaxed">add-to-cart → wait 30 min for <code className="text-[9px]">checkout</code>. Event arrives → do nothing. Timeout → send reminder.</p>
+    </div>
+  </div>
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Detecting "something didn't happen" is normally the hard case — here it's just the timeout branch.</span>
+  </div>
+</div>
+
+The workflow itself is the correlation state. A fraud detector parked on its gate for ten minutes *is* the record that this user is being watched — there's no separate "pending patterns" table to maintain, scan, or expire.
+
+## Example: fraud and abandoned-cart detectors
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="typescript"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use std::time::Duration;
+
+#[task]
+async fn flag_suspicious_activity(input: SuspiciousActivity) -> Result<()> {
+    fraud_service::flag(input).await
+}
+
+#[task]
+async fn lock_account(user_id: String) -> Result<()> {
+    auth_service::lock_account(&user_id).await
+}
+
+#[task]
+async fn notify_security_team(alert: SecurityAlert) -> Result<()> {
+    alerting::notify_security(alert).await
+}
+
+#[task]
+async fn send_abandoned_cart_email(input: AbandonedCartEmail) -> Result<()> {
+    email_client::send_abandoned_cart(input).await
+}
+
+// Fraud detection: password change + large transfer = suspicious
+#[workflow(name = "fraud_pattern_detector", version = "1.0.0")]
+async fn fraud_pattern_detector(
+    ctx: WorkflowContext,
+    trigger: PasswordChangeEvent,
+) -> Result<FraudCheckResult> {
+    // Wait up to 10 minutes for a large transfer after password change
+    let transfer = ctx.wait_for_event_with_timeout::<TransferEvent>(
+        "large_transfer",
+        Duration::from_secs(600),
+    ).await;
+
+    match transfer {
+        Ok(event) if event.amount > 5000.0 => {
+            // Suspicious pattern detected
+            ctx.execute_task(flag_suspicious_activity, SuspiciousActivity {
+                user_id: trigger.user_id.clone(),
+                pattern: "password_change_then_large_transfer".into(),
+                transfer_amount: event.amount,
+            }).await?;
+
+            ctx.execute_task(lock_account, trigger.user_id.clone()).await?;
+
+            ctx.execute_task(notify_security_team, SecurityAlert {
+                user_id: trigger.user_id,
+                severity: "high".into(),
+                details: format!("${:.2} transfer within 10min of password change", event.amount),
+            }).await?;
+
+            Ok(FraudCheckResult::flagged())
+        }
+        _ => {
+            // No suspicious pattern — timeout or small transfer
+            Ok(FraudCheckResult::clear())
+        }
+    }
+}
+
+// Abandoned cart detection: add-to-cart without checkout within 30min
+#[workflow(name = "abandoned_cart_detector", version = "1.0.0")]
+async fn abandoned_cart_detector(
+    ctx: WorkflowContext,
+    cart_event: AddToCartEvent,
+) -> Result<()> {
+    // Wait 30 minutes for a checkout event
+    let checkout = ctx.wait_for_event_with_timeout::<CheckoutEvent>(
+        "checkout_completed",
+        Duration::from_secs(1800),
+    ).await;
+
+    if checkout.is_err() {
+        // No checkout within 30 minutes — send reminder
+        ctx.execute_task(send_abandoned_cart_email, AbandonedCartEmail {
+            user_id: cart_event.user_id,
+            items: cart_event.items,
+        }).await?;
+    }
+
+    Ok(())
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import {
+  Workflow,
+  Tasks,
+  Task,
+  WorkflowContext,
+  createTaskRefs,
+} from '@orcher/sdk';
+
+@Tasks()
+class FraudTasks {
+  @Task()
+  async flagSuspiciousActivity(input: SuspiciousActivity): Promise<void> {
+    await fraudService.flag(input);
+  }
+
+  @Task()
+  async lockAccount(userId: string): Promise<void> {
+    await authService.lockAccount(userId);
+  }
+
+  @Task()
+  async notifySecurityTeam(alert: SecurityAlert): Promise<void> {
+    await alerting.notifySecurity(alert);
+  }
+
+  @Task()
+  async sendAbandonedCartEmail(input: AbandonedCartEmail): Promise<void> {
+    await emailClient.sendAbandonedCart(input);
+  }
+}
+
+const tasks = createTaskRefs(FraudTasks);
+
+// Fraud detection: password change + large transfer = suspicious
+@Workflow({ name: 'fraud_pattern_detector', version: '1.0.0' })
+class FraudPatternDetector {
+  async run(
+    ctx: WorkflowContext,
+    trigger: PasswordChangeEvent,
+  ): Promise<FraudCheckResult> {
+    // Wait up to 10 minutes for a large transfer after password change
+    try {
+      const event = await ctx.waitForEventWithTimeout<TransferEvent>(
+        'large_transfer',
+        10 * 60 * 1000, // 10 minutes
+      );
+
+      if (event.amount > 5000) {
+        // Suspicious pattern detected
+        await ctx.executeTask(tasks.flagSuspiciousActivity, {
+          userId: trigger.userId,
+          pattern: 'password_change_then_large_transfer',
+          transferAmount: event.amount,
+        });
+        await ctx.executeTask(tasks.lockAccount, trigger.userId);
+        await ctx.executeTask(tasks.notifySecurityTeam, {
+          userId: trigger.userId,
+          severity: 'high',
+          details: `$${event.amount.toFixed(2)} transfer within 10min of password change`,
+        });
+        return FraudCheckResult.flagged();
+      }
+    } catch {
+      // Timeout — no suspicious pattern
+    }
+
+    return FraudCheckResult.clear();
+  }
+}
+
+// Abandoned cart detection: add-to-cart without checkout within 30min
+@Workflow({ name: 'abandoned_cart_detector', version: '1.0.0' })
+class AbandonedCartDetector {
+  async run(
+    ctx: WorkflowContext,
+    cartEvent: AddToCartEvent,
+  ): Promise<void> {
+    try {
+      // Wait 30 minutes for a checkout event
+      await ctx.waitForEventWithTimeout<CheckoutEvent>(
+        'checkout_completed',
+        30 * 60 * 1000, // 30 minutes
+      );
+    } catch {
+      // No checkout within 30 minutes — send reminder
+      await ctx.executeTask(tasks.sendAbandonedCartEmail, {
+        userId: cartEvent.userId,
+        items: cartEvent.items,
+      });
+    }
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext
+
+@task
+async def flag_suspicious_activity(input: SuspiciousActivity) -> None:
+    await fraud_service.flag(input)
+
+@task
+async def lock_account(user_id: str) -> None:
+    await auth_service.lock_account(user_id)
+
+@task
+async def notify_security_team(alert: SecurityAlert) -> None:
+    await alerting.notify_security(alert)
+
+@task
+async def send_abandoned_cart_email(input: AbandonedCartEmail) -> None:
+    await email_client.send_abandoned_cart(input)
+
+# Fraud detection: password change + large transfer = suspicious
+@workflow(name="fraud_pattern_detector", version="1.0.0")
+async def fraud_pattern_detector(
+    ctx: WorkflowContext, trigger: PasswordChangeEvent
+) -> FraudCheckResult:
+    # Wait up to 10 minutes for a large transfer after password change
+    try:
+        event = await ctx.wait_for_event_with_timeout(
+            "large_transfer", timeout_ms=10 * 60 * 1000,
+        )
+
+        if event["amount"] > 5000:
+            await ctx.execute_task(flag_suspicious_activity, SuspiciousActivity(
+                user_id=trigger.user_id,
+                pattern="password_change_then_large_transfer",
+                transfer_amount=event["amount"],
+            ))
+            await ctx.execute_task(lock_account, trigger.user_id)
+            await ctx.execute_task(notify_security_team, SecurityAlert(
+                user_id=trigger.user_id,
+                severity="high",
+                details=f"${event['amount']:.2f} transfer within 10min of password change",
+            ))
+            return FraudCheckResult.flagged()
+
+    except TimeoutError:
+        pass  # No suspicious pattern
+
+    return FraudCheckResult.clear()
+
+# Abandoned cart detection: add-to-cart without checkout within 30min
+@workflow(name="abandoned_cart_detector", version="1.0.0")
+async def abandoned_cart_detector(
+    ctx: WorkflowContext, cart_event: AddToCartEvent
+) -> None:
+    try:
+        await ctx.wait_for_event_with_timeout(
+            "checkout_completed", timeout_ms=30 * 60 * 1000,
+        )
+    except TimeoutError:
+        # No checkout within 30 minutes — send reminder
+        await ctx.execute_task(send_abandoned_cart_email, AbandonedCartEmail(
+            user_id=cart_event.user_id, items=cart_event.items,
+        ))
+```
+
+</TabPanel>
+
+</Tabs>
+
+The key insight is that the workflow *waits* for the correlated event rather than polling for it. While waiting, it consumes zero compute. If the correlated event never arrives, the timeout fires and triggers the appropriate action (lock account, send reminder). This pattern scales to millions of concurrent correlation windows because each waiting workflow is just a row in PostgreSQL.
+
+---
+
+## Presence or absence, side by side
+
+The two detectors are mirror images. Seeing them side by side is the clearest way to internalize when to act on the event and when to act on its absence:
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Same Window, Inverted Verdict</div>
+  </div>
+  {[
+    { label: 'trigger event', detail: 'password change · add-to-cart', icon: '1' },
+    { label: 'wait_for_event_with_timeout', detail: 'the correlation window opens', icon: '⏸', state: 'suspend' },
+    { label: 'event arrives in window', detail: 'fraud → FLAG · cart → do nothing', icon: '✓', state: 'done' },
+    { label: 'window expires, no event', detail: 'fraud → clear · cart → REMIND', icon: '⏱', state: 'crash' },
+  ].map((row, i, arr) => (
+    <div key={i}>
+      <div className={`px-4 py-2 flex items-center gap-3 ${row.state === 'crash' ? 'bg-red-500/5' : ''} ${row.state === 'suspend' ? 'bg-surface-75' : ''}`}>
+        <span className={`w-5 h-5 flex items-center justify-center text-[10px] shrink-0 ${row.state === 'crash' ? 'text-red-400' : 'text-foreground-muted'}`}>{row.icon}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{row.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{row.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Uppercase is the alert path — presence for fraud, absence for the cart.</span>
+  </div>
+</div>
+
+## Design notes
+
+- **Route the second event to the right instance.** The `large_transfer` event has to reach *this user's* detector, not another's. Address it by the workflow/execution ID keyed on the user — the same per-instance delivery as [event gates](/guides/use-cases/distributed-systems/event-gates), covered in [Events & Signals](/guides/core/events).
+- **The window is state you don't have to store.** Traditional absence-detection needs a scheduled job scanning a table for "carts with no checkout." Here the parked workflow is the pending state and the durable timer is the scan — nothing to poll, nothing to expire manually.
+- **Filter inside the branch, not just on delivery.** The fraud detector waits for *any* `large_transfer` but only flags when `amount > 5000`. Keep the predicate in the workflow so the rule is journaled and versioned with the code, not buried in whatever emits the event.
+- **Correlate more than two events by nesting gates.** A three-step pattern (login → password change → transfer) is just another `wait_for_event_with_timeout` after the first fires — an escalation ladder like the one in [event gates](/guides/use-cases/distributed-systems/event-gates), where each rung tightens the deadline.
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-4 not-prose">
+  <Link href="/guides/use-cases/event-driven/best-practices" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Best Practices</h3>
+    <p className="text-sm text-foreground-light">Design guidelines, performance characteristics, and further reading.</p>
+  </Link>
+  <Link href="/guides/core/events" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Events & Signals</h3>
+    <p className="text-sm text-foreground-light">Core concepts behind event gates, signal delivery, and inter-workflow communication.</p>
+  </Link>
+</div>

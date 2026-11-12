@@ -1,0 +1,1610 @@
+---
+id: backend-engineers-production
+title: "Production Excellence"
+description: "Monitoring, observability, testing strategies, performance optimization, deployment, and production checklist"
+sidebar_label: 'Production'
+---
+
+Now that you understand the core concepts and patterns, let's explore how to run Orcher workflows in production with confidence.
+
+## Monitoring and Observability
+
+### Understanding Workflow State
+
+Orcher provides rich visibility into workflow execution through the workflow journal and metadata tables. Every workflow moves through a small set of states — and monitoring is mostly about watching for the two that mean trouble.
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Workflow States — and What to Watch</div>
+  </div>
+  {[
+    { label: 'queued', detail: 'waiting for a worker', tag: 'normal', state: '' },
+    { label: 'running', detail: 'executing tasks', tag: 'normal — alert if stuck for too long', state: 'watch' },
+    { label: 'suspended', detail: 'awaiting a timer or event — zero resources', tag: 'normal', state: '' },
+    { label: 'completed', detail: 'all steps finished', tag: 'terminal ✓', state: 'done' },
+    { label: 'failed', detail: 'retries exhausted', tag: 'terminal — alert', state: 'crash' },
+  ].map((row, i, arr) => (
+    <div key={i}>
+      <div className={`px-4 py-2 flex items-center gap-3 ${row.state === 'crash' ? 'bg-red-500/5' : ''} ${row.state === 'watch' ? 'bg-surface-75' : ''}`}>
+        <span className={`w-5 h-5 flex items-center justify-center text-[10px] shrink-0 ${row.state === 'crash' ? 'text-red-400' : 'text-foreground-muted'}`}>{row.state === 'crash' ? '✗' : row.state === 'done' ? '✓' : '•'}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{row.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{row.detail}</span>
+        </div>
+        <span className={`text-[9px] font-mono uppercase tracking-wider shrink-0 ${row.state === 'crash' ? 'text-red-400' : 'text-foreground-muted'}`}>{row.tag}</span>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Alert on <code className="text-[9px]">failed</code>, and on <code className="text-[9px]">running</code> that never terminates — the rest are healthy by design.</span>
+  </div>
+</div>
+
+**Query Workflow Status:**
+
+```sql
+-- Get workflow overview
+SELECT
+    id,
+    workflow_name,
+    status,
+    created_at,
+    completed_at,
+    attempt,
+    error
+FROM workflows
+WHERE status IN ('running', 'failed')
+ORDER BY created_at DESC
+LIMIT 100;
+```
+
+**Monitor Task Performance:**
+
+```sql
+-- Find slow tasks across all workflows
+SELECT
+    task_name,
+    COUNT(*) as execution_count,
+    AVG(EXTRACT(EPOCH FROM (completed_at - created_at))) as avg_duration_seconds,
+    MAX(EXTRACT(EPOCH FROM (completed_at - created_at))) as max_duration_seconds,
+    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (completed_at - created_at))) as p95_duration_seconds
+FROM workflow_execution_journal
+WHERE status = 'completed'
+    AND completed_at > NOW() - INTERVAL '24 hours'
+GROUP BY task_name
+ORDER BY avg_duration_seconds DESC;
+```
+
+**Track Failure Rates:**
+
+```sql
+-- Calculate task failure rates
+SELECT
+    task_name,
+    COUNT(*) FILTER (WHERE status = 'completed') as success_count,
+    COUNT(*) FILTER (WHERE status = 'failed') as failure_count,
+    ROUND(
+        100.0 * COUNT(*) FILTER (WHERE status = 'failed') / COUNT(*),
+        2
+    ) as failure_rate_percent
+FROM workflow_execution_journal
+WHERE created_at > NOW() - INTERVAL '7 days'
+GROUP BY task_name
+HAVING COUNT(*) > 10
+ORDER BY failure_rate_percent DESC;
+```
+
+### Structured Logging
+
+Add contextual logging to your workflows and tasks:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+use tracing::{info, warn, error, instrument};
+
+#[workflow(name = "process_payment")]
+#[instrument(skip(ctx), fields(workflow_id = %ctx.workflow_id()))]
+pub async fn process_payment(
+    ctx: WorkflowContext,
+    payment: PaymentInput,
+) -> Result<PaymentResult> {
+    info!(
+        user_id = %payment.user_id,
+        amount = payment.amount,
+        "Starting payment processing"
+    );
+
+    // Log decision points
+    let fraud_score = ctx.execute_task(check_fraud, payment.user_id.clone()).await?;
+
+    if fraud_score > 0.8 {
+        warn!(
+            user_id = %payment.user_id,
+            fraud_score = fraud_score,
+            "Payment flagged as fraudulent"
+        );
+        return Err(anyhow::anyhow!("Payment flagged"));
+    }
+
+    info!(fraud_score = fraud_score, "Fraud check passed");
+
+    // Execute payment
+    let charge = ctx.execute_task(charge_stripe, payment.clone()).await?;
+
+    info!(
+        charge_id = %charge.id,
+        amount = payment.amount,
+        "Payment charged successfully"
+    );
+
+    Ok(PaymentResult {
+        charge_id: charge.id,
+        status: "completed".to_string(),
+        receipt_url: charge.receipt_url,
+    })
+}
+
+#[task]
+#[instrument]
+async fn charge_stripe(ctx: TaskContext, payment: PaymentInput) -> Result<StripeCharge> {
+    info!("Calling Stripe API");
+
+    let start = std::time::Instant::now();
+    let charge = make_stripe_call(payment).await?;
+    let duration = start.elapsed();
+
+    info!(
+        duration_ms = duration.as_millis(),
+        charge_id = %charge.id,
+        "Stripe API call completed"
+    );
+
+    Ok(charge)
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, TaskContext, WorkflowContext, createTaskRefs } from '@orcher/sdk';
+import { logger } from './logger';
+
+@Tasks()
+class PaymentTasksLogged {
+  @Task()
+  async checkFraud(ctx: TaskContext, userId: string): Promise<number> { /* ... */ }
+
+  @Task()
+  async chargeStripe(ctx: TaskContext, payment: PaymentInput): Promise<StripeCharge> {
+    logger.info('Calling Stripe API', { paymentMethod: payment.paymentMethod });
+
+    const startTime = Date.now();
+    const charge = await makeStripeCall(payment);
+    const duration = Date.now() - startTime;
+
+    logger.info('Stripe API call completed', {
+      chargeId: charge.id,
+      durationMs: duration,
+    });
+
+    return charge;
+  }
+}
+
+const paymentTasksLogged = createTaskRefs(PaymentTasksLogged);
+
+@Workflow({ name: 'process_payment', version: '1.0.0' })
+class ProcessPaymentLogged {
+  async run(ctx: WorkflowContext, payment: PaymentInput): Promise<PaymentResult> {
+    const workflowId = ctx.workflowId();
+
+    logger.info('Starting payment processing', {
+      workflowId,
+      userId: payment.userId,
+      amount: payment.amount,
+    });
+
+    const fraudScore = await ctx.executeTask(paymentTasksLogged.checkFraud, payment.userId);
+
+    if (fraudScore > 0.8) {
+      logger.warn('Payment flagged as fraudulent', {
+        workflowId,
+        userId: payment.userId,
+        fraudScore,
+      });
+      throw new Error('Payment flagged');
+    }
+
+    logger.info('Fraud check passed', { workflowId, fraudScore });
+
+    const charge = await ctx.executeTask(paymentTasksLogged.chargeStripe, payment);
+
+    logger.info('Payment charged successfully', {
+      workflowId,
+      chargeId: charge.id,
+      amount: payment.amount,
+    });
+
+    return {
+      chargeId: charge.id,
+      status: 'completed',
+      receiptUrl: charge.receiptUrl,
+    };
+  }
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+import logging
+from orcher import workflow, task, WorkflowContext, TaskContext
+
+logger = logging.getLogger(__name__)
+
+@task(name="check_fraud")
+async def check_fraud(ctx: TaskContext, user_id: str) -> float:
+    ...
+
+@task(name="charge_stripe")
+async def charge_stripe(ctx: TaskContext, payment: dict) -> dict:
+    logger.info("Calling Stripe API", extra={"payment_method": payment["payment_method"]})
+
+    import time
+    start = time.monotonic()
+    charge = await make_stripe_call(payment)
+    duration_ms = (time.monotonic() - start) * 1000
+
+    logger.info("Stripe API call completed", extra={
+        "charge_id": charge["id"],
+        "duration_ms": duration_ms,
+    })
+    return charge
+
+@workflow(name="process_payment", version="1.0.0")
+async def process_payment(ctx: WorkflowContext, payment: dict) -> dict:
+    workflow_id = ctx.info.workflow_id
+
+    logger.info("Starting payment processing", extra={
+        "workflow_id": workflow_id,
+        "user_id": payment["user_id"],
+        "amount": payment["amount"],
+    })
+
+    fraud_score = await ctx.execute_task(check_fraud, user_id=payment["user_id"])
+
+    if fraud_score > 0.8:
+        logger.warning("Payment flagged as fraudulent", extra={
+            "workflow_id": workflow_id,
+            "user_id": payment["user_id"],
+            "fraud_score": fraud_score,
+        })
+        raise Exception("Payment flagged")
+
+    logger.info("Fraud check passed", extra={"workflow_id": workflow_id, "fraud_score": fraud_score})
+
+    charge = await ctx.execute_task(charge_stripe, payment=payment)
+
+    logger.info("Payment charged successfully", extra={
+        "workflow_id": workflow_id,
+        "charge_id": charge["id"],
+        "amount": payment["amount"],
+    })
+
+    return {
+        "charge_id": charge["id"],
+        "status": "completed",
+        "receipt_url": charge["receipt_url"],
+    }
+```
+
+</TabPanel>
+</Tabs>
+
+**Logging Best Practices:**
+
+✓ Always include `workflow_id` for correlation
+✓ Log at decision points (if/else branches)
+✓ Log external API calls with duration
+✓ Log business-significant events
+✗ Don't log sensitive data (credit cards, passwords)
+✗ Don't log inside tight loops
+
+### Metrics and Alerting
+
+**Key Metrics to Track:**
+
+1. **Workflow Completion Rate**
+   ```sql
+   SELECT
+       workflow_name,
+       COUNT(*) FILTER (WHERE status = 'completed') * 100.0 / COUNT(*) as completion_rate
+   FROM workflows
+   WHERE created_at > NOW() - INTERVAL '1 hour'
+   GROUP BY workflow_name;
+   ```
+
+2. **Workflow Duration (P50, P95, P99)**
+   ```sql
+   SELECT
+       workflow_name,
+       PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (completed_at - created_at))) as p50_seconds,
+       PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (completed_at - created_at))) as p95_seconds,
+       PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (completed_at - created_at))) as p99_seconds
+   FROM workflows
+   WHERE status = 'completed'
+       AND created_at > NOW() - INTERVAL '1 hour'
+   GROUP BY workflow_name;
+   ```
+
+3. **Queue Depth (Pending Workflows)**
+   ```sql
+   SELECT COUNT(*) as pending_workflows
+   FROM workflows
+   WHERE status = 'pending';
+   ```
+
+4. **Retry Rate**
+   ```sql
+   SELECT
+       workflow_name,
+       AVG(attempt) as avg_attempts,
+       MAX(attempt) as max_attempts
+   FROM workflows
+   WHERE created_at > NOW() - INTERVAL '1 hour'
+   GROUP BY workflow_name;
+   ```
+
+**Alerting Rules:**
+
+- **Critical**: Workflow failure rate > 5% over 5 minutes
+- **Warning**: P95 duration > 2x baseline
+- **Warning**: Queue depth > 1000 workflows
+- **Critical**: Any workflow stuck for > 1 hour
+
+**Example Prometheus Metrics Export:**
+
+```rust
+use prometheus::{register_histogram_vec, register_counter_vec};
+
+// In your application initialization
+let workflow_duration = register_histogram_vec!(
+    "orcher_workflow_duration_seconds",
+    "Workflow execution duration",
+    &["workflow_name", "status"],
+    vec![0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0]
+).unwrap();
+
+let workflow_executions = register_counter_vec!(
+    "orcher_workflow_executions_total",
+    "Total workflow executions",
+    &["workflow_name", "status"]
+).unwrap();
+
+// In your workflow completion handler
+workflow_duration
+    .with_label_values(&[workflow_name, "completed"])
+    .observe(duration_seconds);
+
+workflow_executions
+    .with_label_values(&[workflow_name, "completed"])
+    .inc();
+```
+
+## Testing Strategies
+
+### Unit Testing Tasks
+
+Tasks are just async functions, so they're straightforward to test:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_charge_stripe_success() {
+        // Arrange
+        let payment = PaymentInput {
+            user_id: "user_123".to_string(),
+            amount: 5000,
+            currency: "usd".to_string(),
+            payment_method: "pm_test_card".to_string(),
+        };
+
+        // Act
+        let result = charge_stripe(payment).await;
+
+        // Assert
+        assert!(result.is_ok());
+        let charge = result.unwrap();
+        assert_eq!(charge.amount, 5000);
+        assert!(!charge.id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_charge_stripe_invalid_card() {
+        let payment = PaymentInput {
+            user_id: "user_123".to_string(),
+            amount: 5000,
+            currency: "usd".to_string(),
+            payment_method: "pm_invalid".to_string(),
+        };
+
+        let result = charge_stripe(payment).await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("card"));
+    }
+
+    #[tokio::test]
+    async fn test_task_idempotency() {
+        // Test that running task twice produces same result
+        let user_id = "user_123";
+        let amount = 100;
+
+        // First execution
+        let result1 = update_user_balance(user_id.to_string(), amount).await.unwrap();
+
+        // Get balance
+        let balance1 = get_user_balance(user_id).await.unwrap();
+
+        // Second execution (should be idempotent)
+        let result2 = update_user_balance(user_id.to_string(), amount).await.unwrap();
+
+        // Balance should be the same
+        let balance2 = get_user_balance(user_id).await.unwrap();
+        assert_eq!(balance1, balance2);
+    }
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { describe, it, expect, beforeEach } from 'vitest';
+
+describe('chargeStripe', () => {
+  const taskImpls = new PaymentTasks();
+
+  it('should successfully charge valid payment method', async () => {
+    const payment = {
+      paymentMethod: 'pm_test_card',
+      amount: 5000,
+      currency: 'usd',
+    };
+
+    const result = await taskImpls.chargeStripe(payment);
+
+    expect(result).toBeDefined();
+    expect(result.id).toBeTruthy();
+  });
+
+  it('should reject invalid payment method', async () => {
+    const payment = {
+      paymentMethod: 'pm_invalid',
+      amount: 5000,
+      currency: 'usd',
+    };
+
+    await expect(taskImpls.chargeStripe(payment)).rejects.toThrow('card');
+  });
+});
+
+describe('Task Idempotency', () => {
+  const taskImpls = new PaymentTasks();
+
+  beforeEach(async () => {
+    await resetTestDatabase();
+  });
+
+  it('should be idempotent when called multiple times', async () => {
+    const userId = 'user_123';
+    const amount = 100;
+
+    await taskImpls.updateUserCredits({ userId, amount });
+    const balance1 = await getUserBalance(userId);
+
+    await taskImpls.updateUserCredits({ userId, amount });
+    const balance2 = await getUserBalance(userId);
+
+    expect(balance1).toBe(balance2);
+  });
+});
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+import pytest
+
+@pytest.mark.asyncio
+async def test_charge_stripe_success():
+    payment_method = "pm_test_card"
+    result = await charge_stripe(payment_method, 5000, "usd")
+
+    assert result is not None
+    assert result["id"]
+
+@pytest.mark.asyncio
+async def test_charge_stripe_invalid():
+    with pytest.raises(Exception, match="card"):
+        await charge_stripe("pm_invalid", 5000, "usd")
+
+@pytest.mark.asyncio
+async def test_task_idempotency():
+    user_id = "user_123"
+    amount = 100
+
+    await update_user_credits(user_id, amount)
+    balance1 = await get_user_balance(user_id)
+
+    await update_user_credits(user_id, amount)
+    balance2 = await get_user_balance(user_id)
+
+    assert balance1 == balance2
+```
+
+</TabPanel>
+</Tabs>
+
+### Integration Testing Workflows
+
+Test workflows with a real Orcher instance and database:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use orcher::test_utils::TestOrcher;
+
+    #[tokio::test]
+    async fn test_payment_workflow_success() {
+        // Setup test Orcher instance with in-memory DB
+        let orcher = TestOrcher::new().await;
+
+        // Register workflow
+        orcher.register_workflow(process_payment).await;
+
+        // Start workflow
+        let payment = PaymentInput {
+            user_id: "user_123".to_string(),
+            amount: 5000,
+            currency: "usd".to_string(),
+            payment_method: "pm_test_card".to_string(),
+        };
+
+        let workflow_id = orcher
+            .start_workflow("process_payment", payment)
+            .await
+            .unwrap();
+
+        // Wait for completion (with timeout)
+        let result = orcher
+            .wait_for_workflow::<PaymentResult>(workflow_id, Duration::from_secs(30))
+            .await
+            .unwrap();
+
+        // Assert result
+        assert_eq!(result.status, "completed");
+        assert!(!result.charge_id.is_empty());
+
+        // Verify journal entries
+        let journal = orcher.get_workflow_journal(workflow_id).await.unwrap();
+        assert_eq!(journal.len(), 4); // validate, fraud_check, charge, save
+        assert!(journal.iter().all(|e| e.status == "completed"));
+    }
+
+    #[tokio::test]
+    async fn test_payment_workflow_fraud_rejection() {
+        let orcher = TestOrcher::new().await;
+        orcher.register_workflow(process_payment).await;
+
+        // Use high-risk user ID that triggers fraud detection
+        let payment = PaymentInput {
+            user_id: "high_risk_user".to_string(),
+            amount: 5000,
+            currency: "usd".to_string(),
+            payment_method: "pm_test_card".to_string(),
+        };
+
+        let workflow_id = orcher
+            .start_workflow("process_payment", payment)
+            .await
+            .unwrap();
+
+        // Wait for failure
+        let result = orcher
+            .wait_for_workflow::<PaymentResult>(workflow_id, Duration::from_secs(30))
+            .await;
+
+        assert!(result.is_err());
+
+        // Verify workflow failed at fraud check
+        let workflow = orcher.get_workflow(workflow_id).await.unwrap();
+        assert_eq!(workflow.status, "failed");
+        assert!(workflow.error.unwrap().contains("fraud"));
+    }
+
+    #[tokio::test]
+    async fn test_workflow_retry_on_transient_failure() {
+        let orcher = TestOrcher::new().await;
+        orcher.register_workflow(process_payment).await;
+
+        // Inject transient failure in stripe task
+        orcher.inject_task_failure("charge_stripe", 2); // Fail first 2 attempts
+
+        let payment = PaymentInput {
+            user_id: "user_123".to_string(),
+            amount: 5000,
+            currency: "usd".to_string(),
+            payment_method: "pm_test_card".to_string(),
+        };
+
+        let workflow_id = orcher
+            .start_workflow("process_payment", payment)
+            .await
+            .unwrap();
+
+        // Should eventually succeed after retries
+        let result = orcher
+            .wait_for_workflow::<PaymentResult>(workflow_id, Duration::from_secs(60))
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, "completed");
+
+        // Verify retry attempts
+        let workflow = orcher.get_workflow(workflow_id).await.unwrap();
+        assert!(workflow.attempt >= 3);
+    }
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { describe, it, expect, beforeEach } from 'vitest';
+import { TestOrcher } from '@orcher/test-utils';
+
+describe('Payment Workflow Integration', () => {
+  let orcher: TestOrcher;
+
+  beforeEach(async () => {
+    orcher = await TestOrcher.create();
+    orcher.registerWorkflow(ProcessPayment);
+  });
+
+  it('should process payment successfully', async () => {
+    const payment = {
+      userId: 'user_123',
+      amount: 5000,
+      currency: 'usd',
+      paymentMethod: 'pm_test_card',
+    };
+
+    const workflowId = await orcher.startWorkflow('process_payment', payment);
+    const result = await orcher.waitForWorkflow<PaymentResult>(workflowId, 30000);
+
+    expect(result.status).toBe('completed');
+    expect(result.chargeId).toBeTruthy();
+
+    const journal = await orcher.getWorkflowJournal(workflowId);
+    expect(journal).toHaveLength(4);
+    expect(journal.every(e => e.status === 'completed')).toBe(true);
+  });
+
+  it('should reject fraudulent payment', async () => {
+    const payment = {
+      userId: 'high_risk_user',
+      amount: 5000,
+      currency: 'usd',
+      paymentMethod: 'pm_test_card',
+    };
+
+    const workflowId = await orcher.startWorkflow('process_payment', payment);
+
+    await expect(
+      orcher.waitForWorkflow(workflowId, 30000)
+    ).rejects.toThrow('fraud');
+
+    const workflow = await orcher.getWorkflow(workflowId);
+    expect(workflow.status).toBe('failed');
+  });
+
+  it('should retry on transient failures', async () => {
+    orcher.injectTaskFailure('charge_stripe', 2);
+
+    const payment = {
+      userId: 'user_123',
+      amount: 5000,
+      currency: 'usd',
+      paymentMethod: 'pm_test_card',
+    };
+
+    const workflowId = await orcher.startWorkflow('process_payment', payment);
+    const result = await orcher.waitForWorkflow<PaymentResult>(workflowId, 60000);
+
+    expect(result.status).toBe('completed');
+
+    const workflow = await orcher.getWorkflow(workflowId);
+    expect(workflow.attempt).toBeGreaterThanOrEqual(3);
+  });
+});
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+import pytest
+from orcher.testing import TestOrcher
+
+@pytest.fixture
+async def orcher():
+    orcher = await TestOrcher.create()
+    orcher.register_workflow(process_payment)
+    return orcher
+
+@pytest.mark.asyncio
+async def test_payment_workflow_success(orcher):
+    payment = {
+        "user_id": "user_123",
+        "amount": 5000,
+        "currency": "usd",
+        "payment_method": "pm_test_card",
+    }
+
+    workflow_id = await orcher.start_workflow("process_payment", payment)
+    result = await orcher.wait_for_workflow(workflow_id, timeout=30)
+
+    assert result["status"] == "completed"
+    assert result["charge_id"]
+
+    journal = await orcher.get_workflow_journal(workflow_id)
+    assert len(journal) == 4
+    assert all(e["status"] == "completed" for e in journal)
+
+@pytest.mark.asyncio
+async def test_payment_workflow_fraud_rejection(orcher):
+    payment = {
+        "user_id": "high_risk_user",
+        "amount": 5000,
+        "currency": "usd",
+        "payment_method": "pm_test_card",
+    }
+
+    workflow_id = await orcher.start_workflow("process_payment", payment)
+
+    with pytest.raises(Exception, match="fraud"):
+        await orcher.wait_for_workflow(workflow_id, timeout=30)
+
+@pytest.mark.asyncio
+async def test_workflow_retry_on_transient_failure(orcher):
+    orcher.inject_task_failure("charge_stripe", 2)
+
+    payment = {
+        "user_id": "user_123",
+        "amount": 5000,
+        "currency": "usd",
+        "payment_method": "pm_test_card",
+    }
+
+    workflow_id = await orcher.start_workflow("process_payment", payment)
+    result = await orcher.wait_for_workflow(workflow_id, timeout=60)
+
+    assert result["status"] == "completed"
+
+    wf = await orcher.get_workflow(workflow_id)
+    assert wf["attempt"] >= 3
+```
+
+</TabPanel>
+</Tabs>
+
+### End-to-End Testing
+
+Test complete flows with real external services (use sandbox/test mode):
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+#[tokio::test]
+#[ignore] // Run with --ignored flag for E2E tests
+async fn test_payment_flow_e2e() {
+    // Use real Stripe test mode API
+    std::env::set_var("STRIPE_SECRET_KEY", "sk_test_...");
+
+    let orcher = Orcher::new(get_test_db_url()).await;
+    orcher.register_workflow(process_payment).await;
+
+    // Real test card from Stripe
+    let payment = PaymentInput {
+        user_id: "user_123".to_string(),
+        amount: 100, // $1.00
+        currency: "usd".to_string(),
+        payment_method: "pm_card_visa".to_string(), // Stripe test card
+    };
+
+    let workflow_id = orcher
+        .start_workflow("process_payment", payment)
+        .await
+        .unwrap();
+
+    let result = orcher
+        .wait_for_workflow::<PaymentResult>(workflow_id, Duration::from_secs(60))
+        .await
+        .unwrap();
+
+    assert_eq!(result.status, "completed");
+
+    // Verify in real Stripe dashboard
+    let stripe = stripe::Client::new(std::env::var("STRIPE_SECRET_KEY").unwrap());
+    let charge = stripe.charges.retrieve(&result.charge_id).await.unwrap();
+    assert_eq!(charge.amount, 100);
+    assert_eq!(charge.status, "succeeded");
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import Stripe from 'stripe';
+
+describe('Payment E2E', () => {
+    it('should process payment end-to-end', async () => {
+        // Use real Stripe test mode API
+        process.env.STRIPE_SECRET_KEY = 'sk_test_...';
+
+        const orcher = await Orcher.create({ databaseUrl: getTestDbUrl() });
+        orcher.registerWorkflow(ProcessPayment);
+
+        // Real test card from Stripe
+        const payment = {
+            userId: 'user_123',
+            amount: 100, // $1.00
+            currency: 'usd',
+            paymentMethod: 'pm_card_visa', // Stripe test card
+        };
+
+        const workflowId = await orcher.startWorkflow('process_payment', payment);
+        const result = await orcher.waitForWorkflow<PaymentResult>(workflowId, 60000);
+
+        expect(result.status).toBe('completed');
+
+        // Verify in real Stripe dashboard
+        const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
+        const charge = await stripe.charges.retrieve(result.chargeId);
+        expect(charge.amount).toBe(100);
+        expect(charge.status).toBe('succeeded');
+    });
+});
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+import pytest
+import stripe
+
+@pytest.mark.asyncio
+@pytest.mark.skip(reason="E2E test - run manually")
+async def test_payment_flow_e2e():
+    # Use real Stripe test mode API
+    os.environ["STRIPE_SECRET_KEY"] = "sk_test_..."
+
+    orcher = await Orcher.create(database_url=get_test_db_url())
+    orcher.register_workflow(process_payment)
+
+    # Real test card from Stripe
+    payment = {
+        "user_id": "user_123",
+        "amount": 100,  # $1.00
+        "currency": "usd",
+        "payment_method": "pm_card_visa",  # Stripe test card
+    }
+
+    workflow_id = await orcher.start_workflow("process_payment", payment)
+    result = await orcher.wait_for_workflow(workflow_id, timeout=60)
+
+    assert result["status"] == "completed"
+
+    # Verify in real Stripe dashboard
+    stripe.api_key = os.environ["STRIPE_SECRET_KEY"]
+    charge = stripe.Charge.retrieve(result["charge_id"])
+    assert charge.amount == 100
+    assert charge.status == "succeeded"
+```
+
+</TabPanel>
+</Tabs>
+
+## Performance Optimization
+
+### Database Tuning
+
+**Index Optimization:**
+
+```sql
+-- Essential indexes for Orcher tables
+CREATE INDEX CONCURRENTLY idx_workflows_status_created
+ON workflows(status, created_at)
+WHERE status IN ('pending', 'running');
+
+CREATE INDEX CONCURRENTLY idx_workflow_execution_journal_lookup
+ON workflow_execution_journal(workflow_id, step_id);
+
+CREATE INDEX CONCURRENTLY idx_workflow_execution_journal_task_perf
+ON workflow_execution_journal(task_name, status, created_at, completed_at)
+WHERE completed_at IS NOT NULL;
+
+-- Index for queue polling (critical for performance)
+CREATE INDEX CONCURRENTLY idx_workflows_queue_poll
+ON workflows(status, created_at)
+WHERE status = 'pending';
+```
+
+**Connection Pooling:**
+
+The database connection pool belongs to the **orchestrator**, not to your workflow or worker code — there is no `Orcher.builder().with_pool()` API. Workers are stateless gRPC clients and never open a database connection; only the orchestrator talks to PostgreSQL. You size the pool where the orchestrator runs, via environment variables:
+
+```bash
+# Orchestrator connection pool (set per orchestrator node)
+ORCHER_PG_MAX_CONNECTIONS=80   # max pooled connections (default 80)
+ORCHER_PG_MIN_CONNECTIONS=20   # warm connections kept open (default 20)
+```
+
+**Sizing rule** — every orchestrator node holds up to `ORCHER_PG_MAX_CONNECTIONS`, so when you run *N* nodes against one database:
+
+```
+N × ORCHER_PG_MAX_CONNECTIONS  ≤  PostgreSQL max_connections   (default 100)
+```
+
+To run several orchestrator nodes against a single PostgreSQL, lower `ORCHER_PG_MAX_CONNECTIONS` per node (e.g. three nodes at 30 each = 90 < 100). For higher aggregate concurrency without exhausting PostgreSQL, put **PgBouncer** in front of the database in transaction-pooling mode — the orchestrator's connections then multiplex over a small number of real backend connections. If you need more headroom directly, raise `max_connections` in `postgresql.conf`.
+
+Because the pool is an orchestrator concern, adding **workers** never adds database connections — workers scale execution capacity over gRPC, decoupled from the database. See the [scaling guide](/guides/learning/platform-engineers/scaling) for the full worker-vs-orchestrator model.
+
+### Workflow Optimization Patterns
+
+**Pattern 1: Parallel Task Execution**
+
+When tasks don't depend on each other, execute them in parallel:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+// Sequential (slow)
+let email_result = ctx.execute_task(send_email, email_data).await?;
+let sms_result = ctx.execute_task(send_sms, sms_data).await?;
+let push_result = ctx.execute_task(send_push, push_data).await?;
+
+// Parallel (fast)
+let (email_result, sms_result, push_result) = tokio::join!(
+    ctx.execute_task(send_email, email_data),
+    ctx.execute_task(send_sms, sms_data),
+    ctx.execute_task(send_push, push_data),
+);
+
+let email_result = email_result?;
+let sms_result = sms_result?;
+let push_result = push_result?;
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Sequential (slow)
+const emailResult = await ctx.executeTask(notifTasks.sendEmail, emailData);
+const smsResult = await ctx.executeTask(notifTasks.sendSms, smsData);
+const pushResult = await ctx.executeTask(notifTasks.sendPush, pushData);
+
+// Parallel (fast)
+const [emailResult, smsResult, pushResult] = await Promise.all([
+  ctx.executeTask(notifTasks.sendEmail, emailData),
+  ctx.executeTask(notifTasks.sendSms, smsData),
+  ctx.executeTask(notifTasks.sendPush, pushData),
+]);
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+import asyncio
+
+# Sequential (slow)
+email_result = await ctx.execute_task(send_email, input=email_data)
+sms_result = await ctx.execute_task(send_sms, input=sms_data)
+push_result = await ctx.execute_task(send_push, input=push_data)
+
+# Parallel (fast)
+email_result, sms_result, push_result = await asyncio.gather(
+    ctx.execute_task(send_email, input=email_data),
+    ctx.execute_task(send_sms, input=sms_data),
+    ctx.execute_task(send_push, input=push_data),
+)
+```
+
+</TabPanel>
+</Tabs>
+
+**Pattern 2: Batch Processing**
+
+Process multiple items together instead of one at a time:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+// One at a time (slow)
+for user_id in user_ids {
+    ctx.execute_task(send_email, user_id).await?;
+}
+
+// Batch processing (fast)
+ctx.execute_task(send_emails_batch, user_ids).await?;
+
+#[task]
+async fn send_emails_batch(ctx: TaskContext, user_ids: Vec<String>) -> Result<Vec<String>> {
+    // Send all emails in one task execution
+    let mut results = Vec::new();
+    for user_id in user_ids {
+        let result = send_email_to_user(user_id).await?;
+        results.push(result);
+    }
+    Ok(results)
+}
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// One at a time (slow)
+for (const userId of userIds) {
+    await ctx.executeTask(tasks.sendEmail, userId);
+}
+
+// Batch processing (fast)
+await ctx.executeTask(tasks.sendEmailsBatch, userIds);
+
+@Task()
+async sendEmailsBatch(ctx: TaskContext, userIds: string[]): Promise<string[]> {
+    // Send all emails in one task execution
+    const results: string[] = [];
+    for (const userId of userIds) {
+        const result = await sendEmailToUser(userId);
+        results.push(result);
+    }
+    return results;
+}
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+# One at a time (slow)
+for user_id in user_ids:
+    await ctx.execute_task(send_email, input=user_id)
+
+# Batch processing (fast)
+await ctx.execute_task(send_emails_batch, user_ids=user_ids)
+
+@task(name="send_emails_batch")
+async def send_emails_batch(ctx: TaskContext, user_ids: list[str]) -> list[str]:
+    # Send all emails in one task execution
+    results = []
+    for user_id in user_ids:
+        result = await send_email_to_user(user_id)
+        results.append(result)
+    return results
+```
+
+</TabPanel>
+</Tabs>
+
+**Pattern 3: Result Caching**
+
+Cache expensive computations in task results:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+<TabPanel id="rust" label="Rust">
+
+```rust
+// The result of this task is cached in the journal
+let expensive_data = ctx.execute_task(load_large_dataset, query).await?;
+
+// Use cached data multiple times (no re-computation)
+let analysis1 = ctx.execute_task(analyze_data, (expensive_data.clone(), "method1")).await?;
+let analysis2 = ctx.execute_task(analyze_data, (expensive_data.clone(), "method2")).await?;
+let report = ctx.execute_task(generate_report, (analysis1, analysis2)).await?;
+```
+
+</TabPanel>
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// The result of this task is cached in the journal
+const expensiveData = await ctx.executeTask(tasks.loadLargeDataset, query);
+
+// Use cached data multiple times (no re-computation)
+const analysis1 = await ctx.executeTask(tasks.analyzeData, { data: expensiveData, method: 'method1' });
+const analysis2 = await ctx.executeTask(tasks.analyzeData, { data: expensiveData, method: 'method2' });
+const report = await ctx.executeTask(tasks.generateReport, { analysis1, analysis2 });
+```
+
+</TabPanel>
+<TabPanel id="python" label="Python">
+
+```python
+# The result of this task is cached in the journal
+expensive_data = await ctx.execute_task(load_large_dataset, query=query)
+
+# Use cached data multiple times (no re-computation)
+analysis1 = await ctx.execute_task(analyze_data, data=expensive_data, method="method1")
+analysis2 = await ctx.execute_task(analyze_data, data=expensive_data, method="method2")
+report = await ctx.execute_task(generate_report, analysis1=analysis1, analysis2=analysis2)
+```
+
+</TabPanel>
+</Tabs>
+
+### Scaling Workers
+
+**Horizontal Scaling:**
+
+```yaml
+# Kubernetes deployment for Orcher workers
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orcher-workers
+spec:
+  replicas: 5  # Scale up worker count
+  selector:
+    matchLabels:
+      app: orcher-worker
+  template:
+    metadata:
+      labels:
+        app: orcher-worker
+    spec:
+      containers:
+      - name: worker
+        image: my-app:latest
+        env:
+        - name: ORCHER_SERVER_URL
+          value: "http://orchestrator:50051"  # gRPC endpoint of the orchestrator
+        - name: ORCHER_NAMESPACE
+          value: "production"
+        - name: ORCHER_TASK_QUEUE
+          value: "default"
+        resources:
+          requests:
+            cpu: 1000m
+            memory: 2Gi
+          limits:
+            cpu: 2000m
+            memory: 4Gi
+```
+
+**Worker Configuration:**
+
+A worker is its own process: a stateless gRPC client of the orchestrator. It opens **no** database connection — it pulls work over gRPC and runs your registered workflows and tasks. Scale out by running more replicas (as in the Deployment above); scale *up* within a process with the `max_concurrent_*` knobs.
+
+```rust
+use orcher::prelude::*;
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Workflows and tasks are auto-registered from their macros — no DB pool here.
+    WorkerBuilder::new()
+        .server_url(
+            std::env::var("ORCHER_SERVER_URL")
+                .unwrap_or_else(|_| "http://orchestrator:50051".to_string()),
+        )
+        .namespace("production")
+        .task_queue("default")
+        .max_concurrent_workflows(20) // workflows running at once in this process
+        .max_concurrent_tasks(40)     // tasks running at once in this process
+        .heartbeat_interval(Duration::from_secs(30)) // liveness to the orchestrator
+        .build()
+        .await?
+        .run() // runs until shutdown
+        .await?;
+
+    Ok(())
+}
+```
+
+## Deployment Best Practices
+
+### Configuration Management
+
+**Environment-specific Configuration:**
+
+```rust
+use config::{Config, Environment, File};
+
+#[derive(Debug, Deserialize)]
+struct OrcherConfig {
+    database_url: String,
+    worker_count: usize,
+    max_retry_attempts: u32,
+    retry_backoff_ms: u64,
+    log_level: String,
+}
+
+fn load_config() -> Result<OrcherConfig> {
+    let env = std::env::var("ENV").unwrap_or_else(|_| "development".to_string());
+
+    let config = Config::builder()
+        // Default config
+        .add_source(File::with_name("config/default"))
+        // Environment-specific config
+        .add_source(File::with_name(&format!("config/{}", env)).required(false))
+        // Environment variables (override everything)
+        .add_source(Environment::with_prefix("ORCHER"))
+        .build()?;
+
+    Ok(config.try_deserialize()?)
+}
+```
+
+**Configuration Files:**
+
+```yaml
+# config/production.yaml
+database_url: "postgresql://user:pass@prod-db:5432/orcher"
+worker_count: 10
+max_retry_attempts: 10
+retry_backoff_ms: 5000
+log_level: "info"
+
+# config/staging.yaml
+database_url: "postgresql://user:pass@staging-db:5432/orcher"
+worker_count: 2
+max_retry_attempts: 5
+retry_backoff_ms: 1000
+log_level: "debug"
+```
+
+### Database Migrations
+
+**Migration Strategy:**
+
+```sql
+-- migrations/001_initial_schema.sql
+CREATE TABLE workflows (
+    id UUID PRIMARY KEY,
+    workflow_name TEXT NOT NULL,
+    input JSONB NOT NULL,
+    result JSONB,
+    status TEXT NOT NULL,
+    error TEXT,
+    attempt INTEGER NOT NULL DEFAULT 1,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    next_retry_at TIMESTAMPTZ
+);
+
+CREATE TABLE workflow_execution_journal (
+    id UUID PRIMARY KEY,
+    workflow_id UUID NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+    step_id INTEGER NOT NULL,
+    task_name TEXT NOT NULL,
+    input JSONB NOT NULL,
+    result JSONB,
+    error TEXT,
+    status TEXT NOT NULL,
+    attempt INTEGER NOT NULL DEFAULT 1,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ,
+
+    UNIQUE(workflow_id, step_id)
+);
+
+-- migrations/002_add_indexes.sql
+CREATE INDEX idx_workflows_status_created ON workflows(status, created_at);
+CREATE INDEX idx_workflow_execution_journal_lookup ON workflow_execution_journal(workflow_id, step_id);
+
+-- migrations/003_add_workflow_metadata.sql
+ALTER TABLE workflows ADD COLUMN metadata JSONB DEFAULT '{}';
+CREATE INDEX idx_workflows_metadata ON workflows USING GIN(metadata);
+```
+
+**Run Migrations:**
+
+```rust
+use sqlx::migrate::Migrator;
+
+static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
+
+async fn run_migrations(pool: &PgPool) -> Result<()> {
+    MIGRATOR.run(pool).await?;
+    Ok(())
+}
+```
+
+### Health Checks
+
+**Liveness and Readiness Probes:**
+
+```rust
+use axum::{Router, routing::get, Json};
+use serde_json::json;
+
+async fn health_check() -> Json<serde_json::Value> {
+    Json(json!({
+        "status": "healthy",
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    }))
+}
+
+async fn readiness_check(
+    Extension(pool): Extension<PgPool>,
+) -> Json<serde_json::Value> {
+    // Check database connectivity
+    let db_ok = sqlx::query("SELECT 1").fetch_one(&pool).await.is_ok();
+
+    // Check queue depth
+    let queue_depth: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM workflows WHERE status = 'pending'"
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap_or(0);
+
+    let ready = db_ok && queue_depth < 10000;
+
+    Json(json!({
+        "ready": ready,
+        "database": db_ok,
+        "queue_depth": queue_depth,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    }))
+}
+
+// Add to router
+let app = Router::new()
+    .route("/health", get(health_check))
+    .route("/ready", get(readiness_check));
+```
+
+**Kubernetes Configuration:**
+
+```yaml
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: orcher-worker
+    image: my-app:latest
+    livenessProbe:
+      httpGet:
+        path: /health
+        port: 8080
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+
+    readinessProbe:
+      httpGet:
+        path: /ready
+        port: 8080
+      initialDelaySeconds: 10
+      periodSeconds: 5
+      timeoutSeconds: 3
+      failureThreshold: 2
+```
+
+### Graceful Shutdown
+
+Handle shutdown signals properly to avoid interrupting workflows:
+
+```rust
+use tokio::signal;
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
+    info!("Shutdown signal received, starting graceful shutdown...");
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let orcher = Orcher::new().await?;
+
+    // Run server with graceful shutdown
+    let server = axum::Server::bind(&"0.0.0.0:8080".parse()?)
+        .serve(app.into_make_service())
+        .with_graceful_shutdown(shutdown_signal());
+
+    // Shutdown workers when signal received
+    tokio::select! {
+        result = server => {
+            result?;
+        }
+        _ = shutdown_signal() => {
+            info!("Stopping workers...");
+            orcher.stop_workers().await?;
+            info!("Workers stopped gracefully");
+        }
+    }
+
+    Ok(())
+}
+```
+
+## Production Checklist
+
+Before deploying Orcher to production, verify:
+
+**Infrastructure:**
+- ✓ PostgreSQL 13+ with sufficient resources (CPU, memory, disk)
+- ✓ Database backups configured (continuous + daily snapshots)
+- ✓ Connection pooling properly configured
+- ✓ Database indexes created
+- ✓ High availability setup (optional: read replicas, failover)
+
+**Application:**
+- ✓ All tasks are idempotent
+- ✓ Retry policies configured appropriately
+- ✓ Error handling covers all edge cases
+- ✓ Logging includes workflow_id for correlation
+- ✓ Metrics exported (workflow duration, failure rate, queue depth)
+- ✓ Health checks implemented (liveness + readiness)
+- ✓ Graceful shutdown handling
+
+**Monitoring:**
+- ✓ Alerts configured for high failure rate
+- ✓ Alerts configured for stuck workflows
+- ✓ Alerts configured for queue backlog
+- ✓ Dashboard showing key metrics
+- ✓ Log aggregation setup (e.g., ELK, Datadog)
+
+**Testing:**
+- ✓ Unit tests for all tasks
+- ✓ Integration tests for workflows
+- ✓ Load testing completed
+- ✓ Failure scenario testing (network, database outages)
+- ✓ Idempotency verified
+
+**Operations:**
+- ✓ Runbook created for common issues
+- ✓ On-call rotation established
+- ✓ Rollback procedure documented
+- ✓ Database migration strategy tested
+- ✓ Disaster recovery plan in place
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-4 not-prose">
+  <Link href="/guides/core/workflows" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Building Workflows</h3>
+    <p className="text-sm text-foreground-light">Deep dive into workflow primitives, deterministic execution, and composition patterns.</p>
+  </Link>
+  <Link href="/guides/core/tasks" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Defining Tasks</h3>
+    <p className="text-sm text-foreground-light">Retry policies, timeouts, heartbeats, and task context APIs.</p>
+  </Link>
+  <Link href="/guides/patterns/saga" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Saga Pattern</h3>
+    <p className="text-sm text-foreground-light">Distributed transactions with compensating actions for multi-service workflows.</p>
+  </Link>
+  <Link href="/guides/use-cases/distributed-systems" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Microservice Orchestration</h3>
+    <p className="text-sm text-foreground-light">Coordinate distributed systems with child workflows, events, and saga patterns.</p>
+  </Link>
+</div>
+
+---
+
+## What You've Learned
+
+Congratulations! You now understand:
+
+- **Durable execution fundamentals** - How journaling eliminates entire classes of bugs
+- **Payment processing** - survive crashes without losing track of a charge or repeating it
+- **Webhook handling** - Reliable event processing at scale
+- **Distributed sagas** - Transactions across services without 2PC
+- **The Orcher mental model** - Thinking in workflows and tasks
+- **Production excellence** - Monitoring, testing, performance, and deployment best practices
+
+**The key insight**: Orcher makes reliability the default, not something you have to build yourself.
+
+---
+
+[Back to Overview](/guides/learning/backend-engineers) — Learning path overview

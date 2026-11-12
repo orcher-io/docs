@@ -1,0 +1,577 @@
+---
+id: 'error-resilience'
+title: 'Resilience Patterns'
+sidebar_label: 'Resilience'
+---
+
+## Circuit Breaker Pattern
+
+The circuit breaker pattern prevents cascading failures by stopping requests to a failing service once a failure threshold is reached. When the circuit is "open," operations are skipped instead of being sent to the failing service, giving it time to recover. After a cooldown period or a number of consecutive successes, the circuit "closes" and normal operation resumes. This pattern is especially useful when calling external APIs or third-party services that may become temporarily unavailable.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static FAILURE_COUNT: AtomicUsize = AtomicUsize::new(0);
+const FAILURE_THRESHOLD: usize = 3;
+const SUCCESS_THRESHOLD: usize = 2;
+
+#[workflow(name = "circuit_breaker_workflow", version = "1.0.0")]
+pub async fn circuit_breaker_workflow(
+  ctx: WorkflowContext,
+  operations: Vec<String>,
+) -> Result<CircuitBreakerResult> {
+  let mut successful = 0;
+  let mut failed = 0;
+  let mut circuit_open = false;
+
+  for (idx, operation) in operations.iter().enumerate() {
+    if circuit_open {
+      tracing::warn!("Circuit OPEN - skipping operation {}", idx + 1);
+      continue;
+    }
+
+    // Try operation
+    let result = ctx
+      .execute_task(external_service_call, operation.clone())
+      .await;
+
+    match result {
+      Ok(_) => {
+        successful += 1;
+
+        // Reset failure count on success
+        let current_failures = FAILURE_COUNT.load(Ordering::SeqCst);
+        if current_failures > 0 {
+          FAILURE_COUNT.store(0, Ordering::SeqCst);
+
+          if successful >= SUCCESS_THRESHOLD {
+            circuit_open = false;
+            tracing::info!("Circuit CLOSED - recovery detected");
+          }
+        }
+      }
+      Err(e) => {
+        failed += 1;
+        let failures = FAILURE_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
+
+        if failures >= FAILURE_THRESHOLD {
+          circuit_open = true;
+          tracing::error!("Circuit OPENED - {} failures", failures);
+        }
+      }
+    }
+  }
+
+  Ok(CircuitBreakerResult {
+    successful,
+    failed,
+    skipped: if circuit_open {
+      operations.len() - (successful + failed)
+    } else {
+      0
+    },
+    circuit_opened: circuit_open,
+  })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, WorkflowContext, createTaskRefs } from '@orcher/sdk';
+
+@Tasks()
+class ServiceTasks {
+  @Task({ name: 'externalServiceCall' })
+  async externalServiceCall(ctx: TaskContext, operation: string): Promise<void> { /* ... */ }
+}
+
+const tasks = createTaskRefs(ServiceTasks);
+
+let failureCount = 0;
+const FAILURE_THRESHOLD = 3;
+const SUCCESS_THRESHOLD = 2;
+
+@Workflow()
+class CircuitBreakerWorkflow {
+  async execute(
+    ctx: WorkflowContext,
+    operations: string[],
+  ): Promise<CircuitBreakerResult> {
+    let successful = 0;
+    let failed = 0;
+    let circuitOpen = false;
+
+    for (let idx = 0; idx < operations.length; idx++) {
+      if (circuitOpen) {
+        console.warn(`Circuit OPEN - skipping operation ${idx + 1}`);
+        continue;
+      }
+
+      // Try operation
+      try {
+        await ctx.executeTask(tasks.externalServiceCall, operations[idx]);
+        successful++;
+
+        // Reset failure count on success
+        if (failureCount > 0) {
+          failureCount = 0;
+
+          if (successful >= SUCCESS_THRESHOLD) {
+            circuitOpen = false;
+            console.info('Circuit CLOSED - recovery detected');
+          }
+        }
+      } catch (e) {
+        failed++;
+        failureCount++;
+
+        if (failureCount >= FAILURE_THRESHOLD) {
+          circuitOpen = true;
+          console.error(`Circuit OPENED - ${failureCount} failures`);
+        }
+      }
+    }
+
+    return {
+      successful,
+      failed,
+      skipped: circuitOpen ? operations.length - (successful + failed) : 0,
+      circuitOpened: circuitOpen,
+    };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, WorkflowContext
+
+failure_count = 0
+FAILURE_THRESHOLD = 3
+SUCCESS_THRESHOLD = 2
+
+@workflow(name="circuit_breaker_workflow", version="1.0.0")
+async def circuit_breaker_workflow(
+  ctx: WorkflowContext,
+  operations: list[str],
+) -> dict:
+  global failure_count
+
+  successful = 0
+  failed = 0
+  circuit_open = False
+
+  for idx, operation in enumerate(operations):
+    if circuit_open:
+      print(f"Circuit OPEN - skipping operation {idx + 1}")
+      continue
+
+    # Try operation
+    try:
+      await ctx.execute_task(external_service_call, operation)
+      successful += 1
+
+      # Reset failure count on success
+      if failure_count > 0:
+        failure_count = 0
+
+        if successful >= SUCCESS_THRESHOLD:
+          circuit_open = False
+          print("Circuit CLOSED - recovery detected")
+    except Exception:
+      failed += 1
+      failure_count += 1
+
+      if failure_count >= FAILURE_THRESHOLD:
+        circuit_open = True
+        print(f"Circuit OPENED - {failure_count} failures")
+
+  return {
+    "successful": successful,
+    "failed": failed,
+    "skipped": len(operations) - (successful + failed) if circuit_open else 0,
+    "circuit_opened": circuit_open,
+  }
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Graceful Degradation
+
+Graceful degradation ensures your workflow returns useful results even when primary services are unavailable. Instead of failing outright, you define a chain of fallback data sources — try the primary source first, then a secondary replica, and finally a local cache. Each level may return less fresh or less complete data, but the workflow completes successfully. This pattern is essential for user-facing workflows where partial data is better than an error.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[workflow(name = "degradation_workflow", version = "1.0.0")]
+pub async fn degradation_workflow(
+  ctx: WorkflowContext,
+  input: DataRequest,
+) -> Result<DataResponse> {
+  // Try primary data source
+  let primary_result = ctx
+    .execute_task(fetch_from_primary, input.clone())
+    .await;
+
+  match primary_result {
+    Ok(data) => {
+      tracing::info!("Primary source successful");
+      return Ok(data);
+    }
+    Err(e) => {
+      tracing::warn!("Primary source failed: {}, trying fallback", e);
+    }
+  }
+
+  // Try secondary data source
+  let secondary_result = ctx
+    .execute_task(fetch_from_secondary, input.clone())
+    .await;
+
+  match secondary_result {
+    Ok(data) => {
+      tracing::info!("Secondary source successful");
+      return Ok(data);
+    }
+    Err(e) => {
+      tracing::warn!("Secondary source failed: {}, using cache", e);
+    }
+  }
+
+  // Use cached data as last resort
+  let cached_data: DataResponse = ctx
+    .execute_task(fetch_from_cache, input.query)
+    .await?;
+
+  tracing::info!("Using cached data");
+  Ok(DataResponse {
+    data: cached_data.data,
+    source: "cache".to_string(),
+    fresh: false,
+  })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, WorkflowContext, TaskContext, createTaskRefs } from '@orcher/sdk';
+
+@Tasks()
+class DataTasks {
+  @Task({ name: 'fetchFromPrimary' })
+  async fetchFromPrimary(ctx: TaskContext, input: DataRequest): Promise<DataResponse> { /* ... */ }
+
+  @Task({ name: 'fetchFromSecondary' })
+  async fetchFromSecondary(ctx: TaskContext, input: DataRequest): Promise<DataResponse> { /* ... */ }
+
+  @Task({ name: 'fetchFromCache' })
+  async fetchFromCache(ctx: TaskContext, query: string): Promise<DataResponse> { /* ... */ }
+}
+
+const tasks = createTaskRefs(DataTasks);
+
+@Workflow()
+class DegradationWorkflow {
+  async execute(ctx: WorkflowContext, input: DataRequest): Promise<DataResponse> {
+    // Try primary data source
+    try {
+      const data = await ctx.executeTask(tasks.fetchFromPrimary, input);
+      console.info('Primary source successful');
+      return data;
+    } catch (e) {
+      console.warn(`Primary source failed: ${e}, trying fallback`);
+    }
+
+    // Try secondary data source
+    try {
+      const data = await ctx.executeTask(tasks.fetchFromSecondary, input);
+      console.info('Secondary source successful');
+      return data;
+    } catch (e) {
+      console.warn(`Secondary source failed: ${e}, using cache`);
+    }
+
+    // Use cached data as last resort
+    const cachedData = await ctx.executeTask(tasks.fetchFromCache, input.query);
+
+    console.info('Using cached data');
+    return {
+      data: cachedData.data,
+      source: 'cache',
+      fresh: false,
+    };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, WorkflowContext
+
+@workflow(name="degradation_workflow", version="1.0.0")
+async def degradation_workflow(
+  ctx: WorkflowContext,
+  input: dict,
+) -> dict:
+  # Try primary data source
+  try:
+    data = await ctx.execute_task(fetch_from_primary, input)
+    print("Primary source successful")
+    return data
+  except Exception as e:
+    print(f"Primary source failed: {e}, trying fallback")
+
+  # Try secondary data source
+  try:
+    data = await ctx.execute_task(fetch_from_secondary, input)
+    print("Secondary source successful")
+    return data
+  except Exception as e:
+    print(f"Secondary source failed: {e}, using cache")
+
+  # Use cached data as last resort
+  cached_data = await ctx.execute_task(fetch_from_cache, input["query"])
+
+  print("Using cached data")
+  return {
+    "data": cached_data["data"],
+    "source": "cache",
+    "fresh": False,
+  }
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Timeout Handling
+
+Timeouts prevent workflows from hanging indefinitely when a task or external call takes longer than expected. Orcher supports two approaches: workflow-level timeouts that race an operation against a timer, and task-level timeouts configured as attributes on the task definition itself. Workflow-level timeouts give you the opportunity to run cleanup logic before failing, while task-level timeouts are simpler and terminate the task automatically.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use std::time::Duration;
+
+// ⚠️ CAUTION: Do NOT race an `execute_task` against `ctx.sleep` with
+// `tokio::select!` for a "workflow-level timeout". Both `execute_task` and
+// `ctx.sleep` are suspend points — on first execution they each return the
+// Suspended signal immediately rather than a value, so the `select!` does not
+// race the way plain async futures would, and splitting suspend points across
+// a `select!` arm is not replay-safe (the journal cannot deterministically
+// reconstruct which arm "won"). Enforce timeouts at the task level instead.
+
+// ✔ Recommended: Task-level timeout — the engine terminates the task
+// deterministically when it exceeds the configured duration.
+#[task(
+  name = "operation_with_timeout",
+  timeout_mins = 5  // 5 minute timeout
+)]
+pub async fn operation_with_timeout(
+  _ctx: TaskContext,
+  input: OperationInput,
+) -> Result<OperationResult> {
+  // Task will fail if execution exceeds 5 minutes
+  long_running_operation(input).await
+}
+
+#[workflow(name = "timeout_workflow", version = "1.0.0")]
+pub async fn timeout_workflow(
+  ctx: WorkflowContext,
+  input: OperationInput,
+) -> Result<ProcessingResult> {
+  // The task carries its own timeout; the workflow just runs it and handles
+  // the resulting error (which can include cleanup) in a replay-safe way.
+  match ctx.execute_task(operation_with_timeout, input).await {
+    Ok(data) => Ok(data),
+    Err(e) => {
+      tracing::error!("Operation timed out or failed: {}", e);
+
+      // Cleanup — this is a normal, journaled task call
+      let _ = ctx.execute_task(cleanup_resources, ()).await;
+
+      Err(e)
+    }
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, WorkflowContext, TaskContext, createTaskRefs } from '@orcher/sdk';
+
+@Tasks()
+class ProcessingTasks {
+  @Task({ name: 'longRunningOperation' })
+  async longRunningOperation(ctx: TaskContext, input: ProcessingRequest): Promise<ProcessingResult> { /* ... */ }
+
+  @Task({ name: 'cleanupResources' })
+  async cleanupResources(ctx: TaskContext): Promise<void> { /* ... */ }
+
+  // Alternative: Task-level timeout
+  @Task({
+    name: 'operationWithTimeout',
+    timeout: 300000,  // 5 minutes
+  })
+  async operationWithTimeout(
+    ctx: TaskContext,
+    input: OperationInput,
+  ): Promise<OperationResult> {
+    // Task will fail if execution exceeds 5 minutes
+    return await longRunningOperation(input);
+  }
+}
+
+const tasks = createTaskRefs(ProcessingTasks);
+
+@Workflow()
+class TimeoutWorkflow {
+  async execute(
+    ctx: WorkflowContext,
+    input: ProcessingRequest,
+  ): Promise<ProcessingResult> {
+    // Race between operation and timeout
+    const operation = ctx.executeTask(tasks.longRunningOperation, input);
+
+    const timeout = new Promise<never>((_, reject) => {
+      setTimeout(() => {
+        reject(new Error('Operation timed out after 5 minutes'));
+      }, 300000); // 5 minutes
+    });
+
+    try {
+      return await Promise.race([operation, timeout]);
+    } catch (e) {
+      // Handle timeout
+      console.error('Operation timed out');
+
+      // Cleanup
+      await ctx.executeTask(tasks.cleanupResources);
+
+      throw e;
+    }
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+import asyncio
+from orcher import workflow, task, WorkflowContext, TaskContext
+
+@workflow(name="timeout_workflow", version="1.0.0")
+async def timeout_workflow(
+  ctx: WorkflowContext,
+  input: dict,
+) -> dict:
+  # Race between operation and timeout
+  try:
+    result = await asyncio.wait_for(
+      ctx.execute_task(long_running_operation, input),
+      timeout=300.0,  # 5 minutes
+    )
+    return result
+  except asyncio.TimeoutError:
+    # Handle timeout
+    print("Operation timed out")
+
+    # Cleanup
+    await ctx.execute_task(cleanup_resources, {})
+
+    raise Exception("Operation timed out after 5 minutes")
+
+
+# Alternative: Task-level timeout
+@task(
+  name="operation_with_timeout",
+  timeout=300.0,  # 5 minutes
+)
+async def operation_with_timeout(ctx: TaskContext, input: dict) -> dict:
+  # Task will fail if execution exceeds 5 minutes
+  return await long_running_operation(input)
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/error-handling/dead-letter-queue" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Dead Letter Queue</h3>
+      <p className="text-sm text-foreground-light">
+        Route persistent failures to a DLQ for manual inspection and replay
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/error-handling/best-practices" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Best Practices & Troubleshooting</h3>
+      <p className="text-sm text-foreground-light">
+        Guidelines for retry policies, idempotent compensation, logging, timeouts, and common issues
+      </p>
+    </div>
+  </Link>
+</div>

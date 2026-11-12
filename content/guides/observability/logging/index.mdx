@@ -1,0 +1,165 @@
+---
+id: 'logging'
+title: 'Logging'
+description: 'Configure structured logging for the Orcher orchestrator'
+sidebar_label: 'Logging'
+---
+
+Orcher uses the `tracing` crate for structured, leveled logging across all services. Logs are output to stdout in a configurable format — compact single-line for development, structured JSON for production, or pretty multi-line for debugging.
+
+- **Structured fields** — Key-value pairs attached to every log event via `tracing` spans and fields
+- **Four output formats** — Compact (default), JSON (production), Pretty (debugging), Bunyan (Node.js compatibility)
+- **Environment variable config** — `LOG_LEVEL` and `LOG_FORMAT` control behavior, with `RUST_LOG` for fine-grained filtering
+- **Per-crate filtering** — Set different log levels for Orcher modules, SQLx, Tokio, and other dependencies
+- **Zero-config defaults** — Sensible defaults that work out of the box
+
+---
+
+## Configuration
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LOG_LEVEL` | `info` | Log level: `trace`, `debug`, `info`, `warn`, `error` |
+| `LOG_FORMAT` | `compact` | Output format: `compact`, `json`, `pretty`, `bunyan` |
+| `RUST_LOG` | — | Fine-grained filter (overrides `LOG_LEVEL` when set) |
+| `SERVICE_NAME` | auto-detected | Service name included in log output |
+| `ENVIRONMENT` / `ORCHER_ENV` | — | Set to `production` for production defaults |
+
+```bash
+# Development (default)
+LOG_LEVEL=debug LOG_FORMAT=compact ./orcher-orchestrator
+
+# Production
+LOG_LEVEL=info LOG_FORMAT=json ./orcher-orchestrator
+
+# Debugging
+LOG_LEVEL=trace LOG_FORMAT=pretty ./orcher-orchestrator
+```
+
+### Per-Crate Filtering
+
+Use `RUST_LOG` to set different levels per module. This takes priority over `LOG_LEVEL`:
+
+```bash
+# Verbose workflow logging, quiet storage and SQLx
+RUST_LOG="orcher_core=debug,orcher_storage=warn,sqlx=warn,orcher=info"
+
+# Trace polling internals only
+RUST_LOG="orcher_dispatch::polling=trace,orcher=info"
+
+# Quiet everything except errors, with debug for your workflow
+RUST_LOG="warn,orcher_core::engine=debug"
+```
+
+### Initialization
+
+Services initialize logging early in `main()`:
+
+```rust
+use orcher_monitoring::logging::initialize_logging;
+
+fn main() -> Result<()> {
+    // Initialize with service name, level, and format
+    initialize_logging("orchestrator", "info", "json")?;
+
+    tracing::info!("Service started");
+    Ok(())
+}
+```
+
+Or read from environment variables automatically:
+
+```rust
+use orcher_monitoring::logging::init_from_env;
+
+fn main() -> Result<()> {
+    // Reads LOG_LEVEL, LOG_FORMAT, and SERVICE_NAME from env
+    init_from_env()?;
+    Ok(())
+}
+```
+
+Preset configurations are also available:
+
+```rust
+use orcher_monitoring::logging::{init_logging, LoggingConfig};
+
+// Production: JSON format, info level
+let config = LoggingConfig::for_production("orchestrator");
+
+// Development: Compact format, debug level
+let config = LoggingConfig::for_development("orchestrator");
+
+// Debugging: Pretty format, trace level, full metadata
+let config = LoggingConfig::for_debugging("orchestrator");
+
+init_logging(config)?;
+```
+
+---
+
+## Log Formats
+
+### Compact (Default)
+
+Single-line, human-readable output. Best for local development:
+
+```
+2024-01-15T10:30:45Z INFO orchestrator: Starting service version=0.1.0
+2024-01-15T10:30:45Z INFO orcher_core: Task submitted task_id=123 priority=high
+2024-01-15T10:30:46Z DEBUG orcher_core: Processing workflow workflow_id=abc
+```
+
+### JSON (Production)
+
+Structured JSON for log aggregation systems (ELK, Splunk, CloudWatch, Loki):
+
+```json
+{"timestamp":"2024-01-15T10:30:45Z","level":"INFO","target":"orchestrator","message":"Starting service","fields":{"version":"0.1.0"}}
+{"timestamp":"2024-01-15T10:30:45Z","level":"INFO","target":"orcher_core","message":"Task submitted","fields":{"task_id":"123","priority":"high"}}
+```
+
+### Pretty (Debugging)
+
+Multi-line, colorized output with file locations and span context:
+
+```
+  2024-01-15T10:30:45.123456Z  INFO orchestrator
+    at src/main.rs:42
+    in orchestrator::main
+  Starting service
+    version: 0.1.0
+```
+
+### Bunyan
+
+JSON output compatible with the Bunyan log format used by Node.js applications. Useful for mixed-language stacks.
+
+---
+
+## Log Levels
+
+From most to least verbose:
+
+| Level | Use Case | Example |
+|-------|----------|---------|
+| `trace` | Deep internals — poll loops, cache lookups, individual SQL queries | `Polling queue: attempting BRPOP on redis key` |
+| `debug` | Detailed operational info — execution steps, durations, state changes | `Workflow execution completed execution_id=abc duration_ms=1234` |
+| `info` | Normal operations — service startup, workflow starts, task completions | `Starting workflow execution workflow=order_processing` |
+| `warn` | Potential problems — high queue depth, retry attempts, degraded state | `Queue depth exceeds threshold queue=payments depth=5000` |
+| `error` | Failures requiring attention — execution failures, connection errors | `Workflow execution failed execution_id=abc error=timeout` |
+
+**Production recommendation:** Use `info` level. Switch to `debug` when investigating specific issues. Avoid `trace` in production — it generates high log volume.
+
+---
+
+## Next Steps
+
+- [Structured Logging](/guides/observability/logging/structured-logging) — Using tracing fields, `#[instrument]`, and span context
+- [Viewing Logs](/guides/observability/logging/viewing-logs) — CLI commands, Docker, and database queries
+- [Log Aggregation](/guides/observability/logging/aggregation) — Kubernetes, Grafana Loki, Elasticsearch, and performance
+- [Metrics](/guides/observability/metrics) — Prometheus metrics for monitoring
+- [Tracing](/guides/observability/tracing) — Distributed tracing with OpenTelemetry
+- [Debugging](/guides/observability/debugging) — Debug workflow execution

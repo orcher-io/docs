@@ -1,0 +1,123 @@
+---
+id: 'data-processing'
+title: 'Data Pipelines & ETL'
+description: 'Build high-performance, reliable data pipelines with Orcher. Process millions of records with durable execution, automatic checkpointing, and parallel processing.'
+sidebar_label: 'Data Pipelines & ETL'
+---
+
+Data pipelines are one of the strongest use cases for durable workflow orchestration. Orcher lets you write ETL logic as regular async functions with automatic checkpointing at every task boundary — no duplicate processing, no manual state management.
+
+### Checkpointed by default
+
+Every batch you process through `execute_task` is journaled in PostgreSQL. If your pipeline crashes midway through a million records, it resumes from the exact batch where it left off — completed batches replay from the journal instead of re-running.
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Durable Batch Pipeline</div>
+  </div>
+  {[
+    { label: 'Batch 001', detail: 'Processed — journaled', icon: '✓', state: 'done' },
+    { label: 'Batch 002', detail: 'Processed — journaled', icon: '✓', state: 'done' },
+    { label: 'Batch 003', detail: 'Worker crashed mid-batch', icon: '✗', state: 'crash' },
+    { label: 'Batch 003', detail: 'Retried — resumes exactly here', icon: '↻', state: 'resume' },
+    { label: 'Batch 004', detail: 'Pending', icon: '○', state: 'pending' },
+  ].map((step, i, arr) => (
+    <div key={i}>
+      <div className={`px-4 py-2 flex items-center gap-3 ${step.state === 'crash' ? 'bg-red-500/5' : ''} ${step.state === 'resume' ? 'bg-surface-75' : ''}`}>
+        <span className={`w-5 h-5 flex items-center justify-center text-[10px] shrink-0 ${step.state === 'crash' ? 'text-red-400' : 'text-foreground-muted'}`}>{step.icon}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium text-foreground">{step.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{step.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Batches 001–002 are never re-executed — their results replay from the journal.</span>
+  </div>
+</div>
+
+### Parallel where it counts
+
+Combine checkpointing with fan-out/fan-in to process partitions concurrently: a parent workflow fans out one child task per partition, workers pull them in parallel, and the parent gathers the results before loading.
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Fan-Out / Fan-In ETL</div>
+  </div>
+  <div className="px-4 py-3 flex flex-col items-center gap-1">
+    <div className="border px-4 py-1.5 text-xs font-medium text-foreground">Extract</div>
+    <div className="text-[10px] text-foreground-muted leading-none py-0.5">▼ fan-out</div>
+    <div className="grid grid-cols-3 gap-2 w-full">
+      {['Partition A', 'Partition B', 'Partition C'].map((p) => (
+        <div key={p} className="border border-dashed px-2 py-1.5 text-center">
+          <div className="text-[10px] font-medium text-foreground">{p}</div>
+          <div className="text-[9px] text-foreground-muted">transform</div>
+        </div>
+      ))}
+    </div>
+    <div className="text-[10px] text-foreground-muted leading-none py-0.5">▼ fan-in</div>
+    <div className="border px-4 py-1.5 text-xs font-medium text-foreground">Aggregate & Load</div>
+  </div>
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Each partition is an independent, journaled task — one failure retries alone.</span>
+  </div>
+</div>
+
+Multi-source aggregation runs each source as a child workflow, scheduled syncs use durable timers instead of external cron — and all of it is backed by a single PostgreSQL instance.
+
+---
+
+### Patterns
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/use-cases/data-processing/batch-processing" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors h-full">
+      <h3 className="text-lg font-semibold mb-2">Batch Processing</h3>
+      <p className="text-sm text-foreground-light">
+        Break large datasets into manageable chunks with automatic checkpointing at every task boundary.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/use-cases/data-processing/parallel-etl" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors h-full">
+      <h3 className="text-lg font-semibold mb-2">Parallel ETL</h3>
+      <p className="text-sm text-foreground-light">
+        Process data in parallel with fan-out/fan-in patterns for maximum throughput.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/use-cases/data-processing/scheduled-sync" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors h-full">
+      <h3 className="text-lg font-semibold mb-2">Scheduled Sync</h3>
+      <p className="text-sm text-foreground-light">
+        Incremental data sync using change data capture patterns with durable timers.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/use-cases/data-processing/data-validation" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors h-full">
+      <h3 className="text-lg font-semibold mb-2">Data Validation</h3>
+      <p className="text-sm text-foreground-light">
+        Validate, transform, and quarantine data with configurable rules and error handling.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/use-cases/data-processing/best-practices" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors h-full">
+      <h3 className="text-lg font-semibold mb-2">Best Practices & Performance</h3>
+      <p className="text-sm text-foreground-light">
+        Production tips, performance optimization, and real-world examples for data pipelines.
+      </p>
+    </div>
+  </Link>
+</div>

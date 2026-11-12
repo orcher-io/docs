@@ -1,0 +1,31 @@
+# One workspace for every Rust sample in the guides, so they share one
+# Cargo.lock and one target directory. Each guide page (or topic) is a member
+# crate; add yours to `members`.
+[workspace]
+resolver = "2"
+members = [
+    "quickstart",
+    "sdk-overview",
+    "sdk-workflows",
+    "sdk-tasks",
+    "sdk-client",
+    "sdk-worker",
+    "sdk-sessions",
+    "sdk-actors",
+    "sdk-testing",
+    "sdk-patterns",
+]
+
+[workspace.package]
+edition = "2021"
+publish = false
+
+# Pin what the samples compile against here, once. Members take them with
+# `orcher-sdk.workspace = true`.
+[workspace.dependencies]
+orcher-sdk = "0.7.1"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+uuid = { version = "1", features = ["v4"] }
+futures = "0.3"
+serde_json = "1"

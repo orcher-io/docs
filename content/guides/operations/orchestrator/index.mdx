@@ -1,0 +1,190 @@
+---
+id: orchestrator-overview
+title: Orchestrator Server
+description: Overview of the Orcher orchestrator server architecture, components, and task lifecycle
+---
+
+The Orchestrator Server is the central coordination component of Orcher. It is one process that serves a gRPC API (port 50051) for SDKs, workers and the CLI, and a REST API under `/api/v1` plus health checks and metrics (port 8080). It does **not** execute workflow or task code — it only coordinates execution; workers pull work from it over gRPC.
+
+- **Manages Workflow State** — Tracks execution status, journaling, and checkpoints
+- **Coordinates Work Distribution** — Hands tasks and workflows to workers via queues and the outbox pattern
+- **Handles Durable Timers** — Manages sleep, timeouts, and scheduled execution
+- **Ensures Durability** — Persists all state to PostgreSQL for crash recovery
+- **Shards Work** — Uses consistent hashing with PostgreSQL advisory locks to distribute work across multiple instances
+
+---
+
+## Architecture
+
+The orchestrator (binary `orchestrator`, image `ghcr.io/orcher-io/orcher`) is a single process with two listeners:
+
+- **gRPC** on `GRPC_BIND_ADDR` / `--grpc-addr` (default `127.0.0.1:50051`) — used by SDK clients, workers (which long-poll for work) and the CLI.
+- **HTTP** on `HTTP_BIND_ADDR` / `--http-addr` (default `127.0.0.1:8080`) — serves the REST API under `/api/v1`, plus `/health`, `/health/ready`, `/health/live` and `/metrics`. The dashboard and any HTTP client talk to this listener directly.
+
+Both listeners share one authentication layer, configured in the `[security]` section of the orchestrator's TOML config. **PostgreSQL** is the only data store the orchestrator needs.
+
+<div className="not-prose my-10 max-w-xl mx-auto relative pr-12">
+  <div className="flex flex-col items-center">
+    {/* Top row: Clients → Orchestrator */}
+    <div className="flex gap-4 w-full items-stretch">
+      {/* Left: Clients */}
+      <div className="flex-1 flex flex-col items-center">
+        <div className="border bg-surface-75 p-4 flex flex-col items-center text-center w-full flex-1">
+          <div className="text-xs font-medium text-foreground">Clients</div>
+          <div className="text-[10px] text-foreground-muted mt-2 space-y-0.5">
+            <div>SDK clients · CLI</div>
+            <div>Dashboard · HTTP clients</div>
+          </div>
+        </div>
+      </div>
+      {/* Horizontal connections — overlap into cards with negative margins */}
+      <div className="flex flex-col items-center justify-center gap-2 -mx-3 z-10">
+        <div className="flex items-center">
+          <div className="h-px w-4 bg-border-strong" />
+          <span className="text-[10px] font-mono text-foreground-muted px-1">gRPC :50051</span>
+          <div className="h-px w-4 bg-border-strong" />
+          <span className="text-[8px] text-foreground-muted">►</span>
+        </div>
+        <div className="flex items-center">
+          <div className="h-px w-4 bg-border-strong" />
+          <span className="text-[10px] font-mono text-foreground-muted px-1">REST :8080</span>
+          <div className="h-px w-4 bg-border-strong" />
+          <span className="text-[8px] text-foreground-muted">►</span>
+        </div>
+      </div>
+      {/* Right: Orchestrator */}
+      <div className="flex-1 flex flex-col items-center">
+        <div className="border bg-surface-100 p-4 flex flex-col items-center text-center w-full">
+          <div className="text-xs font-medium text-foreground">Orchestrator</div>
+          <div className="text-[10px] text-foreground-muted mt-0.5">:50051 gRPC · :8080 HTTP</div>
+          <div className="text-[10px] text-foreground-muted mt-2 space-y-0.5">
+            <div>Workflow state</div>
+            <div>Task dispatch</div>
+            <div>REST API · health · metrics</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    {/* Line from Orchestrator down to processors */}
+    <div className="flex gap-4 w-full" style={{ paddingLeft: 'calc(50% + 0.5rem)' }}>
+      <div className="flex-1 flex justify-center">
+        <div className="w-px h-4 bg-border-strong" />
+      </div>
+    </div>
+    {/* Internal processors */}
+    <div className="border border-dashed w-full p-3">
+      <div className="text-[10px] font-mono uppercase tracking-wider text-foreground-muted mb-2">Background Processors</div>
+      <div className="grid grid-cols-3 gap-2">
+        {['Outbox', 'Timers', 'Schedules', 'Sharding', 'Polling', 'Cache'].map((name) => (
+          <div key={name} className="border bg-background px-2 py-1.5 text-center">
+            <div className="text-[10px] font-medium text-foreground">{name}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+    {/* Down to storage */}
+    <div className="w-px h-4 bg-border-strong" />
+    <div className="border bg-background w-full p-3 text-center flex flex-col justify-center min-h-[4.5rem]">
+      <div className="text-xs font-medium text-foreground">PostgreSQL</div>
+      <div className="text-[10px] text-foreground-muted mt-1">State · Journal · Outbox · Timers</div>
+    </div>
+    {/* Workers section */}
+    <div className="w-full mt-8">
+      <div className="border bg-surface-75 w-full p-4">
+        <div className="text-[10px] font-mono uppercase tracking-wider text-foreground-muted mb-2">SDK Workers (your application)</div>
+        <div className="grid grid-cols-3 gap-2">
+          {['Worker 1', 'Worker 2', 'Worker N'].map((name) => (
+            <div key={name} className="border border-foreground/15 bg-background p-2.5 text-center">
+              <div className="text-[10px] font-medium text-foreground">{name}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  </div>
+  {/* Right-side bracket connecting Workers ↔ Orchestrator */}
+  <div className="border-r border-border-strong absolute" style={{ right: '0', top: '7.5rem', bottom: '3rem', width: '0' }} />
+  <div className="absolute h-px bg-border-strong" style={{ right: '0', top: '7.5rem', width: '3rem' }} />
+  <div className="absolute h-px bg-border-strong" style={{ right: '0', bottom: '3rem', width: '3rem' }} />
+  <div className="absolute text-[10px] font-mono text-foreground-muted bg-background px-1" style={{ right: '-1.5rem', top: '50%', transform: 'rotate(-90deg)', transformOrigin: 'center', whiteSpace: 'nowrap' }}>
+    gRPC :50051
+  </div>
+</div>
+
+### Internal Components
+
+The orchestrator runs several background processors:
+
+- **OutboxProcessor** — Polls the `outbox_queue` table and dispatches tasks atomically. The outbox pattern guarantees at-least-once delivery: workflow state changes and task inserts happen in the same database transaction.
+- **TimerProcessor** — Fires durable timers from the `timer_queue` table when they expire.
+- **ScheduleProcessor** — Handles cron-style scheduled workflow triggers.
+- **ShardCoordinator** — Acquires and renews shard leases using PostgreSQL advisory locks. Each orchestrator node owns a subset of shards for parallel processing.
+- **PollingManager** — Manages long-polling connections from workers, with notification-based wake-up when new work arrives.
+- **HighPerfCache** — LRU in-memory cache for hot workflow state, reducing database roundtrips.
+
+### Task Lifecycle
+
+Tasks flow through the system as follows:
+
+1. Workflow state change + outbox task insert happen in a single database transaction
+2. OutboxProcessor claims the outbox entry (lease-based, with expiry for crash safety)
+3. Task is dispatched to workers via the polling manager or eager dispatch
+4. Worker completes the task and reports back via gRPC
+5. On failure, tasks retry with exponential backoff, or move to the dead letter queue after max retries
+
+<div className="not-prose my-8 max-w-md mx-auto">
+  <div className="flex flex-col items-center">
+    {[
+      { label: 'State change + outbox insert', sub: 'Single DB transaction' },
+      { label: 'OutboxProcessor claims entry', sub: 'Lease-based with expiry' },
+      { label: 'Task dispatched to worker', sub: 'Polling or eager dispatch' },
+      { label: 'Worker executes & reports', sub: 'gRPC completion' },
+      { label: 'Result journaled', sub: 'Retry on failure · DLQ after max' },
+    ].map((item, i, arr) => (
+      <div key={i} className="flex flex-col items-center w-full">
+        <div className="border bg-background px-5 py-2.5 w-full flex items-center gap-3">
+          <span className="w-5 h-5 flex items-center justify-center border bg-surface-75 text-[10px] font-mono text-foreground-muted shrink-0">{i + 1}</span>
+          <div>
+            <div className="text-xs font-medium text-foreground">{item.label}</div>
+            <div className="text-[10px] text-foreground-muted">{item.sub}</div>
+          </div>
+        </div>
+        {i < arr.length - 1 && <div className="w-px h-3 bg-border-strong" />}
+      </div>
+    ))}
+  </div>
+</div>
+
+---
+
+## Installation
+
+### From Source
+
+```bash
+git clone <your-repo-url>
+cd orcher
+cargo build --release
+
+# Orchestrator binary (serves gRPC and the REST API)
+DATABASE_URL=postgres://... ./target/release/orchestrator
+```
+
+### Local Development
+
+The quickest way to run the stack locally is the CLI:
+
+```bash
+orcher dev start
+```
+
+This runs the orchestrator and PostgreSQL in Docker with no authentication, with its ports published on `127.0.0.1`.
+
+---
+
+## Next Steps
+
+- [Configuration](/guides/operations/orchestrator/configuration) — Environment variables and database connection
+- [Deployment](/guides/operations/orchestrator/deployment) — Starting the server in development, Docker, and systemd
+- [High Availability](/guides/operations/orchestrator/high-availability) — Multi-instance deployment and load balancing
+- [Monitoring](/guides/operations/orchestrator/monitoring) — Health checks, performance tuning, and troubleshooting

@@ -1,0 +1,80 @@
+---
+id: 'metrics-alerting'
+title: 'Alerting'
+description: 'Recommended Prometheus alert rules for monitoring Orcher orchestrator health'
+sidebar_label: 'Alerting'
+---
+
+## Recommended Alert Rules
+
+```yaml
+groups:
+  - name: orcher
+    interval: 30s
+    rules:
+      # High workflow failure rate
+      - alert: HighWorkflowFailureRate
+        expr: |
+          sum(rate(orcher_workflows_failed_total[5m]))
+          /
+          (sum(rate(orcher_workflows_completed_total[5m])) + sum(rate(orcher_workflows_failed_total[5m])))
+          > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Workflow failure rate above 5%"
+
+      # Queue depth growing
+      - alert: QueueDepthHigh
+        expr: orcher_queue_depth > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Queue {{ $labels.queue }} has {{ $value }} pending items"
+
+      # Database pool near exhaustion
+      - alert: DBPoolExhausted
+        expr: orcher_db_pool_utilization_ratio > 0.90
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Database pool at {{ $value | humanizePercentage }} utilization"
+
+      # Journal cache hit ratio low
+      - alert: JournalCacheHitRateLow
+        expr: orcher_journal_cache_hit_ratio < 0.80
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Journal cache hit ratio is {{ $value | humanizePercentage }}"
+
+      # DLQ growing
+      - alert: DLQGrowing
+        expr: orcher_dlq_current_depth > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Dead letter queue has {{ $value }} entries"
+
+      # PostgreSQL fallback active (Redis down)
+      - alert: RedisUnavailable
+        expr: rate(orcher_postgres_fallback_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Workers falling back to PostgreSQL polling (Redis may be down)"
+```
+
+---
+
+## Next Steps
+
+- [Prometheus Setup](/guides/observability/metrics/prometheus) — Scrape configuration and useful PromQL queries
+- [Metric Reference](/guides/observability/metrics/reference) — Full list of all exposed metrics
+- [Metrics Overview](/guides/observability/metrics) — Endpoint configuration

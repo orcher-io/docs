@@ -1,0 +1,209 @@
+---
+id: cli-infrastructure
+title: Infrastructure Commands
+sidebar_label: Infrastructure
+---
+
+## `orcher server`
+
+Manage the Orcher server process.
+
+### `server start`
+
+```bash
+orcher server start [OPTIONS]
+
+# Examples
+orcher server start --foreground
+orcher server start --grpc-port 50051 --http-port 8080
+orcher server start --database-url postgresql://localhost/orcher
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-c, --config` | — | Server config file path |
+| `--grpc-port` | `50051` | gRPC server port |
+| `--http-port` | `8080` | HTTP port: the engine's REST API, health checks and metrics |
+| `--host` | `127.0.0.1` | Host address to publish the ports on |
+| `-f, --foreground` | `false` | Run in foreground (not daemonized) |
+| `--database-url` | env `DATABASE_URL` | PostgreSQL connection string |
+| `--log-level` | `info` | Log level: trace, debug, info, warn, error |
+
+### `server stop`
+
+```bash
+orcher server stop [OPTIONS]
+
+# Examples
+orcher server stop
+orcher server stop --force --timeout 10
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-f, --force` | `false` | Force shutdown |
+| `--timeout` | `30` | Graceful shutdown timeout (seconds) |
+
+### `server status`
+
+```bash
+orcher server status [OPTIONS]
+
+# Examples
+orcher server status
+orcher server status --verbose --output json
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-v, --verbose` | `false` | Show detailed status |
+| `-o, --output` | `table` | Output format |
+| `--grpc-addr` | `http://localhost:50051` | gRPC address to check |
+| `--orchestrator-http` | `http://localhost:8080` | Engine HTTP health address |
+
+### `server restart`
+
+```bash
+orcher server restart [OPTIONS]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-f, --force` | Force restart |
+
+### `server version`
+
+```bash
+orcher server version
+```
+
+Shows version information for the CLI and the running engine.
+
+---
+
+## `orcher namespace` (alias: `ns`)
+
+Manage namespaces for multi-tenancy.
+
+### `namespace create`
+
+```bash
+orcher namespace create <name> [OPTIONS]
+
+# Examples
+orcher namespace create production
+orcher namespace create staging --description "Staging env" --retention-days 14 --owner-email team@example.com
+orcher namespace create dev --data env=development --data tier=free
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-d, --description` | — | Human-readable description |
+| `-r, --retention-days` | `7` | Data retention period |
+| `-e, --owner-email` | — | Owner email |
+| `--data` | — | Key-value metadata (repeatable) |
+
+### `namespace list`
+
+```bash
+orcher namespace list [OPTIONS]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-l, --limit` | `100` | Max results |
+| `--offset` | `0` | Pagination offset |
+
+### `namespace get` (aliases: `describe`, `info`)
+
+```bash
+orcher namespace get <name>
+```
+
+### `namespace update`
+
+```bash
+orcher namespace update <name> [OPTIONS]
+
+# Example
+orcher namespace update staging --retention-days 30 --owner-email newteam@example.com
+```
+
+| Option | Description |
+|--------|-------------|
+| `--description` | Updated description |
+| `--owner-email` | Updated owner email |
+| `--retention-days` | Updated retention period |
+| `--data` | Updated key-value metadata |
+
+### `namespace deprecate`
+
+```bash
+orcher namespace deprecate <name> [--force]
+```
+
+### `namespace delete`
+
+```bash
+orcher namespace delete <name> [--force]
+```
+
+---
+
+## `orcher queue` (alias: `q`)
+
+View and manage task queues.
+
+### `queue list`
+
+```bash
+orcher queue list [OPTIONS]
+
+# Examples
+orcher queue list
+orcher queue list --queue payment-tasks --all-namespaces
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-Q, --queue` | — | Filter by queue name |
+| `-A, --all-namespaces` | `false` | Show across all namespaces |
+| `-l, --limit` | `50` | Max results |
+
+### `queue stats`
+
+```bash
+orcher queue stats <queue_name> [OPTIONS]
+
+# Example
+orcher queue stats payment-tasks --type payment-workflow
+```
+
+| Option | Description |
+|--------|-------------|
+| `-t, --type` | Filter by workflow type |
+
+### `queue depth`
+
+```bash
+orcher queue depth [queue_name] [OPTIONS]
+
+# Examples
+orcher queue depth payment-tasks
+orcher queue depth --watch --interval 5
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-w, --watch` | `false` | Continuous monitoring mode |
+| `--interval` | `2` | Watch update interval (seconds) |
+
+### `queue pollers`
+
+```bash
+orcher queue pollers <queue_name> [OPTIONS]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-v, --verbose` | Show detailed poller information |

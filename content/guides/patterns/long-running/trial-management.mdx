@@ -1,0 +1,382 @@
+---
+id: 'long-running-trial-management'
+title: 'Trial Period Management'
+sidebar_label: 'Trial Management'
+---
+
+## Trial Period Management
+
+SaaS trial periods are a natural fit for long-running workflows. The workflow sleeps through the trial duration, waking at key milestones to send reminder emails, and at the end checks whether the user has converted to a paid plan or needs to be downgraded.
+
+<div className="not-prose my-8 max-w-lg mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b flex items-center justify-between">
+    <span className="text-xs font-medium text-foreground">14-Day Trial Workflow</span>
+    <span className="text-[10px] font-mono text-foreground-muted">per user</span>
+  </div>
+  {[
+    { time: 'Day 0', task: 'Start trial', type: 'task', detail: 'Provision account · enable features' },
+    { time: '', task: '', type: 'sleep', detail: 'sleep(3 days)' },
+    { time: 'Day 3', task: 'Engagement check', type: 'task', detail: 'Has user created a workflow?' },
+    { time: '', task: '', type: 'sleep', detail: 'sleep(4 days)' },
+    { time: 'Day 7', task: 'Midpoint reminder', type: 'task', detail: 'Send tips email · 7 days left' },
+    { time: '', task: '', type: 'sleep', detail: 'sleep(5 days)' },
+    { time: 'Day 12', task: 'Urgency reminder', type: 'task', detail: 'Send upgrade prompt · 2 days left' },
+    { time: '', task: '', type: 'sleep', detail: 'sleep(2 days)' },
+    { time: 'Day 14', task: 'Trial expires', type: 'decision', detail: '' },
+  ].map((step, i, arr) => (
+    <div key={i} className={`flex items-stretch ${i < arr.length - 1 ? 'border-b' : ''} ${step.type === 'sleep' ? 'bg-surface-75' : ''}`}>
+      <div className="w-16 shrink-0 px-3 py-2 flex items-center justify-end border-r">
+        <span className="text-[10px] font-mono text-foreground-muted">{step.time}</span>
+      </div>
+      <div className="flex-1 px-4 py-2 flex items-center gap-3">
+        {step.type === 'sleep' && (
+          <>
+            <span className="text-[10px] text-foreground-muted">💤</span>
+            <span className="text-[10px] font-mono text-foreground-muted italic">{step.detail}</span>
+          </>
+        )}
+        {step.type === 'task' && (
+          <>
+            <code className="text-[11px] text-foreground">{step.task}</code>
+            <span className="text-[10px] text-foreground-muted ml-auto">{step.detail}</span>
+          </>
+        )}
+        {step.type === 'decision' && (
+          <code className="text-[11px] text-foreground">{step.task}</code>
+        )}
+      </div>
+    </div>
+  ))}
+  {/* Decision branch */}
+  <div className="border-t flex">
+    <div className="w-16 shrink-0 border-r" />
+    <div className="flex-1 p-3">
+      <div className="flex gap-3">
+        <div className="flex-1 border bg-background p-2.5 text-center">
+          <div className="text-[10px] font-medium text-foreground">Converted</div>
+          <div className="text-[10px] text-foreground-muted mt-0.5">Activate paid plan</div>
+        </div>
+        <div className="flex-1 border border-dashed bg-surface-75 p-2.5 text-center">
+          <div className="text-[10px] font-medium text-foreground">Not converted</div>
+          <div className="text-[10px] text-foreground-muted mt-0.5">Downgrade · send offer</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use std::time::Duration;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TrialUser {
+    user_id: String,
+    email: String,
+    trial_days: u64,
+    plan: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TrialResult {
+    user_id: String,
+    converted: bool,
+    cancelled: bool,
+    reminders_sent: u32,
+}
+
+#[task]
+async fn send_trial_reminder(user_id: String, stage: String) -> Result<()> {
+    // Send trial reminder email
+    Ok(())
+}
+
+#[task]
+async fn check_user_status(user_id: String) -> Result<bool> {
+    // Check if user upgraded during trial
+    Ok(false)
+}
+
+#[task]
+async fn downgrade_to_free(user_id: String) -> Result<()> {
+    // Downgrade user to free plan
+    Ok(())
+}
+
+// Trial period workflow with reminders
+#[workflow(name = "trial_period", version = "1.0.0")]
+pub async fn trial_period(
+    ctx: WorkflowContext,
+    user: TrialUser,
+) -> Result<TrialResult> {
+    println!("Trial started for user {}: {} days", user.user_id, user.trial_days);
+
+    let mut reminders_sent = 0;
+    let trial_duration = Duration::from_secs(user.trial_days * 86400);
+
+    // Send reminder at 50% of trial
+    ctx.sleep(trial_duration / 2).await?;
+    ctx.execute_task(send_trial_reminder, (user.user_id.clone(), "halfway".to_string())).await?;
+    reminders_sent += 1;
+
+    // Send reminder at 80% of trial
+    ctx.sleep(trial_duration * 3 / 10).await?;
+    ctx.execute_task(send_trial_reminder, (user.user_id.clone(), "ending_soon".to_string())).await?;
+    reminders_sent += 1;
+
+    // Send final reminder 1 day before end
+    ctx.sleep(trial_duration / 10 - Duration::from_secs(86400)).await?;
+    ctx.execute_task(send_trial_reminder, (user.user_id.clone(), "last_day".to_string())).await?;
+    reminders_sent += 1;
+
+    // Wait for remaining trial period
+    ctx.sleep(Duration::from_secs(86400)).await?;
+
+    // Check if user upgraded during trial
+    let upgraded: bool = ctx
+        .execute_task(check_user_status, user.user_id.clone())
+        .await?;
+
+    if upgraded {
+        println!("User {} converted to paid plan", user.user_id);
+        Ok(TrialResult {
+            user_id: user.user_id,
+            converted: true,
+            cancelled: false,
+            reminders_sent,
+        })
+    } else {
+        println!("Trial expired for user {} - downgrading to free plan", user.user_id);
+        ctx.execute_task(downgrade_to_free, user.user_id.clone()).await?;
+
+        Ok(TrialResult {
+            user_id: user.user_id,
+            converted: false,
+            cancelled: false,
+            reminders_sent,
+        })
+    }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, WorkflowContext, createTaskRefs, Duration } from '@orcher/sdk';
+
+interface TrialUser {
+  userId: string;
+  email: string;
+  trialDays: number;
+  plan: string;
+}
+
+interface TrialResult {
+  userId: string;
+  converted: boolean;
+  cancelled: boolean;
+  remindersSent: number;
+}
+
+@Tasks()
+class TrialTasks {
+  @Task()
+  async sendTrialReminder(userId: string, stage: string): Promise<void> {
+    // Send trial reminder email
+  }
+
+  @Task()
+  async checkUserStatus(userId: string): Promise<boolean> {
+    // Check if user upgraded during trial
+    return false;
+  }
+
+  @Task()
+  async downgradeToFree(userId: string): Promise<void> {
+    // Downgrade user to free plan
+  }
+}
+
+const tasks = createTaskRefs(TrialTasks);
+
+// Trial period workflow with reminders
+@Workflow({ name: 'trial_period', version: '1.0.0' })
+class TrialPeriodWorkflow {
+  async run(ctx: WorkflowContext, user: TrialUser): Promise<TrialResult> {
+    console.log(`Trial started for user ${user.userId}: ${user.trialDays} days`);
+
+    let remindersSent = 0;
+    const trialDuration = user.trialDays * 86400000; // milliseconds
+
+    // Send reminder at 50% of trial
+    await ctx.sleep(trialDuration / 2);
+    await ctx.executeTask(tasks.sendTrialReminder, user.userId, 'halfway');
+    remindersSent++;
+
+    // Send reminder at 80% of trial
+    await ctx.sleep(trialDuration * 0.3);
+    await ctx.executeTask(tasks.sendTrialReminder, user.userId, 'ending_soon');
+    remindersSent++;
+
+    // Send final reminder 1 day before end
+    await ctx.sleep(trialDuration * 0.1 - 86400000);
+    await ctx.executeTask(tasks.sendTrialReminder, user.userId, 'last_day');
+    remindersSent++;
+
+    // Wait for remaining trial period
+    await ctx.sleep(Duration.fromDays(1));
+
+    // Check if user upgraded during trial
+    const upgraded = await ctx.executeTask<boolean>(tasks.checkUserStatus, user.userId);
+
+    if (upgraded) {
+      console.log(`User ${user.userId} converted to paid plan`);
+      return {
+        userId: user.userId,
+        converted: true,
+        cancelled: false,
+        remindersSent,
+      };
+    }
+
+    console.log(`Trial expired for user ${user.userId} - downgrading to free plan`);
+    await ctx.executeTask(tasks.downgradeToFree, user.userId);
+
+    return {
+      userId: user.userId,
+      converted: false,
+      cancelled: false,
+      remindersSent,
+    };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from datetime import timedelta
+
+from orcher import workflow, task, WorkflowContext
+from dataclasses import dataclass
+
+@dataclass
+class TrialUser:
+    user_id: str
+    email: str
+    trial_days: int
+    plan: str
+
+@dataclass
+class TrialResult:
+    user_id: str
+    converted: bool
+    cancelled: bool
+    reminders_sent: int
+
+@task
+async def send_trial_reminder(user_id: str, stage: str) -> None:
+    """Send trial reminder email."""
+    pass
+
+@task
+async def check_user_status(user_id: str) -> bool:
+    """Check if user upgraded during trial."""
+    return False
+
+@task
+async def downgrade_to_free(user_id: str) -> None:
+    """Downgrade user to free plan."""
+    pass
+
+# Trial period workflow with reminders
+@workflow(name="trial_period", version="1.0.0")
+async def trial_period(ctx: WorkflowContext, user: TrialUser) -> TrialResult:
+    print(f"Trial started for user {user.user_id}: {user.trial_days} days")
+
+    reminders_sent = 0
+    trial_duration = user.trial_days * 86400  # seconds
+
+    # Send reminder at 50% of trial
+    await ctx.sleep(trial_duration // 2)
+    await ctx.execute_task(send_trial_reminder, user.user_id, "halfway")
+    reminders_sent += 1
+
+    # Send reminder at 80% of trial
+    await ctx.sleep(trial_duration * 3 // 10)
+    await ctx.execute_task(send_trial_reminder, user.user_id, "ending_soon")
+    reminders_sent += 1
+
+    # Send final reminder 1 day before end
+    await ctx.sleep(trial_duration // 10 - 86400)
+    await ctx.execute_task(send_trial_reminder, user.user_id, "last_day")
+    reminders_sent += 1
+
+    # Wait for remaining trial period
+    await ctx.sleep(timedelta(days=1))
+
+    # Check if user upgraded during trial
+    upgraded = await ctx.execute_task(check_user_status, user.user_id)
+
+    if upgraded:
+        print(f"User {user.user_id} converted to paid plan")
+        return TrialResult(
+            user_id=user.user_id,
+            converted=True,
+            cancelled=False,
+            reminders_sent=reminders_sent,
+        )
+
+    print(f"Trial expired for user {user.user_id} - downgrading to free plan")
+    await ctx.execute_task(downgrade_to_free, user.user_id)
+
+    return TrialResult(
+        user_id=user.user_id,
+        converted=False,
+        cancelled=False,
+        reminders_sent=reminders_sent,
+    )
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/patterns/long-running/approvals" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Human-in-the-Loop Approvals</h3>
+      <p className="text-sm text-scale-1100">
+        Pause workflows for human decisions with timeout and escalation.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/long-running/order-fulfillment" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Order Fulfillment Process</h3>
+      <p className="text-sm text-scale-1100">
+        Multi-day order processing with stage tracking.
+      </p>
+    </div>
+  </Link>
+</div>

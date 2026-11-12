@@ -1,0 +1,142 @@
+---
+id: python-worker
+title: Worker Configuration
+description: Configure and run the Python SDK worker, with its builder, authentication, versions, interceptors and graceful shutdown
+sidebar_label: 'Worker'
+---
+
+A `Worker` is the process that runs your code. It connects to the engine over gRPC, registers the workflows and tasks it knows, and polls one task queue for work to run.
+
+---
+
+## Creating a worker
+
+<$CodeSample path="python/worker/basic.py" region="basic" />
+
+`server_url` and `task_queue` are required; `build()` raises `ValueError` without them. `run()` starts polling and returns once the worker has shut down.
+
+### Registering workflows and tasks
+
+`@workflow`, `@task`, `@tasks` and `@actor` register what they decorate when their module is imported, and the worker picks up everything registered by the time `build()` is called. So import your modules before building the worker, as `import handlers` does above. Each name can be registered once per process; registering it twice raises `ValueError`.
+
+The builder can also import modules for you:
+
+<$CodeSample path="python/worker/discovery.py" region="discover" />
+
+`auto_discover()` imports each matching file under a generated module name, and silently skips any file that fails to import. A file that is also imported the normal way (by a workflow module that imports its tasks, say) registers its names twice, and whichever import comes second fails, so its workflows go missing without an error. Explicit imports avoid both problems.
+
+---
+
+## Builder reference
+
+| Method | Default | Description |
+|---|---|---|
+| `.server_url(url)` | required | The engine's gRPC address |
+| `.task_queue(name)` | required | The queue this worker polls |
+| `.namespace(name)` | `"default"` | The namespace to work in |
+| `.api_key(key)` | `ORCHER_API_KEY` | API key for an engine that requires one; `None` or blank sends none |
+| `.tls(ca_cert_path=, client_cert_path=, client_key_path=)` | none | Certificates for a private CA or mutual TLS; see [Authentication and TLS](#authentication-and-tls) |
+| `.version_id(id)` | `ORCHER_VERSION_ID` | The release this worker runs; see [Versions](#versions) |
+| `.identity(name)` | host, pid and a random suffix | How the worker is named to the engine |
+| `.max_concurrent_workflows(n)` | `100` | Workflow activations run at once |
+| `.max_concurrent_tasks(n)` | `100` | Tasks run at once; also the size of the default thread pool for plain-function tasks |
+| `.max_concurrent_actor_operations(n)` | `100` | Actor operations run at once |
+| `.workflow_poller_count(n)` | `4` | Concurrent workflow pollers |
+| `.task_poller_count(n)` | `4` | Concurrent task pollers |
+| `.actor_poller_count(n)` | `4` | Concurrent actor pollers, started only if the worker has actors |
+| `.shutdown_grace_time(timedelta)` | 30 seconds | How long shutdown waits for in-flight work |
+| `.organization_id(id)` | none | Sent as the `X-Organization-Id` header on every request |
+| `.task_executor(executor)` | a thread pool | Where plain-function tasks run; pass a `ProcessPoolExecutor` for CPU-bound work |
+| `.interceptor(i)` | none | Add an interceptor; see [Interceptors](#interceptors) |
+| `.workflow_interceptor(i)` / `.task_interceptor(i)` | none | Add an interceptor to one chain only |
+| `.auto_discover(paths, *, patterns, exclude)` | off | Import matching files before building |
+
+Durations accept a `timedelta`, or an `int` of milliseconds. `.workflow_poll_interval()`, `.task_poll_interval()`, `.force_shutdown_timeout()` and `.binary_checksum()` are accepted but have no effect in `orcher-sdk` 0.4.4.
+
+### From the environment
+
+`WorkerConfig.from_env()` builds the same configuration from environment variables:
+
+<$CodeSample path="python/worker/from_env.py" region="env" />
+
+It reads `ORCHER_SERVER_URL` and `ORCHER_TASK_QUEUE` (both required), and optionally `ORCHER_NAMESPACE`, `ORCHER_API_KEY`, `ORCHER_TLS_CA_CERT_PATH`, `ORCHER_TLS_CLIENT_CERT_PATH`, `ORCHER_TLS_CLIENT_KEY_PATH`, `ORCHER_VERSION_ID`, `ORCHER_IDENTITY`, `ORCHER_ORGANIZATION_ID`, `ORCHER_MAX_CONCURRENT_WORKFLOWS`, `ORCHER_MAX_CONCURRENT_TASKS`, `ORCHER_WORKFLOW_POLLER_COUNT`, `ORCHER_TASK_POLLER_COUNT` and `ORCHER_SHUTDOWN_GRACE_TIME_MS`. Pass `prefix=` to use another prefix. A `Worker` built from a `WorkerConfig` this way has no interceptors or custom executor.
+
+---
+
+## Authentication and TLS
+
+An engine that requires authentication rejects a worker without a valid API key. The builder reads `ORCHER_API_KEY` from the environment, or takes the key explicitly; either way it is sent as `authorization: Bearer <key>` on every request the worker makes:
+
+<$CodeSample path="python/worker/auth.py" region="auth" />
+
+TLS follows the URL scheme. An `https://` URL connects over TLS and verifies the engine against the system trust store, with no other setting. An `http://` URL connects in plaintext, even with certificates set, so use `https://` whenever the engine expects TLS.
+
+`.tls()` adds certificates to every connection the worker opens. Give a CA certificate to trust a private or self-signed authority, and a client certificate and key for mutual TLS:
+
+<$CodeSample path="python/worker/tls.py" region="mtls" />
+
+Leave out `ca_cert_path` when the engine's certificate is publicly trusted; for mutual TLS the worker then sends only its client certificate:
+
+<$CodeSample path="python/worker/tls.py" region="client-identity" />
+
+The client certificate and key go together: `.tls()` raises `ValueError` if only one is given. A `WorkerConfig` takes the same paths:
+
+<$CodeSample path="python/worker/tls.py" region="config" />
+
+`WorkerConfig.from_env()` reads them from `ORCHER_TLS_CA_CERT_PATH`, `ORCHER_TLS_CLIENT_CERT_PATH` and `ORCHER_TLS_CLIENT_KEY_PATH`; the builder doesn't read those variables. When a handshake fails, the error names the cause, such as a certificate the worker doesn't trust or a client certificate the engine requires.
+
+TLS and mutual TLS need `orcher-sdk` 0.4.4 or later. In 0.4.3 and earlier the worker had no TLS settings and couldn't connect to an `https://` URL.
+
+---
+
+## Versions
+
+`version_id` declares which release of your code the worker runs: a git SHA, an image digest or a release tag. The engine records it on an execution the first time a worker claims it, so that execution keeps replaying against the code it started on. Set it in CI, through `ORCHER_VERSION_ID`, and the same build needs no code change. See [Changing workflow code](/guides/sdk/python/workflows#changing-workflow-code).
+
+---
+
+## Interceptors
+
+Interceptors wrap every workflow activation and every task attempt the worker runs, for logging, metrics and tracing. The built-in ones are factories: `.interceptor()` adds the workflow and the task half of each.
+
+<$CodeSample path="python/worker/interceptors.py" region="builtin" />
+
+- `LoggingInterceptor` logs each execution through Python's `logging`. Turn off `log_input` or `log_output` to keep payloads out of your logs.
+- `MetricsInterceptor` counts executions and failures and records durations in a `MetricsCollector`; `InMemoryMetricsCollector` is the built-in one.
+- `TracingInterceptor` opens an OpenTelemetry span for each execution. It needs `opentelemetry-api` and `opentelemetry-sdk` installed, and passes executions through untouched without them.
+
+A workflow activation runs the workflow code from the start, replaying what's in the journal, so a workflow interceptor sees one call per activation, not one per workflow.
+
+To write your own, subclass `WorkflowInterceptor` or `TaskInterceptor` and override `intercept_execute`, or the `on_enter`, `on_success`, `on_error` and `on_exit` hooks:
+
+<$CodeSample path="python/worker/interceptors.py" region="custom" />
+
+`.interceptor()` raises `TypeError` for anything that is neither an interceptor nor a factory with `workflow()` and `task()` methods.
+
+---
+
+## Graceful shutdown
+
+`worker.shutdown()` asks the worker to stop and returns at once; `run()` returns when shutdown has finished. Wire it to `SIGTERM` and `SIGINT`, as the example above does. On shutdown the worker:
+
+1. stops taking new work;
+2. waits up to the shutdown grace time for in-flight workflow activations and tasks to finish, delivering the results of work it had already claimed; and
+3. stops its pollers.
+
+`shutdown(force=True)` skips the wait. Work the worker had claimed but not finished is not lost: once its claim or heartbeat times out, the engine hands it to another worker.
+
+---
+
+## Scaling
+
+Run more worker processes on the same task queue, on one machine or many; each polls for work independently and the engine hands each piece of work to one of them. Within a process, `max_concurrent_workflows` and `max_concurrent_tasks` cap how much runs at once.
+
+Each worker also hosts up to 10 [sessions](/guides/sdk/python/sessions) at a time, a limit the builder can't change in `orcher-sdk` 0.4.4.
+
+---
+
+## Next steps
+
+- [Workflows](/guides/sdk/python/workflows): the code the worker runs
+- [Tasks](/guides/sdk/python/tasks): retries, heartbeats and cancellation
+- [Client](/guides/sdk/python/client): start the workflows the worker runs

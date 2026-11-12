@@ -1,0 +1,141 @@
+---
+id: 'storage'
+title: 'Storage'
+description: 'Configure PostgreSQL as the primary data store for the Orcher orchestrator'
+---
+
+Orcher uses **PostgreSQL** as its durable, ACID-compliant primary data store. All workflow state, task execution records, journal entries, timers, and queue data live in PostgreSQL. **Redis** is optional — it provides fast queue notification and query caching but is not required for correctness.
+
+- **PostgreSQL is the source of truth** — Every workflow step, task result, and timer is persisted durably
+- **Redis is a performance optimization** — Notifies workers of new work at once and caches queries
+- **In-memory caching** — A Moka-based LRU cache (`HighPerfCache`) reduces database roundtrips for hot workflow state
+- **PgBouncer recommended** — Connection multiplexing for production deployments with many concurrent workflows
+
+---
+
+## PostgreSQL
+
+### What's Stored
+
+The orchestrator manages approximately 20 core tables via embedded migrations (V001–V023). The key tables are:
+
+| Table | Purpose |
+|-------|---------|
+| `workflow_executions` | Workflow instances with claim tracking, shard routing, and priority |
+| `task_executions` | Task lifecycle (scheduled → started → completed/failed), eager claim TTL |
+| `execution_log` | Step-level execution records (task, closure, child workflow, side effect) |
+| `workflow_execution_journal` | Event-sourced journal for replay protection |
+| `outbox_queue` | Atomic task dispatch with lease-based claiming |
+| `timer_queue` | Durable timers (sleep, timeouts, scheduled triggers) |
+| `dead_letter_queue` | Failed tasks after max retries |
+| `events` | Platform event store (task, actor, worker streams) |
+| `worker_heartbeats` | Worker health metrics and status |
+| `actor_state` | Virtual actor state persistence |
+| `namespaces` | Logical partitioning for multi-tenancy |
+| `organizations` | Organization-level multi-tenancy |
+| `execution_idempotency` | Workflow deduplication cache |
+| `child_workflow_executions` | Parent-child workflow relationships |
+| `schedules` | Cron-style scheduled workflow triggers |
+
+Key design patterns used across the schema:
+
+- **Claim-based polling** — `claimed_by` and `claim_timeout_at` fields enable safe distributed polling without database locks
+- **Outbox pattern** — Workflow state changes and task dispatch happen in a single transaction
+- **Shard routing** — `shard_id` column for horizontal partitioning across orchestrator nodes
+- **Idempotency keys** — Unique constraints prevent duplicate operations
+- **JSONB attributes** — Flexible metadata with GIN indexes for fast queries
+
+### Connection Configuration
+
+The orchestrator connects to PostgreSQL via the `DATABASE_URL` environment variable:
+
+```bash
+# Direct connection
+DATABASE_URL=postgresql://orcher:orcher@localhost:5432/orcher
+
+# Via PgBouncer (recommended for production)
+DATABASE_URL=postgresql://orcher:orcher@localhost:6432/orcher
+```
+
+Default connection pool settings:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `min_connections` | `10` | Minimum idle connections |
+| `max_connections` | `50` | Maximum connections in pool |
+| `connect_timeout` | `30s` | Timeout for establishing a connection |
+| `max_lifetime` | `1800s` (30 min) | Max time a connection is reused |
+| `idle_timeout` | `600s` (10 min) | Time before idle connections are closed |
+| `acquire_timeout` | `30s` | Timeout for acquiring a connection from the pool |
+| `statement_timeout` | `300s` (5 min) | Max query execution time |
+
+### PgBouncer
+
+For production deployments, PgBouncer is strongly recommended. PostgreSQL connections cost ~10 MB each and the default `max_connections` is ~100 — easily exhausted with many concurrent workflows. PgBouncer multiplexes thousands of clients over a smaller pool of actual database connections.
+
+```yaml
+# docker-compose.yml
+services:
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://orcher:orcher@postgres:5432/orcher
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: 1000
+      DEFAULT_POOL_SIZE: 50
+      MIN_POOL_SIZE: 10
+      RESERVE_POOL_SIZE: 10
+      RESERVE_POOL_TIMEOUT: 3
+    ports:
+      - "6432:6432"
+```
+
+Use **transaction mode** — it supports the highest concurrency. Point the orchestrator at PgBouncer's port (6432), not PostgreSQL's port (5432).
+
+### PostgreSQL Tuning
+
+For production workloads, tune these PostgreSQL settings:
+
+```ini
+# postgresql.conf
+max_connections = 200
+shared_buffers = 256MB
+effective_cache_size = 768MB
+work_mem = 4MB
+checkpoint_completion_target = 0.9
+max_wal_size = 4GB
+```
+
+### Migrations
+
+Migrations are **embedded in the orchestrator binary** and run automatically at startup in development mode. Each migration is versioned (V001–V023) with SHA256 checksums to prevent tampering.
+
+Startup behavior is controlled by `SetupConfig`:
+
+| Mode | Auto-Create DB | Auto-Migrate | Fail on Pending |
+|------|---------------|-------------|-----------------|
+| **Development** | Yes | Yes | No |
+| **Production** | No | No | Yes |
+
+In production, run migrations separately before deploying the new binary:
+
+```rust
+use orcher_storage::setup::{SetupConfig, setup_database};
+
+// Production: fail if migrations are pending
+let config = SetupConfig::production();
+setup_database(&config).await?;
+```
+
+---
+
+## Next Steps
+
+- [Redis](/guides/operations/storage/redis) — Optional Redis configuration for fast queue notification
+- [Caching & Schema](/guides/operations/storage/caching) — In-memory cache tiers and database schema details
+- [Operations & Troubleshooting](/guides/operations/storage/operations) — Docker Compose setup and troubleshooting
+- [Orchestrator Server](/guides/operations/orchestrator) — How the coordination engine works
+- [Workers](/guides/operations/workers) — Deploy and manage workers

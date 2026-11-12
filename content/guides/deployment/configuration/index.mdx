@@ -1,0 +1,106 @@
+---
+id: 'configuration'
+title: 'Configuration Reference'
+description: 'Overview of Orcher orchestrator configuration via environment variables, CLI flags, and TOML config files'
+sidebar_label: 'Configuration'
+---
+
+The orchestrator is configured through environment variables, CLI flags, and an optional TOML config file. CLI flags take highest priority, then environment variables, then config file values, then built-in defaults.
+
+- **Environment-first** — All essential settings available as environment variables
+- **TOML config file** — Optional file-based configuration for complex deployments
+- **Validation on startup** — Invalid configuration fails fast with clear error messages
+- **Sensible defaults** — Works out of the box for development; tune for production
+
+---
+
+## Orchestrator
+
+The orchestrator is the central service that coordinates workflow execution, task scheduling, and worker polling. It is one process that serves both the gRPC API (SDKs, workers, CLI) and the REST API under `/api/v1`; there is no separate API service to deploy.
+
+### CLI Flags
+
+```bash
+orchestrator [OPTIONS]
+
+Options:
+  -c, --config <FILE>             TOML configuration file path [env: ORCHER_ORCHESTRATOR_CONFIG]
+      --grpc-addr <ADDR>          gRPC server bind address [env: GRPC_BIND_ADDR]
+      --http-addr <ADDR>          HTTP server bind address (REST API, health, metrics) [env: HTTP_BIND_ADDR]
+      --insecure                  Allow a non-loopback listener without authentication [env: ORCHER_INSECURE]
+      --database-url <URL>        Database URL [env: DATABASE_URL]
+      --coordination-mode <MODE>  Workflow coordination mode [env: COORDINATION_MODE]
+      --log-level <LEVEL>         Log level [default: info] [env: LOG_LEVEL]
+      --log-format <FORMAT>       Log format [default: compact] [env: LOG_FORMAT]
+  -V, --version                   Print version
+  -h, --help                      Print help
+```
+
+### Environment Variables
+
+#### Required
+
+| Variable | Description |
+|----------|-------------|
+| `DATABASE_URL` | PostgreSQL or PgBouncer connection string. Example: `postgresql://orcher:orcher@localhost:6432/orcher` |
+
+#### Server
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GRPC_BIND_ADDR` | `127.0.0.1:50051` | gRPC server bind address for SDKs, workers and the CLI (the Docker image uses `0.0.0.0:50051`) |
+| `HTTP_BIND_ADDR` | `127.0.0.1:8080` | HTTP server: REST API (`/api/v1`), health (`/health`, `/health/ready`, `/health/live`) and metrics (`/metrics`). The Docker image uses `0.0.0.0:8080` |
+| `ORCHER_ORCHESTRATOR_CONFIG` | — | Path to the TOML config file (also `--config`) |
+| `ORCHER_INSECURE` | `false` | Allow listening on a non-loopback address without authentication (also `--insecure`) |
+
+#### Storage
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DATABASE_URL` | — | PostgreSQL connection string (required). PostgreSQL is the only data store the orchestrator uses |
+
+#### Logging
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LOG_LEVEL` | `info` | Log level: `trace`, `debug`, `info`, `warn`, `error` |
+| `LOG_FORMAT` | `compact` | Output format: `compact`, `json`, `pretty`, `bunyan` |
+| `RUST_LOG` | — | Fine-grained per-crate filter (overrides `LOG_LEVEL` when set) |
+
+#### Polling
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ORCHER_USE_SYNC_MATCH` | `false` | Enable sync-match dispatch for lower hand-off latency |
+
+### Authentication
+
+REST and gRPC share one authentication layer, configured in the `[security]` section of the TOML config:
+
+```toml
+[security]
+auth_mode = "api-key"   # none | api-key | oidc | mtls | api-key-and-mtls
+tenancy = "single"      # single | multi
+```
+
+For `auth_mode = "oidc"`, add a `[security.oidc]` table with `issuer`, `audience`, `organization_claim` and `scopes_claim`.
+
+- Without authentication the orchestrator refuses to listen on a non-loopback gRPC or HTTP address unless you pass `--insecure` or set `ORCHER_INSECURE=true`.
+- When `auth_mode` requires a client certificate (`mtls`, `api-key-and-mtls`), the orchestrator serves no REST API.
+- Create the first API key with `orchestrator api-key create --name admin --scope '*'` (the key is printed once on stdout). Scopes: `workflows:read`, `workflows:write`, `workers:run`, `namespaces:manage`, `api-keys:manage`, `*`.
+
+### Scaling the REST API
+
+Every orchestrator serves the REST API, so to scale it, run several orchestrator replicas behind a load balancer. See [High Availability](/guides/operations/orchestrator/high-availability).
+
+---
+
+## Next Steps
+
+- [TOML Configuration Reference](/guides/deployment/configuration/toml-reference) — Full TOML config file reference
+- [Environments](/guides/deployment/configuration/environments) — Configuration priority and development vs production settings
+- [Docker](/guides/deployment/docker) — Docker Compose setup
+- [Kubernetes](/guides/deployment/kubernetes) — Kubernetes manifests reference
+- [Cloud Platforms](/guides/deployment/cloud) — Deploy to AWS, GCP, and Azure
+- [Logging](/guides/observability/logging) — Logging format and level configuration
+- [Metrics](/guides/observability/metrics) — Prometheus metrics reference

@@ -1,0 +1,203 @@
+---
+id: 'kubernetes-production'
+title: 'Kubernetes Production Guide'
+description: 'Monitoring, scaling, security, and troubleshooting for Orcher on Kubernetes in production'
+sidebar_label: 'Production'
+---
+
+## Monitoring
+
+### Prometheus Scraping
+
+Pods are annotated for automatic Prometheus discovery:
+
+```yaml
+annotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8080"
+  prometheus.io/path: "/metrics"
+```
+
+If you use the Prometheus Operator, add a ServiceMonitor:
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: orchestrator
+  namespace: orcher
+spec:
+  selector:
+    matchLabels:
+      app: orchestrator
+  endpoints:
+    - port: http
+      interval: 10s
+      path: /metrics
+```
+
+### Health Endpoints
+
+| Endpoint | Purpose | Used By |
+|----------|---------|---------|
+| `/health/live` | Liveness — is the process alive? | `livenessProbe` |
+| `/health/ready` | Readiness — can it accept traffic? | `readinessProbe` |
+| `/health` | General health check | Manual verification |
+| `/metrics` | Prometheus metrics | Prometheus scraper |
+
+Test health from inside the cluster:
+
+```bash
+kubectl port-forward -n orcher service/orchestrator 8080:8080
+
+# In another terminal
+curl http://localhost:8080/health/live
+curl http://localhost:8080/health/ready
+curl http://localhost:8080/metrics
+```
+
+---
+
+## Scaling
+
+### Manual Scaling
+
+```bash
+kubectl scale deployment orchestrator -n orcher --replicas=5
+```
+
+Note: The HPA will override manual scaling if the target utilization doesn't match. To disable autoscaling temporarily, delete the HPA.
+
+### Resource Tuning
+
+Start with a size below and adjust requests and limits from observed usage:
+
+| Workload | CPU Request | Memory Request | CPU Limit | Memory Limit |
+|----------|------------|----------------|-----------|-------------|
+| Small | 250m | 256Mi | 1000m | 1Gi |
+| Medium | 500m | 512Mi | 2000m | 2Gi |
+| Large | 1000m | 1Gi | 4000m | 4Gi |
+
+---
+
+## Production Considerations
+
+### Secrets Management
+
+The quick start uses `kubectl create secret` for simplicity. In production, use a secrets management solution:
+
+- **External Secrets Operator** — Sync secrets from AWS Secrets Manager, Vault, or GCP Secret Manager
+- **Sealed Secrets** — Encrypt secrets in Git for GitOps workflows
+- **HashiCorp Vault** — Inject secrets via CSI driver or sidecar
+
+### Image Registry
+
+Push to a private registry and update the Kustomize image reference:
+
+```bash
+docker tag orcher/orchestrator:latest your-registry/orcher/orchestrator:v1.0.0
+docker push your-registry/orcher/orchestrator:v1.0.0
+```
+
+```bash
+cd services/orchestrator/k8s
+kustomize edit set image orcher/orchestrator=your-registry/orcher/orchestrator:v1.0.0
+kubectl apply -k .
+```
+
+### Network Policies
+
+Restrict traffic to only necessary connections:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: orchestrator
+  namespace: orcher
+spec:
+  podSelector:
+    matchLabels:
+      app: orchestrator
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - port: 50051  # gRPC from SDK workers
+        - port: 8080   # Metrics from Prometheus
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - port: 5432   # PostgreSQL
+        - port: 6432   # PgBouncer
+        - port: 6379   # Redis
+```
+
+---
+
+## Troubleshooting
+
+### Pods Not Starting
+
+```bash
+# Check events
+kubectl describe pod -n orcher -l app=orchestrator
+
+# Check logs
+kubectl logs -n orcher -l app=orchestrator --tail=100
+```
+
+Common causes:
+- **ImagePullBackOff** — Image not found in registry. Check image name and registry credentials.
+- **CrashLoopBackOff** — Container starts and immediately exits. Check logs for missing `DATABASE_URL` or connection errors.
+- **Pending** — Insufficient resources. Check `kubectl describe pod` for scheduling failures.
+
+### Database Connection Failures
+
+```bash
+# Verify secret exists and has correct keys
+kubectl get secret orcher-secrets -n orcher -o jsonpath='{.data.database-url}' | base64 -d
+
+# Test connectivity from the cluster
+kubectl run -it --rm psql --image=postgres:15 --restart=Never -n orcher -- \
+  psql "postgresql://orcher:orcher@postgres:5432/orcher" -c "SELECT 1"
+```
+
+### gRPC Connectivity
+
+```bash
+# Port forward gRPC port
+kubectl port-forward -n orcher service/orchestrator 50051:50051
+
+# Test with grpcurl
+grpcurl -plaintext localhost:50051 list
+```
+
+---
+
+## Cleanup
+
+Remove all resources:
+
+```bash
+cd services/orchestrator/k8s
+kubectl delete -k .
+kubectl delete secret orcher-secrets -n orcher
+kubectl delete namespace orcher
+```
+
+---
+
+## Next Steps
+
+- [Kubernetes Overview](/guides/deployment/kubernetes) — Prerequisites and quick start
+- [Manifests](/guides/deployment/kubernetes/manifests) — Deployment, Service, ConfigMap, and RBAC manifests
+- [Autoscaling](/guides/deployment/kubernetes/autoscaling) — HPA, PDB, and Kustomize configuration
+- [Docker](/guides/deployment/docker) — Docker Compose setup for backing services
+- [Configuration](/guides/deployment/configuration) — Full configuration reference
+- [Metrics](/guides/observability/metrics) — Prometheus metrics reference
+- [Storage](/guides/operations/storage) — PostgreSQL schema and migration details

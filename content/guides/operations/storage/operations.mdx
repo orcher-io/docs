@@ -1,0 +1,149 @@
+---
+id: 'storage-operations'
+title: 'Operations & Troubleshooting'
+description: 'Docker Compose full stack setup and troubleshooting common storage issues'
+---
+
+## Docker Compose (Full Stack)
+
+The recommended local setup with all storage components:
+
+```yaml
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: orcher
+      POSTGRES_USER: orcher
+      POSTGRES_PASSWORD: orcher
+    command: >
+      postgres
+      -c max_connections=200
+      -c shared_buffers=256MB
+      -c effective_cache_size=768MB
+      -c work_mem=4MB
+      -c checkpoint_completion_target=0.9
+      -c max_wal_size=4GB
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orcher"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://orcher:orcher@postgres:5432/orcher
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: 1000
+      DEFAULT_POOL_SIZE: 50
+    ports:
+      - "6432:6432"
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pgdata:
+```
+
+Point the orchestrator at PgBouncer and Redis:
+
+```bash
+DATABASE_URL=postgresql://orcher:orcher@localhost:6432/orcher
+REDIS_URL=redis://localhost:6379
+```
+
+---
+
+## Troubleshooting
+
+### Connection Pool Exhaustion
+
+**Symptoms:** Queries timing out, `acquire_timeout` errors in logs.
+
+```sql
+-- Check active connections
+SELECT count(*) FROM pg_stat_activity WHERE datname = 'orcher';
+
+-- Find long-running queries
+SELECT pid, now() - pg_stat_activity.query_start AS duration, query
+FROM pg_stat_activity
+WHERE datname = 'orcher' AND state != 'idle'
+ORDER BY duration DESC;
+```
+
+**Fix:** Use PgBouncer in transaction mode. If already using PgBouncer, increase `DEFAULT_POOL_SIZE` and PostgreSQL's `max_connections`.
+
+### Slow Queries
+
+```sql
+-- Enable pg_stat_statements extension
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+
+-- Find slowest queries
+SELECT query, mean_exec_time, calls
+FROM pg_stat_statements
+ORDER BY mean_exec_time DESC
+LIMIT 10;
+
+-- Reanalyze tables after bulk operations
+ANALYZE workflow_executions;
+ANALYZE task_executions;
+ANALYZE outbox_queue;
+```
+
+### Database Size
+
+```sql
+-- Check total database size
+SELECT pg_size_pretty(pg_database_size('orcher'));
+
+-- Check table sizes
+SELECT relname AS table,
+       pg_size_pretty(pg_total_relation_size(relid)) AS total_size
+FROM pg_catalog.pg_statio_user_tables
+ORDER BY pg_total_relation_size(relid) DESC
+LIMIT 10;
+```
+
+The `workflow_execution_journal` and `events` tables typically grow the fastest. For long-running deployments, consider archiving completed workflow data.
+
+### Redis Connection Failures
+
+Workers automatically fall back to PostgreSQL polling when Redis is unavailable. Check Redis health:
+
+```bash
+redis-cli ping
+redis-cli info clients
+redis-cli info memory
+```
+
+No data is lost during Redis downtime — only dispatch latency increases.
+
+---
+
+## Next Steps
+
+- [Storage Overview](/guides/operations/storage) — PostgreSQL configuration and migrations
+- [Redis](/guides/operations/storage/redis) — Optional Redis configuration for fast queue notification
+- [Caching & Schema](/guides/operations/storage/caching) — In-memory cache tiers and database schema details
+- [Orchestrator Server](/guides/operations/orchestrator) — How the coordination engine works
+- [Workers](/guides/operations/workers) — Deploy and manage workers
+- [Queues](/guides/operations/queue) — Configure task queues and dispatch
+- [Observability](/guides/observability/metrics) — Metrics, tracing, and logging

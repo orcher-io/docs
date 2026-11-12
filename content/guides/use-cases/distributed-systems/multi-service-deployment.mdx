@@ -1,0 +1,337 @@
+---
+id: 'distributed-multi-service'
+title: 'Multi-Service Deployment with Parallel Fan-Out'
+sidebar_label: 'Multi-Service Deployment'
+---
+
+When you need to coordinate the same operation across multiple services or regions, fan-out with child workflows lets you run them in parallel and roll back all successful deployments if any single one fails. This pattern is common for multi-region deployments, multi-provider notifications, and batch operations that span service boundaries.
+
+## How it works
+
+Three phases: build once, deploy wide, verify everything. The distinctive part is the failure policy — this fan-out is **all-or-nothing**. A fleet running two different versions is worse than a failed deploy, so any region failing (at deploy *or* at health check) rolls back every region that succeeded.
+
+<div className="not-prose my-8 max-w-md mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">All-or-Nothing Fan-Out</div>
+  </div>
+  {[
+    { label: 'build_package', detail: 'One artifact for every region', icon: '✓', state: 'done' },
+    { label: 'deploy us-east-1', detail: 'Deployed — journaled', icon: '✓', state: 'done' },
+    { label: 'deploy eu-west-1', detail: 'Deployed — journaled', icon: '✓', state: 'done' },
+    { label: 'deploy ap-southeast-1', detail: 'Fails — retries exhausted', icon: '✗', state: 'crash' },
+    { label: 'rollback us-east-1 · eu-west-1', detail: 'Both compensated, in parallel', icon: '↺', state: 'resume' },
+    { label: 'workflow fails', detail: 'Cleanly — every region on the old version', icon: '✗', state: 'crash' },
+  ].map((row, i, arr) => (
+    <div key={i}>
+      <div className={`px-4 py-2 flex items-center gap-3 ${row.state === 'crash' ? 'bg-red-500/5' : ''} ${row.state === 'resume' ? 'bg-surface-75' : ''}`}>
+        <span className={`w-5 h-5 flex items-center justify-center text-[10px] shrink-0 ${row.state === 'crash' ? 'text-red-400' : 'text-foreground-muted'}`}>{row.icon}</span>
+        <div className="flex-1">
+          <span className="text-xs font-medium font-mono text-foreground">{row.label}</span>
+          <span className="text-[10px] text-foreground-muted ml-2">{row.detail}</span>
+        </div>
+      </div>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-6">
+          <div className="w-px h-2 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">No region is left running a version the others don't have.</span>
+  </div>
+</div>
+
+## Example: deploying to three regions
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="typescript"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[task]
+async fn build_package(config: AppConfig) -> Result<ArtifactId> {
+    ci_client::build(config).await
+}
+
+#[task]
+async fn deploy_to_region(input: DeployInput) -> Result<DeploymentId> {
+    cloud_client::deploy(input.region, input.artifact_id).await
+}
+
+#[task]
+async fn rollback_region(deployment_id: String) -> Result<()> {
+    cloud_client::rollback(&deployment_id).await
+}
+
+#[task]
+async fn run_health_check(deployment_id: String) -> Result<HealthStatus> {
+    cloud_client::health_check(&deployment_id).await
+}
+
+#[workflow(name = "multi_region_deploy", version = "1.0.0")]
+async fn multi_region_deploy(
+    ctx: WorkflowContext,
+    input: DeploymentInput,
+) -> Result<DeploymentResult> {
+    // Build the artifact once
+    let artifact = ctx.execute_task(build_package, input.config).await?;
+
+    // Deploy to all regions in parallel
+    let regions = vec!["us-east-1", "eu-west-1", "ap-southeast-1"];
+    let mut handles = Vec::new();
+    for region in &regions {
+        handles.push(ctx.execute_task(deploy_to_region, DeployInput {
+            region: region.to_string(),
+            artifact_id: artifact.clone(),
+        }));
+    }
+
+    // Collect results, tracking successes for rollback
+    let mut deployments = Vec::new();
+    let mut failed = false;
+    for (i, handle) in handles.into_iter().enumerate() {
+        match handle.await {
+            Ok(dep_id) => deployments.push((regions[i].to_string(), dep_id)),
+            Err(_) => { failed = true; break; }
+        }
+    }
+
+    // Rollback all successful deployments if any failed
+    if failed {
+        for (_, dep_id) in &deployments {
+            ctx.execute_task(rollback_region, dep_id.clone()).await?;
+        }
+        return Err(anyhow::anyhow!("Multi-region deployment failed"));
+    }
+
+    // Health check all regions
+    for (_, dep_id) in &deployments {
+        let health = ctx.execute_task(run_health_check, dep_id.clone()).await?;
+        if !health.is_healthy {
+            // Rollback everything on unhealthy deployment
+            for (_, id) in &deployments {
+                ctx.execute_task(rollback_region, id.clone()).await?;
+            }
+            return Err(anyhow::anyhow!("Health check failed"));
+        }
+    }
+
+    Ok(DeploymentResult {
+        regions: deployments.into_iter().map(|(r, id)| (r, id)).collect(),
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import {
+  Workflow,
+  Tasks,
+  Task,
+  WorkflowContext,
+  createTaskRefs,
+} from '@orcher/sdk';
+
+@Tasks()
+class DeployTasks {
+  @Task()
+  async buildPackage(config: AppConfig): Promise<string> {
+    return await ciClient.build(config);
+  }
+
+  @Task()
+  async deployToRegion(input: DeployInput): Promise<string> {
+    return await cloudClient.deploy(input.region, input.artifactId);
+  }
+
+  @Task()
+  async rollbackRegion(deploymentId: string): Promise<void> {
+    await cloudClient.rollback(deploymentId);
+  }
+
+  @Task()
+  async runHealthCheck(deploymentId: string): Promise<HealthStatus> {
+    return await cloudClient.healthCheck(deploymentId);
+  }
+}
+
+const tasks = createTaskRefs(DeployTasks);
+
+@Workflow({ name: 'multi_region_deploy', version: '1.0.0' })
+class MultiRegionDeploy {
+  async run(
+    ctx: WorkflowContext,
+    input: DeploymentInput,
+  ): Promise<DeploymentResult> {
+    // Build the artifact once
+    const artifact = await ctx.executeTask(tasks.buildPackage, input.config);
+
+    // Deploy to all regions in parallel
+    const regions = ['us-east-1', 'eu-west-1', 'ap-southeast-1'];
+    const results = await Promise.allSettled(
+      regions.map((region) =>
+        ctx.executeTask(tasks.deployToRegion, { region, artifactId: artifact })
+      ),
+    );
+
+    // Collect successes, check for failures
+    const deployments: Array<{ region: string; id: string }> = [];
+    let failed = false;
+
+    results.forEach((result, i) => {
+      if (result.status === 'fulfilled') {
+        deployments.push({ region: regions[i], id: result.value });
+      } else {
+        failed = true;
+      }
+    });
+
+    // Rollback all successful deployments if any failed
+    if (failed) {
+      await Promise.all(
+        deployments.map((d) => ctx.executeTask(tasks.rollbackRegion, d.id)),
+      );
+      throw new Error('Multi-region deployment failed');
+    }
+
+    // Health check all regions
+    for (const dep of deployments) {
+      const health = await ctx.executeTask(tasks.runHealthCheck, dep.id);
+      if (!health.isHealthy) {
+        await Promise.all(
+          deployments.map((d) => ctx.executeTask(tasks.rollbackRegion, d.id)),
+        );
+        throw new Error(`Health check failed in ${dep.region}`);
+      }
+    }
+
+    return { regions: deployments };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+import asyncio
+from orcher import workflow, task, WorkflowContext
+
+@task
+async def build_package(config: AppConfig) -> str:
+    return await ci_client.build(config)
+
+@task
+async def deploy_to_region(input: DeployInput) -> str:
+    return await cloud_client.deploy(input.region, input.artifact_id)
+
+@task
+async def rollback_region(deployment_id: str) -> None:
+    await cloud_client.rollback(deployment_id)
+
+@task
+async def run_health_check(deployment_id: str) -> HealthStatus:
+    return await cloud_client.health_check(deployment_id)
+
+@workflow(name="multi_region_deploy", version="1.0.0")
+async def multi_region_deploy(
+    ctx: WorkflowContext, input: DeploymentInput
+) -> DeploymentResult:
+    # Build the artifact once
+    artifact = await ctx.execute_task(build_package, input.config)
+
+    # Deploy to all regions in parallel
+    regions = ["us-east-1", "eu-west-1", "ap-southeast-1"]
+    results = await asyncio.gather(*[
+        ctx.execute_task(deploy_to_region, DeployInput(
+            region=region, artifact_id=artifact,
+        ))
+        for region in regions
+    ], return_exceptions=True)
+
+    # Collect successes, check for failures
+    deployments = []
+    failed = False
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            failed = True
+        else:
+            deployments.append({"region": regions[i], "id": result})
+
+    # Rollback all successful deployments if any failed
+    if failed:
+        for dep in deployments:
+            await ctx.execute_task(rollback_region, dep["id"])
+        raise RuntimeError("Multi-region deployment failed")
+
+    # Health check all regions
+    for dep in deployments:
+        health = await ctx.execute_task(run_health_check, dep["id"])
+        if not health.is_healthy:
+            for d in deployments:
+                await ctx.execute_task(rollback_region, d["id"])
+            raise RuntimeError(f"Health check failed in {dep['region']}")
+
+    return DeploymentResult(regions=deployments)
+```
+
+</TabPanel>
+
+</Tabs>
+
+The fan-out pattern scales to any number of targets. Each parallel task is individually journaled, so if the process crashes after deploying to 2 of 3 regions, replay skips the completed deployments and continues with the remaining one.
+
+## Two fan-out failure policies
+
+This is the same fan-out shape as [parallel ETL](/guides/use-cases/data-processing/parallel-etl) with the opposite failure policy — choose by what a partial result means in your domain:
+
+<div className="not-prose my-8 max-w-lg mx-auto border">
+  <div className="bg-surface-75 px-4 py-2 border-b text-center">
+    <div className="text-xs font-medium text-foreground">Isolate vs. All-or-Nothing</div>
+  </div>
+  <div className="grid grid-cols-2 gap-px bg-border-default">
+    <div className="bg-background px-4 py-3">
+      <div className="text-[10px] font-mono uppercase tracking-widest text-foreground-muted mb-2">Isolate & continue</div>
+      <div className="text-xs font-medium text-foreground mb-1">Partial success is success</div>
+      <p className="m-0 text-[10px] text-foreground-muted leading-relaxed">Independent units — data sources, notifications, tenants. One failure is recorded and the rest deliver value. Parallel ETL works this way.</p>
+    </div>
+    <div className="bg-background px-4 py-3">
+      <div className="text-[10px] font-mono uppercase tracking-widest text-foreground-muted mb-2">All-or-nothing</div>
+      <div className="text-xs font-medium text-foreground mb-1">Partial success is a lie</div>
+      <p className="m-0 text-[10px] text-foreground-muted leading-relaxed">Homogeneous targets that must agree — versions across regions, schema changes across shards. Any failure rolls back every success.</p>
+    </div>
+  </div>
+  <div className="border-t px-4 py-2 bg-surface-75 text-center">
+    <span className="text-[10px] text-foreground-muted">Ask: is the fleet allowed to disagree? If not, roll it all back.</span>
+  </div>
+</div>
+
+## Design notes
+
+- **Deployed is not healthy.** The deploy call succeeding only means the region *accepted* the artifact — the health-check phase is a second gate that can trigger the same full rollback. For a cheaper failure mode, verify one canary region before fanning out to the rest.
+- **Roll back the set, not the stack.** These compensations are independent, so they run in parallel — unlike a [saga's ordered reverse walk](/guides/use-cases/distributed-systems/saga-pattern), where each step's undo may depend on the next. Use ordering only when compensations actually depend on each other.
+- **Rollback is durable too.** Each `rollback_region` is a journaled task: a crash halfway through the rollback resumes it, exactly as in the [saga's crash-mid-rollback walkthrough](/guides/use-cases/distributed-systems/saga-pattern#design-notes).
+- **Promote regions to child workflows when deploys grow steps.** Here each deploy is one atomic call, so plain tasks are right. When a per-region deploy becomes drain → deploy → warm → verify, give each region a [child workflow](/guides/use-cases/distributed-systems/child-workflows#child-workflow-or-plain-task) with its own journal and failure boundary.
+
+---
+
+## Next Steps
+
+- [Child Workflows for Service Composition](/guides/use-cases/distributed-systems/child-workflows) — Compose services into reusable workflow units.
+- [Saga Pattern with Automatic Rollback](/guides/use-cases/distributed-systems/saga-pattern) — Handle multi-service transaction failures with compensating actions.
+- [Event Gates for Human Approvals](/guides/use-cases/distributed-systems/event-gates) — Pause workflows until external input arrives.
+- [Best Practices & Performance](/guides/use-cases/distributed-systems/best-practices) — Guidelines and benchmarks for distributed workflows.

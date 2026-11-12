@@ -1,0 +1,45 @@
+---
+id: data-engineers-learning-path
+title: 'Learning Path: Data Engineers'
+description: 'Build reliable, high-performance data pipelines with Orcher. Learn batch processing, incremental sync, CDC, parallel ETL, and error handling patterns with automatic checkpointing: completed steps are never repeated.'
+sidebar_label: 'Data Engineers'
+---
+
+Orcher gives data engineers durable execution backed by PostgreSQL — no message broker and no separate scheduler to run. Every step in your pipeline is automatically journaled, so if a server crashes at record 847,392 of a million-row import, execution resumes at 847,393. Completed tasks are replayed from the journal rather than re-executed, so recovery never repeats finished work — make external writes idempotent so a task retried before recording its result stays safe. This guide walks you through the patterns that matter most for data engineering: batch processing, incremental sync, CDC, parallel fan-out, and production error handling.
+
+<div className="not-prose my-6 flex flex-wrap gap-x-8 gap-y-2 text-sm">
+  <div><span className="text-foreground-muted">Prerequisites</span> <span className="text-foreground">Basic SQL, any programming language</span></div>
+  <div><span className="text-foreground-muted">Time to complete</span> <span className="text-foreground">2–3 hours</span></div>
+  <div><span className="text-foreground-muted">You'll build</span> <span className="text-foreground">A crash-safe, parallel ETL pipeline</span></div>
+</div>
+
+## The path
+
+Four parts, each building on the last — from a first checkpointed pipeline to a production deployment. Follow them in order, or jump to the stage that matches what you're building.
+
+<div className="not-prose my-8 max-w-2xl mx-auto">
+  {[
+    { n: '01', href: '/guides/learning/data-engineers/etl-pipelines', title: 'ETL Pipelines & Checkpointing', body: 'Your first pipeline. Extract → transform → load as journaled tasks, and crash recovery you get for free.', learn: 'the checkpoint model' },
+    { n: '02', href: '/guides/learning/data-engineers/batch-processing', title: 'Batch & Incremental Processing', body: 'Chunk millions of rows, sync only what changed with cursor pagination, and capture changes with CDC.', learn: 'batching · incremental sync · CDC' },
+    { n: '03', href: '/guides/learning/data-engineers/parallel-processing', title: 'Parallel Processing & Error Handling', body: 'Fan out across workers for throughput, handle partial failures, and schedule recurring pipelines.', learn: 'fan-out · errors · schedules' },
+    { n: '04', href: '/guides/learning/data-engineers/production', title: 'Production Best Practices', body: 'Tune performance, add monitoring, and deploy with confidence.', learn: 'performance · monitoring · deploy' },
+  ].map((s, i, arr) => (
+    <div key={s.n}>
+      <Link href={s.href} className="no-underline group flex gap-4 border p-5 hover:bg-surface-75 transition-colors">
+        <span className="font-mono text-sm text-foreground-muted shrink-0 pt-0.5">{s.n}</span>
+        <div className="flex-1">
+          <div className="text-sm font-medium text-foreground group-hover:underline">{s.title}</div>
+          <p className="m-0 mt-1 text-xs text-foreground-light leading-relaxed">{s.body}</p>
+          <div className="mt-2 font-mono text-[10px] uppercase tracking-widest text-foreground-muted">{s.learn}</div>
+        </div>
+      </Link>
+      {i < arr.length - 1 && (
+        <div className="flex justify-start pl-[1.65rem]">
+          <div className="w-px h-4 bg-border-strong" />
+        </div>
+      )}
+    </div>
+  ))}
+</div>
+
+Every pattern here has a reference companion in the [Data Pipelines & ETL](/guides/use-cases/data-processing) use-case guide — this path is the guided walk-through; that section is the deep dive to return to.

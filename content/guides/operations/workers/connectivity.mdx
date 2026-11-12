@@ -1,0 +1,65 @@
+---
+id: connectivity
+title: Worker Connectivity
+description: How Orcher workers register, poll for work, send heartbeats, control capacity, and use eager dispatch
+---
+
+## How Workers Connect
+
+### Registration
+
+When `worker.run()` is called, the Worker registers with the orchestrator via the `RegisterWorker` gRPC call, reporting:
+
+- **service_id** — Unique UUID for this process instance
+- **identity** — Human-readable name
+- **task_queue** — Which queue to poll
+- **namespace** — Multi-tenancy namespace
+- **capabilities** — List of workflow and task types this worker handles
+- **metadata** — SDK type, version, build_id, hostname
+
+The orchestrator stores this in an in-memory `WorkerRegistry` (backed by DashMap) and optionally persists to the database.
+
+### Polling
+
+Each Worker spawns multiple parallel pollers that long-poll the orchestrator:
+
+- **Workflow pollers** (default: 4) — Call `poll_workflow_execution()` with 60s timeout
+- **Task pollers** (default: 4) — Call `poll_task_execution()` with 60s timeout
+- **Actor pollers** (default: 4) — Call `poll_actor_operation()` if actors are registered
+
+When work is available the orchestrator returns it immediately. Otherwise the call blocks up to the timeout and the poller retries. This gives near-instant dispatch with minimal idle overhead.
+
+### Heartbeats
+
+After registration, the worker sends periodic heartbeats via the `WorkerHeartbeat` RPC. Each heartbeat reports:
+
+- **Status** — Healthy, Degraded, Draining, or Unhealthy
+- **Metrics** — `tasks_in_progress`, `tasks_completed`, `tasks_failed`, CPU %, memory usage
+
+The server throttles DB writes to approximately every 30 seconds to reduce write volume while keeping in-memory state current. Workers with no heartbeat for 60 seconds are removed from the registry.
+
+### Capacity Control
+
+Concurrency is controlled through channel backpressure, not explicit semaphores. Each driver creates a bounded channel with capacity equal to `max_concurrent_workflows` or `max_concurrent_tasks`:
+
+```
+Pollers → [channel (capacity=100)] → Handler executors
+```
+
+When all slots are occupied by in-flight handlers, pollers block on send — naturally capping concurrency without coordination overhead. This means the orchestrator never delivers more work than the worker can handle.
+
+### Eager Dispatch
+
+When a task completes, the orchestrator can return the **next task** in the completion response, skipping the poll round-trip entirely. For sequential workflows this saves a poll round trip per step. The SDK automatically injects eager tasks into the task channel.
+
+Eager dispatch is transparent — no configuration needed. It engages when:
+1. The completing worker has capacity for another task
+2. There are scheduled tasks for the same workflow on the same queue
+
+---
+
+## Next Steps
+
+- [Creating a Worker](/guides/operations/workers/creating-a-worker) — Builder API and configuration options
+- [Scaling](/guides/operations/workers/scaling) — Horizontal scaling, recovery, and performance tuning
+- [Operations](/guides/operations/workers/operations) — Graceful shutdown, monitoring, and troubleshooting

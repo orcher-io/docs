@@ -1,0 +1,188 @@
+---
+id: 'journaling-best-practices'
+title: 'Best Practices & Performance'
+description: 'Optimize Orcher journal performance, follow best practices for step design and idempotency, and troubleshoot common journaling issues.'
+sidebar_label: 'Best Practices'
+---
+
+## Performance
+
+### Journal Write Performance
+
+- **Batch inserts**: Multiple entries inserted via `UNNEST` in a single query rather than one per entry
+- **Append-only**: No updates or deletes during normal operation — write-optimized
+- **Indexed**: `(workflow_id, execution_id, event_id)` unique index for fast lookups
+
+### Journal Read Performance
+
+- **In-memory cache**: Moka-based HighPerfCache with 60s TTL and 5K max entries
+- **Incremental loading**: After a cache hit, only new entries (event_id > max cached) are fetched from PostgreSQL
+- **Optimistic append**: New entries written to cache immediately — no full reload needed
+- **Sequential access**: Journal read in `event_id` order (matches PostgreSQL index scan)
+
+### Storage Growth
+
+Monitor journal size and implement retention policies:
+
+```sql
+-- Check journal size per workflow
+SELECT
+  workflow_id,
+  COUNT(*) AS entry_count,
+  MIN(created_at) AS oldest_entry,
+  MAX(created_at) AS newest_entry
+FROM workflow_execution_journal
+GROUP BY workflow_id
+ORDER BY entry_count DESC
+LIMIT 20;
+
+-- Archive old completed workflows
+DELETE FROM workflow_execution_journal
+WHERE workflow_id IN (
+  SELECT workflow_id
+  FROM workflow_executions
+  WHERE status = 'COMPLETED'
+    AND completed_at < NOW() - INTERVAL '90 days'
+);
+```
+
+---
+
+## Best Practices
+
+### 1. Keep Steps Small and Focused
+
+Small steps mean finer-grained checkpoints — less work repeated after a crash.
+
+```rust
+// Good: Many small journaled steps
+let validated = ctx.execute_task(validate, input.clone()).await?;
+let processed = ctx.execute_task(process, validated).await?;
+let stored = ctx.execute_task(store, processed).await?;
+
+// Bad: One giant step (all-or-nothing — crash means full retry)
+let result = ctx.execute_task(do_everything, input).await?;
+```
+
+### 2. Make Tasks Idempotent
+
+Journaling prevents duplicate execution during replay, but tasks may still retry on transient failures. Design tasks to be safely retryable:
+
+```rust
+// Use idempotency keys for external APIs
+let charge = stripe.create_charge(
+    amount,
+    IdempotencyKey::new(format!("order_{}", order_id))
+);
+
+// Use upserts for database operations
+db.execute(
+    "INSERT INTO orders (...) VALUES (...)
+     ON CONFLICT (order_id) DO UPDATE SET ..."
+);
+```
+
+### 3. Don't Journal Sensitive Data
+
+Step inputs and outputs are stored as JSONB in PostgreSQL. Avoid logging secrets:
+
+```rust
+// Bad: Full card token stored in journal
+ctx.execute_task(charge, card_token).await?;
+
+// Good: Only reference IDs stored
+ctx.execute_task(charge, (amount, payment_method_id)).await?;
+```
+
+### 4. Monitor Journal Size
+
+Set up alerts for abnormally large journals that may indicate infinite loops or overly granular steps:
+
+```sql
+-- Workflows with unusually large journals
+SELECT workflow_id, COUNT(*) AS entry_count
+FROM workflow_execution_journal
+GROUP BY workflow_id
+HAVING COUNT(*) > 10000;
+```
+
+---
+
+## Troubleshooting
+
+### Workflow Keeps Replaying
+
+**Symptom**: Workflow restarts from beginning repeatedly
+
+**Causes**:
+- Non-deterministic workflow code (different control flow on replay)
+- External state changes between replays
+- Step that produces different result on replay
+
+**Solution**: Ensure all non-deterministic operations are wrapped in tasks or `ctx.execute()`:
+
+```rust
+// Problem: Uses current time (different on replay)
+// let now = SystemTime::now();
+
+// Solution: Wrap in a journaled step
+let now: u64 = ctx.execute("get_time", || async {
+    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
+}).await?;
+```
+
+### Journal Too Large
+
+**Symptom**: Slow workflow performance, large database
+
+**Solutions**:
+- Combine related steps to reduce entry count
+- Store large payloads externally (S3, blob storage) and journal only the reference
+- Implement journal archival for completed workflows
+
+### Missing Journal Entries
+
+**Symptom**: Workflow fails on replay with cache miss
+
+**Causes**:
+- Database connection lost during write
+- Transaction rolled back
+- Disk full
+
+**Solutions**:
+- Check PostgreSQL logs for write errors
+- Verify database connectivity and disk space
+- Monitor `journal_misses` metric in HighPerfCache
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/tasks" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Defining Tasks</h3>
+      <p className="text-sm text-foreground-light">
+        Define reusable, type-safe tasks that get journaled automatically
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/state-management" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Managing State</h3>
+      <p className="text-sm text-foreground-light">
+        Manage persistent state across workflow executions
+      </p>
+    </div>
+  </Link>
+</div>
+
+---
+
+## Related Guides
+
+- [Workflows](/guides/core/workflows) — Learn how workflows orchestrate tasks with journaling
+- [Tasks](/guides/core/tasks) — Define idempotent task implementations
+- [Error Handling](/guides/core/error-handling) — Handle failures with retry policies
+- [Events](/guides/core/events) — Signal workflows with external events

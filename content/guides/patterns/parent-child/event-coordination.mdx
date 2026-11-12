@@ -1,0 +1,399 @@
+---
+id: 'parent-child-event-coordination'
+title: 'Parent-Child Event Coordination'
+description: 'Send events between parent and child workflows for dynamic runtime control with Orcher'
+sidebar_label: 'Event Coordination'
+---
+
+## Parent-Child Event Coordination
+
+Parents can send events (signals) to child workflows to dynamically control their behavior at runtime. This enables patterns like expediting an order, canceling a long-running child, or updating a child's configuration without restarting it. The child calls `wait_for_event` to pause until an event arrives, and the parent (or an external client) sends the event via the child's handle.
+
+<div className="not-prose my-8 max-w-md mx-auto">
+  <div className="flex gap-4 items-start">
+    {/* Parent side */}
+    <div className="flex-1 flex flex-col items-center">
+      <div className="border bg-surface-100 w-full px-4 py-2.5 text-center">
+        <div className="text-xs font-medium text-foreground">Parent</div>
+      </div>
+      <div className="w-px h-3 bg-border-strong" />
+      <div className="border bg-background w-full px-3 py-2 text-center">
+        <div className="text-[10px] font-medium text-foreground">Start child</div>
+      </div>
+      <div className="w-px h-3 bg-border-strong" />
+      <div className="border bg-background w-full px-3 py-2 text-center">
+        <div className="text-[10px] font-medium text-foreground">Do other work</div>
+      </div>
+      <div className="w-px h-3 bg-border-strong" />
+      <div className="border bg-surface-75 w-full px-3 py-2 text-center">
+        <div className="text-[10px] font-medium text-foreground">send_event</div>
+        <div className="text-[9px] font-mono text-foreground-muted mt-0.5">"expedite"</div>
+      </div>
+      <div className="w-px h-3 bg-border-strong" />
+      <div className="border bg-background w-full px-3 py-2 text-center">
+        <div className="text-[10px] font-medium text-foreground">Await result</div>
+      </div>
+    </div>
+    {/* Event arrows */}
+    <div className="flex flex-col items-center pt-16 gap-12">
+      <div className="flex items-center">
+        <div className="h-px w-4 bg-border-strong" />
+        <span className="text-[8px] text-foreground-muted">►</span>
+      </div>
+      <div className="flex items-center">
+        <div className="h-px w-4 bg-border-strong" />
+        <span className="text-[8px] text-foreground-muted">►</span>
+      </div>
+    </div>
+    {/* Child side */}
+    <div className="flex-1 flex flex-col items-center">
+      <div className="border border-dashed bg-background w-full px-4 py-2.5 text-center">
+        <div className="text-xs font-medium text-foreground">Child</div>
+        <div className="text-[9px] text-foreground-muted">own execution</div>
+      </div>
+      <div className="w-px h-3 bg-border-strong" />
+      <div className="border bg-background w-full px-3 py-2 text-center">
+        <div className="text-[10px] font-medium text-foreground">Process order</div>
+      </div>
+      <div className="w-px h-3 bg-border-strong" />
+      <div className="border border-dashed bg-surface-75 w-full px-3 py-2 text-center">
+        <div className="text-[10px] font-mono text-foreground-muted italic">wait_for_event</div>
+        <div className="text-[9px] text-foreground-muted">paused · zero resources</div>
+      </div>
+      <div className="w-px h-3 bg-border-strong" />
+      <div className="border bg-background w-full px-3 py-2 text-center">
+        <div className="text-[10px] font-medium text-foreground">Expedite shipping</div>
+        <div className="text-[9px] text-foreground-muted">event received</div>
+      </div>
+      <div className="w-px h-3 bg-border-strong" />
+      <div className="border bg-background w-full px-3 py-2 text-center">
+        <div className="text-[10px] font-medium text-foreground">Return result</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use std::time::Duration;
+
+// Child workflow that can be expedited
+#[workflow(name = "fulfillment_workflow", version = "1.0.0")]
+pub async fn fulfillment_workflow(
+    ctx: WorkflowContext,
+    order_id: String,
+) -> Result<FulfillmentResult> {
+    println!("Starting standard fulfillment for {}", order_id);
+
+    // Check if expedite event is received
+    let expedite: Option<bool> = ctx
+        .wait_for_event_with_timeout("expedite", Duration::from_secs(300))
+        .await?;
+
+    if expedite.unwrap_or(false) {
+        println!("Expedited fulfillment requested!");
+        ctx.execute_task(expedited_shipping, order_id).await?;
+    } else {
+        println!("Standard fulfillment");
+        ctx.execute_task(standard_shipping, order_id).await?;
+    }
+
+    Ok(FulfillmentResult { completed: true })
+}
+
+// Parent workflow that controls child
+#[workflow(name = "order_orchestrator", version = "1.0.0")]
+pub async fn order_orchestrator(
+    ctx: WorkflowContext,
+    order: OrderData,
+) -> Result<OrderResult> {
+    // Start child fulfillment workflow
+    let child_handle = ctx
+        .start_child_workflow("fulfillment_workflow", order.id.clone())
+        .await?;
+
+    println!("Child workflow started: {}", child_handle.id());
+
+    // Wait for external expedite request
+    let expedite: Option<bool> = ctx
+        .wait_for_event_with_timeout("expedite_request", Duration::from_secs(60))
+        .await?;
+
+    if expedite.unwrap_or(false) {
+        println!("Expedite requested - notifying child workflow");
+
+        // NOTE: sending events to a child from inside a workflow via the child
+        // handle is not yet implemented in the Rust SDK
+        // (`ChildWorkflowHandle::send_event` returns an unimplemented error).
+        // Deliver the event to the child from an external client instead,
+        // addressing it by the child's workflow id.
+        child_handle.send_event("expedite", true).await?;
+    }
+
+    // Wait for child to complete
+    let result = child_handle.result::<FulfillmentResult>().await?;
+
+    Ok(OrderResult {
+        order_id: order.id,
+        expedited: expedite.unwrap_or(false),
+        completed: result.completed,
+    })
+}
+```
+
+**Send expedite event from client:**
+
+```rust
+use orcher::client::Client;
+
+async fn expedite_order(workflow_id: &str) -> Result<()> {
+    let client = Client::connect("http://localhost:50051").await?;
+
+    // Get a handle to the running parent workflow, then send it an event
+    let handle = client.get_workflow_handle(workflow_id).await?;
+    handle.send_event("expedite_request", true).await?;
+
+    println!("Expedite request sent");
+    Ok(())
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import {
+  Workflow, Tasks, Task, WorkflowContext, TaskContext, createTaskRefs, Duration
+} from '@orcher/sdk';
+
+interface FulfillmentResult {
+  completed: boolean;
+}
+
+interface OrderResult {
+  orderId: string;
+  expedited: boolean;
+  completed: boolean;
+}
+
+@Tasks()
+class ShippingTasks {
+  @Task({ name: 'expeditedShipping' })
+  async expeditedShipping(ctx: TaskContext, orderId: string): Promise<void> { /* ... */ }
+
+  @Task({ name: 'standardShipping' })
+  async standardShipping(ctx: TaskContext, orderId: string): Promise<void> { /* ... */ }
+}
+
+const tasks = createTaskRefs(ShippingTasks);
+
+// Child workflow that can be expedited
+@Workflow()
+class FulfillmentWorkflow {
+  async execute(ctx: WorkflowContext, orderId: string): Promise<FulfillmentResult> {
+    console.log(`Starting standard fulfillment for ${orderId}`);
+
+    // Check if expedite event is received (5 minute timeout).
+    // Returns the payload, or null if the timeout elapses first.
+    const expedite = await ctx.waitForEventWithTimeout<boolean>(
+      'expedite',
+      Duration.fromMinutes(5),
+    );
+
+    if (expedite) {
+      console.log('Expedited fulfillment requested!');
+      await ctx.executeTask(tasks.expeditedShipping, orderId);
+    } else {
+      console.log('Standard fulfillment');
+      await ctx.executeTask(tasks.standardShipping, orderId);
+    }
+
+    return { completed: true };
+  }
+}
+
+// Parent workflow that controls child
+@Workflow()
+class OrderOrchestrator {
+  async execute(ctx: WorkflowContext, order: OrderData): Promise<OrderResult> {
+    // Start child fulfillment workflow
+    const childHandle = await ctx.startChildWorkflow(
+      'fulfillment_workflow',
+      order.id,
+    );
+
+    console.log(`Child workflow started: ${childHandle.id()}`);
+
+    // Wait for external expedite request (1 minute timeout, null on timeout)
+    const expedite = await ctx.waitForEventWithTimeout<boolean>(
+      'expedite_request',
+      Duration.fromMinutes(1),
+    );
+
+    if (expedite) {
+      console.log('Expedite requested - notifying child workflow');
+
+      // NOTE: ChildWorkflowHandle.sendEvent is not yet implemented in the TS
+      // SDK (it throws). Deliver the event to the child from an external client
+      // instead, addressing it by the child's workflow id.
+      await childHandle.sendEvent('expedite', true);
+    }
+
+    // Wait for child to complete
+    const result = await childHandle.result<FulfillmentResult>();
+
+    return {
+      orderId: order.id,
+      expedited: expedite || false,
+      completed: result.completed,
+    };
+  }
+}
+```
+
+**Send expedite event from client:**
+
+```typescript
+import { Client } from '@orcher/sdk';
+
+async function expediteOrder(workflowId: string): Promise<void> {
+  const client = new Client({ serverUrl: 'http://localhost:50051' });
+  await client.connect();
+
+  // Get a handle to the running parent workflow, then send it an event
+  const handle = client.getWorkflowHandle({ workflowId });
+  await handle.sendEvent('expedite_request', true);
+
+  console.log('Expedite request sent');
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from datetime import timedelta
+
+from orcher import workflow, task, WorkflowContext, TaskContext
+
+@task(name="expedited_shipping")
+async def expedited_shipping(ctx: TaskContext, order_id: str) -> None:
+    # ... handle expedited shipping
+    pass
+
+@task(name="standard_shipping")
+async def standard_shipping(ctx: TaskContext, order_id: str) -> None:
+    # ... handle standard shipping
+    pass
+
+# Child workflow that can be expedited
+@workflow(name="fulfillment_workflow", version="1.0.0")
+async def fulfillment_workflow(ctx: WorkflowContext, order_id: str) -> dict:
+    print(f"Starting standard fulfillment for {order_id}")
+
+    # Check if expedite event is received (5 minute timeout).
+    # Python raises TimeoutError when the timeout elapses before the event.
+    try:
+        expedite = await ctx.wait_for_event_with_timeout(
+            "expedite", timedelta(minutes=5)
+        )
+    except TimeoutError:
+        expedite = None
+
+    if expedite:
+        print("Expedited fulfillment requested!")
+        await ctx.execute_task(expedited_shipping, order_id=order_id)
+    else:
+        print("Standard fulfillment")
+        await ctx.execute_task(standard_shipping, order_id=order_id)
+
+    return {"completed": True}
+
+# Parent workflow that controls child
+@workflow(name="order_orchestrator", version="1.0.0")
+async def order_orchestrator(ctx: WorkflowContext, order: dict) -> dict:
+    # Start child fulfillment workflow
+    child_handle = await ctx.start_child_workflow(
+        "fulfillment_workflow", args=(order["id"],)
+    )
+
+    print(f"Child workflow started: {child_handle.workflow_id}")
+
+    # Wait for external expedite request (1 minute timeout)
+    try:
+        expedite = await ctx.wait_for_event_with_timeout(
+            "expedite_request", timedelta(minutes=1)
+        )
+    except TimeoutError:
+        expedite = None
+
+    if expedite:
+        print("Expedite requested - notifying child workflow")
+        await child_handle.send_event("expedite", True)
+
+    # Wait for child to complete
+    result = await child_handle.result()
+
+    return {
+        "order_id": order["id"],
+        "expedited": bool(expedite),
+        "completed": result["completed"],
+    }
+```
+
+**Send expedite event from client:**
+
+```python
+from orcher import Client, ClientConfig
+
+async def expedite_order(workflow_id: str) -> None:
+    client = Client(ClientConfig(server_url="http://localhost:50051"))
+    await client.connect()
+
+    # Get a handle to the running parent workflow, then send it an event
+    handle = await client.get_workflow(workflow_id)
+    await handle.send_event("expedite_request", True)
+
+    print("Expedite request sent")
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/patterns/parent-child/hierarchical" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Hierarchical Workflows</h3>
+      <p className="text-sm text-foreground-light">
+        Build multi-level orchestration hierarchies for complex business processes
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/parent-child/error-handling" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Error Handling & Monitoring</h3>
+      <p className="text-sm text-foreground-light">
+        Strategies for handling child failures and monitoring execution trees
+      </p>
+    </div>
+  </Link>
+</div>

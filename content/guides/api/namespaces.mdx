@@ -1,0 +1,153 @@
+---
+id: 'api-namespaces'
+title: 'Namespaces'
+description: 'Multi-tenancy and environment isolation using namespaces in the Orcher REST API'
+sidebar_label: 'Namespaces'
+---
+
+## Overview
+
+Namespaces are logical isolation boundaries that separate workflows, tasks, and queues within a single Orcher cluster. Every workflow execution belongs to exactly one namespace, and resources in different namespaces are fully isolated from each other.
+
+Orcher seeds a `default` namespace automatically on first migration. If you do not specify a namespace when executing a workflow, the `default` namespace is used.
+
+**Common use cases:**
+
+- **Environment separation** -- run `development`, `staging`, and `production` workloads on the same cluster without interference.
+- **Multi-tenancy** -- give each tenant (e.g., `tenant-acme`, `tenant-globex`) its own namespace so their workflows, queues, and data never overlap.
+- **Team isolation** -- let independent teams operate in their own namespaces with separate retention policies and ownership.
+
+### Namespace properties
+
+Each namespace is a first-class entity stored in the `namespaces` table with the following attributes:
+
+| Field | Description |
+|---|---|
+| `name` | Unique name within an organization (up to 100 characters). |
+| `description` | Human-readable description. |
+| `status` | Lifecycle status: `active`, `deprecated`, or `deleted`. |
+| `owner_email` | Optional owner contact. |
+| `retention_period_days` | How long completed workflow data is retained (default: 7 days). |
+| `organization_id` | Owning organization. Namespace names are unique per organization. |
+| `data` | Arbitrary JSONB extension data for custom metadata. |
+
+## Using Namespaces in the API
+
+### Workflow execution requests
+
+The `namespace` field is part of the `ExecuteWorkflowRequest` body. When omitted, it defaults to `"default"`.
+
+```bash
+POST /api/v1/workflows/execute
+Content-Type: application/json
+
+{
+  "workflowName": "order-processor",
+  "workflowVersion": "1.0.0",
+  "namespace": "production",
+  "parameters": {
+    "orderId": 123,
+    "amount": 99.99
+  },
+  "timeoutSecs": 300,
+  "priority": 10,
+  "tags": {
+    "environment": "prod"
+  }
+}
+```
+
+The server logs the namespace alongside the workflow name and passes it through to the underlying workflow execution record. All subsequent operations on that execution (status, result, cancellation, logs) are scoped to the execution ID, which inherently carries its namespace association.
+
+### Listing executions
+
+The `GET /api/v1/executions` endpoint returns executions filtered by the server's configured namespace. You can further narrow results with query parameters:
+
+```bash
+GET /api/v1/executions?workflowName=order-processor&status=RUNNING&limit=50&offset=0
+```
+
+### Server-side namespace configuration
+
+The REST API server reads its default namespace from the `ORCHESTRATOR_NAMESPACE` environment variable. This value is used by the `WorkflowService` for operations that reference the namespace implicitly (such as status lookups and list queries).
+
+```bash
+# Set the server's default namespace
+export ORCHESTRATOR_NAMESPACE=production
+```
+
+When `ORCHESTRATOR_NAMESPACE` is not set, the server defaults to `"default"`.
+
+## Namespace Isolation
+
+### Queue isolation
+
+Task queues are scoped by namespace. A queue named `orders` in namespace `production` is completely separate from a queue named `orders` in namespace `staging`. Workers polling a specific namespace will only receive tasks from that namespace's queues.
+
+### Workflow isolation
+
+Workflow executions are stored with their namespace. Queries and status lookups are filtered accordingly, so executions in one namespace are not visible from another.
+
+### Worker isolation
+
+Workers connect to the orchestrator with a specific namespace context. A worker registered under namespace `production` will only poll for and execute tasks within that namespace.
+
+### Data retention isolation
+
+Each namespace has its own `retention_period_days` setting, so you can keep production data longer than development data without affecting the other.
+
+## Examples
+
+### Execute a workflow in a specific namespace
+
+```bash
+curl -X POST http://localhost:8080/api/v1/workflows/execute \
+  -H "Content-Type: application/json" \
+  -d '{
+    "workflowName": "order-processor",
+    "workflowVersion": "1.0.0",
+    "namespace": "production",
+    "parameters": {"orderId": 456}
+  }'
+```
+
+### Execute in the default namespace (namespace omitted)
+
+```bash
+curl -X POST http://localhost:8080/api/v1/workflows/execute \
+  -H "Content-Type: application/json" \
+  -d '{
+    "workflowName": "data-pipeline",
+    "parameters": {"source": "s3://bucket/data"}
+  }'
+```
+
+Since `namespace` is not provided, the execution is created in the `"default"` namespace. The `workflowVersion` also defaults to `"latest"` when omitted.
+
+### Check execution status (namespace-scoped)
+
+```bash
+curl http://localhost:8080/api/v1/executions/550e8400-e29b-41d4-a716-446655440000/status
+```
+
+The execution ID uniquely identifies the execution across all namespaces, so no additional namespace parameter is needed for status, result, cancellation, or log endpoints.
+
+## Best Practices
+
+**Naming conventions.** Use lowercase, hyphen-separated names that clearly identify the purpose: `production`, `staging`, `development`, `tenant-acme`, `team-payments`. Avoid special characters beyond hyphens. Namespace names are limited to 100 characters.
+
+**Environment separation vs. separate clusters.** Use namespaces when environments share the same infrastructure and you want logical isolation with minimal operational overhead. Use separate clusters when you need physical isolation for compliance, performance guarantees, or independent failure domains.
+
+**Retention policies.** Set shorter retention periods for development and staging namespaces (e.g., 1-2 days) and longer periods for production (e.g., 7-30 days) to manage storage costs.
+
+**Ownership.** Assign an `owner_email` to each namespace so it is clear who is responsible. This is especially important in multi-tenant deployments.
+
+**Lifecycle management.** Use the `deprecated` status to signal that a namespace is being phased out before deleting it. This gives teams time to migrate workloads.
+
+**Security considerations.** Namespaces provide logical isolation, not access control. If you need to restrict which users or services can operate in a given namespace, enforce that at the authentication layer or in a proxy in front of the orchestrator. Namespace isolation alone does not prevent a misconfigured client from targeting the wrong namespace.
+
+## Next Steps
+
+- [API Overview](/guides/api) -- introduction to the Orcher REST API.
+- [Workflow Endpoints](/guides/api/workflows) -- detailed reference for workflow execution endpoints.
+- [Configuration](/guides/operations/orchestrator/configuration) -- full list of environment variables including `ORCHESTRATOR_NAMESPACE`.

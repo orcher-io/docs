@@ -1,0 +1,124 @@
+---
+id: 'environments'
+title: 'Configuration Priority & Environments'
+description: 'Configuration precedence order and development vs production settings for Orcher'
+sidebar_label: 'Environments'
+---
+
+## Configuration Priority
+
+The orchestrator applies settings in this precedence order:
+
+1. **CLI flags** (highest priority)
+2. **Environment variables**
+3. **Config file** (TOML, via `--config` or `ORCHER_ORCHESTRATOR_CONFIG`)
+4. **Built-in defaults** (lowest priority)
+
+This means you can set base configuration in a file, override specific values with environment variables (useful for secrets like `DATABASE_URL`), and further override with CLI flags for testing.
+
+---
+
+## Development vs Production
+
+### Development Defaults
+
+The orchestrator uses more aggressive timeouts in debug builds:
+
+| Setting | Development | Production |
+|---------|------------|------------|
+| `claim_timeout_secs` | 60 (1 min) | 300 (5 min) |
+| `reclaim_interval_secs` | 5 | 10 |
+| `poll_timeout_secs` | 30 | 60 |
+| `log_format` | `compact` | `json` |
+
+Or use `OrchestratorConfig::for_development()` programmatically for shorter timeouts and aggressive reclaim intervals.
+
+### Minimal Production Configuration
+
+The minimum required for production:
+
+```bash
+DATABASE_URL="postgresql://orcher:PASSWORD@pgbouncer:6432/orcher?sslmode=require" \
+REDIS_URL="redis://redis:6379" \
+LOG_FORMAT=json \
+./orchestrator
+```
+
+Everything else uses sensible defaults. Add a TOML config file only when you need to tune polling, timeouts, retry, or security settings.
+
+### Full Production Example
+
+```toml
+[server]
+grpc_addr = "0.0.0.0:50051"
+http_addr = "0.0.0.0:8001"
+max_concurrent_streams = 1000
+
+[orchestrator]
+max_workers = 100
+max_concurrent_tasks = 1000
+heartbeat_timeout_secs = 90
+
+[storage]
+database_url = "postgresql://orcher:PASSWORD@pgbouncer:6432/orcher?sslmode=require"
+redis_url = "redis://redis:6379"
+
+[logging]
+level = "info"
+format = "json"
+
+[health]
+readiness_enabled = true
+liveness_enabled = true
+
+[polling]
+claim_timeout_secs = 300
+claim_query_timeout_ms = 2000
+poll_timeout_secs = 60
+reclaim_interval_secs = 10
+enable_notifications = true
+batch_claim_size = 10
+
+[timeout_watcher]
+enabled = true
+poll_interval_secs = 30
+batch_size = 100
+grace_period_secs = 5
+
+[workflow_retry]
+enabled = true
+default_max_attempts = 3
+default_initial_backoff_secs = 1
+default_backoff_multiplier = 2.0
+default_max_backoff_secs = 300
+
+[background_jobs]
+metrics_enabled = true
+metrics_interval_secs = 3600
+retention_enabled = true
+retention_interval_secs = 86400
+
+[background_jobs.retention_days]
+workflow_executions = 90
+execution_logs = 30
+journal_entries = 90
+task_executions = 90
+outbox_queue = 7
+
+[security]
+auth_mode = "api-key"
+api_key_cache_ttl_secs = 300
+api_key_cache_max_entries = 10000
+```
+
+---
+
+## Next Steps
+
+- [Configuration Overview](/guides/deployment/configuration) — Orchestrator CLI flags and environment variables
+- [TOML Configuration Reference](/guides/deployment/configuration/toml-reference) — Full TOML config file reference
+- [Docker](/guides/deployment/docker) — Docker Compose setup
+- [Kubernetes](/guides/deployment/kubernetes) — Kubernetes manifests reference
+- [Cloud Platforms](/guides/deployment/cloud) — Deploy to AWS, GCP, and Azure
+- [Logging](/guides/observability/logging) — Logging format and level configuration
+- [Metrics](/guides/observability/metrics) — Prometheus metrics reference

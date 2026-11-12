@@ -1,0 +1,77 @@
+---
+id: rust
+title: Rust SDK
+description: Build durable workflows in Rust with the orcher-sdk crate — attribute macros for workflows, tasks and actors, a worker, and a client
+sidebar_label: 'Overview'
+---
+
+The Orcher Rust SDK is the `orcher-sdk` crate. Workflows are async functions marked `#[workflow]`, tasks are async functions marked `#[task]`, and a `Worker` built in the same binary finds and runs all of them without manual registration. A `Client` starts workflows, sends them events and reads their results.
+
+- **Attribute macros**: `#[workflow]`, `#[task]`, `#[tasks]`, `#[actor]` and `#[operations]` generate the serialization and registration code.
+- **Typed task references**: `#[task]` generates a constant named after the function, so `ctx.execute_task(charge_payment, input)` fails to compile if the task is misspelled or renamed. Input and output types are checked when the task runs, not at compile time.
+- **Registration at startup**: every `#[workflow]`, `#[task]` and `#[actor]` linked into the binary is registered with the worker when it is built.
+- **One `Result` type**: workflows and tasks return `orcher_sdk::Result`, which the prelude exports. Don't import `anyhow::Result` alongside it: the worker relies on the SDK's error type to tell a workflow that is waiting from one that has failed.
+
+---
+
+## Installation
+
+```toml
+[dependencies]
+orcher-sdk = "0.7.1"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+```
+
+The SDK is built on Tokio and needs a Tokio runtime. A worker spends most of its time waiting on long polls, so the single-threaded runtime, `#[tokio::main(flavor = "current_thread")]`, is enough for most workers; run CPU-heavy task code with `tokio::task::spawn_blocking`.
+
+### Feature Flags
+
+| Feature | Description | Default |
+|---------|-------------|---------|
+| `full` | Enables `auto-register`, `derive` and `testing` | Yes |
+| `auto-register` | The `#[workflow]`, `#[task]`, `#[tasks]`, `#[actor]` and `#[operations]` macros, and registration of what they define when a worker is built | Yes |
+| `derive` | `#[derive(Payload)]` | Yes |
+| `testing` | `orcher_sdk::testing`: run workflows in memory with mocked tasks | Yes |
+| `compression` | gzip helpers on `orcher_sdk::payload::Payload`. Client and worker gzip (`with_gzip_compression()`) work without it | No |
+
+Turning off default features removes the macros, so keep `auto-register` unless you register handlers yourself.
+
+---
+
+## Quick Start
+
+### 1. Define Tasks
+
+Tasks do the work that touches the outside world: API calls, database writes, file I/O. A task takes a `TaskContext` and exactly one input, and is retried under its retry policy when it fails.
+
+<$CodeSample path="rust/sdk-overview/src/main.rs" region="tasks" />
+
+### 2. Define a Workflow
+
+A workflow orchestrates tasks. The engine journals each step's result, so after a crash or restart the workflow is replayed from its journal and completed steps are not run again.
+
+<$CodeSample path="rust/sdk-overview/src/main.rs" region="workflow" />
+
+### 3. Run a Worker
+
+The worker polls one task queue in one namespace and runs every workflow and task linked into the binary.
+
+<$CodeSample path="rust/sdk-overview/src/main.rs" region="worker" />
+
+### 4. Start Workflows (Client)
+
+<$CodeSample path="rust/sdk-overview/src/bin/start.rs" region="client" />
+
+---
+
+## Next Steps
+
+- [Workflows](/guides/sdk/rust/workflows): the workflow context, timers, child workflows, events, determinism
+- [Tasks](/guides/sdk/rust/tasks): task attributes, retries, non-retryable errors, heartbeats, cancellation
+- [Client](/guides/sdk/rust/client): connecting with an API key and TLS, starting workflows, duplicate starts
+- [Worker](/guides/sdk/rust/worker): configuration, namespaces, graceful shutdown
+- [Sessions](/guides/sdk/rust/sessions): running a series of tasks on one worker
+- [Actors](/guides/sdk/rust/actors): keyed actors with durable state
+- [Testing](/guides/sdk/rust/testing): running workflows in memory with mocked tasks
+- [Patterns](/guides/sdk/rust/patterns): sagas, parallel tasks, fan-out/fan-in, approvals

@@ -1,0 +1,1003 @@
+---
+title: 'Debugging Workflows'
+description: 'Debug workflows using the Admin UI, logging tools, and troubleshooting strategies. Learn how to inspect journal entries, trace execution, and solve common issues.'
+sidebar_label: 'Debugging Workflows'
+---
+
+Debug workflows effectively using Orcher's Admin UI, logging infrastructure, and debugging tools. Learn how to inspect workflow state, trace execution, and troubleshoot common issues.
+
+## Choose Your SDK
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+**Debugging Tools:**
+• Admin UI at `http://localhost:8081`
+• `RUST_LOG` environment variable
+• `tracing` crate for structured logging
+• Database queries for journal inspection
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+TypeScript debugging guide will be available when the SDK is released.
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+Python debugging guide will be available when the SDK is released.
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+Go debugging guide will be available when the SDK is released.
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Admin UI Debugger
+
+The Admin UI is your primary tool for debugging workflows. Access it at `http://localhost:8081`.
+
+### Workflow Execution View
+
+**Navigate to a workflow:**
+
+1. Open `http://localhost:8081`
+2. Click "Workflows" in the sidebar
+3. Select your workflow from the list
+4. View execution details
+
+**What you can see:**
+
+• **Workflow Status** - Running, completed, failed, cancelled
+• **Execution Timeline** - Visual representation of step execution
+• **Input/Output** - View workflow input and output data
+• **Duration** - Time spent in each step and total execution time
+• **Errors** - Any errors that occurred during execution
+
+### Journal Inspection
+
+**View journal entries:**
+
+1. Open workflow details
+2. Click "Journal" tab
+3. See all recorded steps
+
+**Journal information:**
+
+```json
+{
+  "step_name": "charge_card",
+  "step_id": "step_abc123",
+  "status": "completed",
+  "input": {
+    "amount": 99.99,
+    "card_token": "tok_visa"
+  },
+  "output": {
+    "charge_id": "ch_123456",
+    "status": "succeeded"
+  },
+  "started_at": "2024-01-15T10:30:00Z",
+  "completed_at": "2024-01-15T10:30:02Z",
+  "duration_ms": 2150,
+  "retry_count": 0
+}
+```
+
+### Task Execution History
+
+**View task executions:**
+
+1. Open workflow details
+2. Click "Tasks" tab
+3. See all task attempts including retries
+
+**For each task you can see:**
+
+• Task name and ID
+• Execution status (pending, running, completed, failed)
+• Retry attempts
+• Input and output data
+• Execution duration
+• Error messages (if failed)
+
+### Real-Time Monitoring
+
+**Watch workflows in real-time:**
+
+1. Open workflow details
+2. Enable "Live Updates" toggle
+3. See steps complete as they execute
+
+**Use cases:**
+
+• Monitor long-running workflows
+• Watch for failures as they happen
+• Verify workflow behavior during development
+• Debug timing-related issues
+
+---
+
+## Logging and Tracing
+
+### Enable Debug Logging
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+**Set log level:**
+
+```bash
+# Enable debug logs for your worker
+RUST_LOG=debug cargo run
+
+# Enable trace logs (very verbose)
+RUST_LOG=trace cargo run
+
+# Enable logs for specific modules
+RUST_LOG=my_workflow=debug,orcher=info cargo run
+
+# Multiple targets
+RUST_LOG=my_workflow=trace,orcher::worker=debug,orcher::executor=trace cargo run
+```
+
+**In code:**
+
+```rust
+use tracing::{debug, info, warn, error, trace};
+
+#[workflow]
+async fn debug_workflow(ctx: WorkflowContext, input: Input) -> Result<Output> {
+    info!("Starting workflow with input: {:?}", input);
+    
+    // Log before step
+    debug!("About to charge card for amount: {}", input.amount);
+    
+    let payment = ctx.execute("charge_card", || async {
+        trace!("Calling Stripe API");
+        let result = stripe::charge(input.amount).await;
+        trace!("Stripe API returned: {:?}", result);
+        result
+    }).await?;
+    
+    info!("Payment successful: charge_id={}", payment.charge_id);
+    
+    // Log warning for unusual conditions
+    if payment.amount > 10000.0 {
+        warn!("High-value payment detected: ${}", payment.amount);
+    }
+    
+    Ok(Output { payment })
+}
+```
+
+**Structured logging:**
+
+```rust
+use tracing::{info, instrument};
+
+#[instrument(skip(ctx))]
+async fn process_order(ctx: &WorkflowContext, order_id: &str) -> Result<()> {
+    // Automatically logs function entry/exit with parameters
+    info!(order_id = %order_id, "Processing order");
+    
+    let result = ctx.execute("validate", || async {
+        validate_order(order_id).await
+    }).await?;
+    
+    info!(
+        order_id = %order_id,
+        validation_result = ?result,
+        "Order validated"
+    );
+    
+    Ok(())
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+</TabPanel>
+
+</Tabs>
+
+### Log to File
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use tracing_subscriber::{fmt, EnvFilter};
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
+
+#[tokio::main]
+async fn main() -> orcher::Result<()> {
+    // Create file appender (rotates daily)
+    let file_appender = RollingFileAppender::new(
+        Rotation::DAILY,
+        "logs",
+        "workflow.log"
+    );
+    
+    // Configure logging to file and stdout
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .with_writer(file_appender)
+        .with_ansi(false) // No colors in file
+        .json() // JSON format for parsing
+        .init();
+    
+    // Your worker code
+    let worker = WorkerBuilder::new()
+        .server_url("http://localhost:9090")
+        .task_queue("default")
+        .build()
+        .await?;
+    
+    worker.run().await
+}
+```
+
+**Log rotation:**
+
+```rust
+use tracing_appender::rolling::Rotation;
+
+// Rotate daily
+let appender = RollingFileAppender::new(Rotation::DAILY, "logs", "workflow.log");
+
+// Rotate hourly
+let appender = RollingFileAppender::new(Rotation::HOURLY, "logs", "workflow.log");
+
+// Rotate at specific size
+let appender = RollingFileAppender::new(Rotation::NEVER, "logs", "workflow.log");
+// Use external tool like logrotate for size-based rotation
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Inspecting the Journal Database
+
+Query the journal directly for deep debugging:
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+### Connect to Database
+
+```bash
+# Connect with psql
+psql postgresql://postgres:postgres@localhost:5432/orcher_dev
+
+# Or use any PostgreSQL client
+pgcli postgresql://postgres:postgres@localhost:5432/orcher_dev
+```
+
+### Useful Queries
+
+**View all workflow executions:**
+
+```sql
+SELECT 
+    id,
+    workflow_name,
+    status,
+    started_at,
+    completed_at,
+    completed_at - started_at as duration
+FROM workflow_executions
+ORDER BY started_at DESC
+LIMIT 10;
+```
+
+**View journal for a specific workflow:**
+
+```sql
+SELECT 
+    step_name,
+    status,
+    retry_count,
+    started_at,
+    completed_at,
+    error_message
+FROM execution_log
+WHERE workflow_id = 'wf_abc123'
+ORDER BY sequence_number;
+```
+
+**Find failed workflows:**
+
+```sql
+SELECT 
+    we.id,
+    we.workflow_name,
+    we.started_at,
+    el.step_name,
+    el.error_message
+FROM workflow_executions we
+JOIN execution_log el ON we.id = el.workflow_id
+WHERE we.status = 'failed'
+ORDER BY we.started_at DESC;
+```
+
+**Find workflows with retries:**
+
+```sql
+SELECT 
+    workflow_id,
+    step_name,
+    retry_count,
+    error_message
+FROM execution_log
+WHERE retry_count > 0
+ORDER BY retry_count DESC;
+```
+
+**View workflow timeline:**
+
+```sql
+SELECT 
+    step_name,
+    status,
+    started_at,
+    completed_at,
+    EXTRACT(EPOCH FROM (completed_at - started_at)) as duration_seconds
+FROM execution_log
+WHERE workflow_id = 'wf_abc123'
+ORDER BY sequence_number;
+```
+
+**Find slow steps:**
+
+```sql
+SELECT 
+    step_name,
+    COUNT(*) as executions,
+    AVG(EXTRACT(EPOCH FROM (completed_at - started_at))) as avg_duration,
+    MAX(EXTRACT(EPOCH FROM (completed_at - started_at))) as max_duration
+FROM execution_log
+WHERE completed_at IS NOT NULL
+GROUP BY step_name
+ORDER BY avg_duration DESC;
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Common Issues and Solutions
+
+### Workflow Stuck in "Running" State
+
+**Symptoms:**
+• Workflow shows as "running" but no progress
+• No recent journal entries
+• Tasks not executing
+
+**Debug steps:**
+
+1. **Check worker is running:**
+```bash
+# Check worker logs
+docker logs -f orcher_worker
+
+# Verify worker connected to orchestrator
+curl http://localhost:9090/api/workers
+```
+
+2. **Check database connection:**
+```bash
+# Test connection
+psql $DATABASE_URL -c "SELECT 1"
+
+# Check for locks
+SELECT * FROM pg_locks WHERE NOT granted;
+```
+
+3. **Inspect workflow state:**
+```sql
+SELECT * FROM workflow_executions WHERE id = 'wf_abc123';
+SELECT * FROM execution_log WHERE workflow_id = 'wf_abc123' ORDER BY sequence_number DESC LIMIT 5;
+```
+
+**Solutions:**
+
+• Restart the worker
+• Check network connectivity between worker and orchestrator
+• Verify database isn't full or locked
+• Check for deadlocks in the database
+
+### Task Failing Repeatedly
+
+**Symptoms:**
+• Task fails and retries multiple times
+• Same error message each time
+• Eventually workflow fails
+
+**Debug steps:**
+
+1. **View error details in Admin UI:**
+   - Open workflow details
+   - Go to "Tasks" tab
+   - Click on failed task
+   - Read full error message and stack trace
+
+2. **Check logs:**
+```bash
+RUST_LOG=debug cargo run 2>&1 | grep "task_name"
+```
+
+3. **Query retry history:**
+```sql
+SELECT 
+    step_name,
+    retry_count,
+    error_message,
+    started_at
+FROM execution_log
+WHERE workflow_id = 'wf_abc123' AND step_name = 'failing_task'
+ORDER BY started_at;
+```
+
+**Common causes:**
+
+• **External service down** - Check external API availability
+• **Invalid credentials** - Verify API keys and tokens
+• **Network timeout** - Increase timeout or check network
+• **Data validation error** - Check input data format
+• **Rate limiting** - Implement backoff or request quota
+
+**Solutions:**
+
+```rust
+// Add better error handling. `retry = 5` caps the number of attempts; for full
+// control use a retry_policy(...) with initial_interval / backoff_coefficient.
+#[task(retry = 5)]
+async fn robust_task(ctx: TaskContext, input: Input) -> Result<Output> {
+    match external_service::call(input).await {
+        Ok(result) => Ok(result),
+        Err(e) if e.is_retryable() => {
+            warn!("Retryable error: {}", e);
+            // Return the error to let Orcher retry per the policy
+            Err(e.into())
+        }
+        Err(e) => {
+            error!("Non-retryable error: {}", e);
+            // Fail immediately without retrying
+            Err(anyhow::anyhow!("non-retryable: {e}").into())
+        }
+    }
+}
+```
+
+### Workflow Replaying Incorrectly
+
+**Symptoms:**
+• After restart, workflow re-executes completed steps
+• Duplicate API calls
+• Inconsistent state
+
+**Debug steps:**
+
+1. **Verify journal integrity:**
+```sql
+-- Check for gaps in sequence numbers
+SELECT 
+    workflow_id,
+    step_name,
+    sequence_number,
+    LAG(sequence_number) OVER (ORDER BY sequence_number) as prev_seq
+FROM execution_log
+WHERE workflow_id = 'wf_abc123'
+ORDER BY sequence_number;
+```
+
+2. **Check step IDs are deterministic:**
+```rust
+// Bad - non-deterministic step name
+ctx.execute(&format!("step_{}", uuid::Uuid::new_v4()), || async {
+    // ...
+}).await?;
+
+// Good - deterministic step name
+ctx.execute("charge_card", || async {
+    // ...
+}).await?;
+```
+
+3. **Verify workflow is deterministic:**
+```rust
+// Bad - uses system time directly
+let timestamp = SystemTime::now();
+
+// Good - uses workflow context time
+let timestamp = ctx.time().now();
+```
+
+**Solutions:**
+
+• Use consistent, deterministic step names
+• Don't use random values outside `ctx.rand()`
+• Don't use system time outside `ctx.time().now()`
+• Ensure workflow logic doesn't depend on external mutable state
+
+### Database Performance Issues
+
+**Symptoms:**
+• Slow workflow execution
+• High database CPU usage
+• Timeouts connecting to database
+
+**Debug steps:**
+
+1. **Check active connections:**
+```sql
+SELECT count(*) FROM pg_stat_activity;
+SELECT * FROM pg_stat_activity WHERE datname = 'orcher_dev';
+```
+
+2. **Find slow queries:**
+```sql
+SELECT 
+    query,
+    calls,
+    total_time,
+    mean_time
+FROM pg_stat_statements
+ORDER BY mean_time DESC
+LIMIT 10;
+```
+
+3. **Check table sizes:**
+```sql
+SELECT 
+    tablename,
+    pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) AS size
+FROM pg_tables
+WHERE schemaname = 'public'
+ORDER BY pg_total_relation_size(schemaname||'.'||tablename) DESC;
+```
+
+**Solutions:**
+
+• Add indexes on frequently queried columns
+• Increase database connection pool size
+• Archive old workflow executions
+• Vacuum and analyze tables regularly
+• Consider read replicas for queries
+
+### Memory Leaks
+
+**Symptoms:**
+• Worker memory usage grows over time
+• Eventually crashes with OOM
+• Performance degrades
+
+**Debug steps:**
+
+1. **Monitor memory usage:**
+```bash
+# Watch memory over time
+watch -n 1 'ps aux | grep workflow-worker'
+
+# Use htop
+htop -p $(pgrep -f workflow-worker)
+```
+
+2. **Profile with heaptrack (Linux):**
+```bash
+heaptrack ./target/release/workflow-worker
+# Run workflows
+# Ctrl+C to stop
+heaptrack_gui heaptrack.workflow-worker.*.gz
+```
+
+3. **Check for unbounded collections:**
+```rust
+// Bad - grows forever
+static CACHE: Lazy<HashMap<String, Data>> = Lazy::new(HashMap::new);
+
+// Good - bounded cache
+static CACHE: Lazy<LruCache<String, Data>> = Lazy::new(|| LruCache::new(1000));
+```
+
+**Solutions:**
+
+• Use bounded caches (LRU)
+• Clean up completed workflow state
+• Avoid holding large data in memory
+• Stream large datasets instead of loading all at once
+• Restart workers periodically as a safeguard
+
+---
+
+## Performance Debugging
+
+### Profiling Workflow Execution
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="sdk"
+>
+
+<TabPanel id="rust" label="Rust">
+
+**Using `tracing` spans:**
+
+```rust
+use tracing::{info_span, instrument};
+
+#[workflow]
+async fn profiled_workflow(ctx: WorkflowContext, input: Input) -> Result<Output> {
+    let _span = info_span!("workflow_execution").entered();
+    
+    let step1 = {
+        let _span = info_span!("step1_charge_card").entered();
+        ctx.execute("charge_card", || async {
+            charge_card_impl().await
+        }).await?
+    };
+    
+    let step2 = {
+        let _span = info_span!("step2_reserve_inventory").entered();
+        ctx.execute("reserve_inventory", || async {
+            reserve_inventory_impl().await
+        }).await?
+    };
+    
+    Ok(Output { step1, step2 })
+}
+```
+
+**Using `cargo-flamegraph`:**
+
+```bash
+# Install
+cargo install flamegraph
+
+# Run with profiling
+sudo flamegraph target/release/workflow-worker
+
+# Open flamegraph.svg in browser
+```
+
+**Using `tokio-console`:**
+
+```bash
+# Add to Cargo.toml
+[dependencies]
+console-subscriber = "0.2"
+
+# In code
+console_subscriber::init();
+
+# Run tokio-console
+tokio-console
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+**Coming Soon**
+
+</TabPanel>
+
+<TabPanel id="go" label="Go">
+
+**Coming Soon**
+
+</TabPanel>
+
+</Tabs>
+
+### Finding Bottlenecks
+
+1. **Check step durations in Admin UI**
+2. **Query database for slow steps:**
+
+```sql
+SELECT 
+    step_name,
+    AVG(EXTRACT(EPOCH FROM (completed_at - started_at))) as avg_seconds,
+    COUNT(*) as count
+FROM execution_log
+WHERE completed_at IS NOT NULL
+GROUP BY step_name
+ORDER BY avg_seconds DESC
+LIMIT 10;
+```
+
+3. **Enable metrics:**
+
+```rust
+use orcher::interceptor::MetricsInterceptor;
+
+#[tokio::main]
+async fn main() -> orcher::Result<()> {
+    // Enable metrics via the built-in metrics interceptor
+    let worker = WorkerBuilder::new()
+        .server_url("http://localhost:9090")
+        .task_queue("default")
+        .interceptor(MetricsInterceptor::new())
+        .build()
+        .await?;
+    
+    worker.run().await
+}
+```
+
+4. **View metrics:**
+
+```bash
+# Prometheus format
+curl http://localhost:9091/metrics
+
+# Grep for specific metrics
+curl -s http://localhost:9091/metrics | grep workflow_duration
+```
+
+---
+
+## Debugging Tools
+
+### CLI Commands
+
+```bash
+# List running workflows
+orcher workflow list --status running
+
+# Get workflow details
+orcher workflow get wf_abc123
+
+# View workflow history (journal)
+orcher workflow history wf_abc123
+
+# Cancel stuck workflow
+orcher workflow cancel wf_abc123
+
+# View worker status
+orcher worker list
+
+# Check orchestrator health
+orcher health
+```
+
+### HTTP API Debugging
+
+```bash
+# Get workflow status
+curl http://localhost:8080/api/workflows/wf_abc123
+
+# List workflows
+curl http://localhost:8080/api/workflows
+
+# Get workflow journal
+curl http://localhost:8080/api/workflows/wf_abc123/journal
+
+# Health check
+curl http://localhost:8080/health
+```
+
+---
+
+## Best Practices
+
+### 1. Add Debug Logging Early
+
+```rust
+#[workflow]
+async fn well_instrumented_workflow(
+    ctx: WorkflowContext,
+    input: Input
+) -> Result<Output> {
+    info!("Workflow started with input: {:?}", input);
+    
+    debug!("Validating input");
+    validate_input(&input)?;
+    
+    debug!("Executing step 1");
+    let result1 = ctx.execute("step1", || async {
+        // ...
+    }).await?;
+    debug!("Step 1 completed: {:?}", result1);
+    
+    info!("Workflow completed successfully");
+    Ok(Output::from(result1))
+}
+```
+
+### 2. Use Descriptive Error Messages
+
+```rust
+// Bad
+return Err("failed".into());
+
+// Good
+return Err(format!(
+    "Failed to charge card: card_token={}, amount={}, error={}",
+    card_token, amount, e
+).into());
+```
+
+### 3. Add Context to Errors
+
+```rust
+use anyhow::Context;
+
+let payment = stripe::charge(amount, card)
+    .await
+    .context("Failed to charge card via Stripe")?;
+```
+
+### 4. Test Error Paths
+
+```rust
+#[tokio::test]
+async fn test_handles_stripe_failure() {
+    // Test what happens when Stripe fails
+    // Verify logs, retries, error messages
+}
+```
+
+### 5. Monitor in Production
+
+Set up alerts for:
+• High failure rates
+• Long execution times
+• Database errors
+• Memory usage spikes
+• Error log patterns
+
+---
+
+## Next Steps
+
+<div className="grid lg:grid-cols-12 gap-6 not-prose">
+  {[
+    {
+      title: 'Testing Workflows',
+      href: '/guides/local-development/testing-workflows',
+      description: 'Write tests to catch issues before production.',
+    },
+    {
+      title: 'Configuration',
+      href: '/guides/local-development/configuration',
+      description: 'Configure logging and monitoring for your environment.',
+    },
+    {
+      title: 'Production Deployment',
+      href: '/guides/deployment/docker',
+      description: 'Deploy with monitoring and observability.',
+    },
+  ].map((item) => {
+    return (
+      <Link href={`${item.href}`} key={item.title} passHref className={'col-span-4'}>
+        <GlassPanel
+          title={item.title}
+          span="col-span-6"
+          background={false}
+        >
+          {item.description}
+        </GlassPanel>
+      </Link>
+    )
+  })}
+</div>
+
+---
+
+## Learn More
+
+• [Workflow Development](/guides/local-development/workflow-development) - Best practices to prevent bugs
+• [Monitoring Guide](/guides/observability/metrics) - Production monitoring setup
+• [Troubleshooting](/guides/observability/debugging) - Common issues and solutions

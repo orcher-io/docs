@@ -1,0 +1,89 @@
+---
+id: api-health
+title: Health & System
+sidebar_label: Health & System
+---
+
+## Health & System
+
+### Health Checks
+
+#### Liveness Probe
+
+No authentication required. Returns `200 OK` if the service is alive.
+
+```bash
+GET /health/live
+```
+
+**Response:**
+
+```json
+{
+  "status": "healthy",
+  "timestamp": "2024-01-07T12:00:00Z",
+  "version": "0.1.0"
+}
+```
+
+#### Readiness Probe
+
+No authentication required. Returns `200 OK` if the service is ready to accept traffic
+(checks orchestrator gRPC connectivity).
+
+```bash
+GET /health/ready
+```
+
+**Response:**
+
+```json
+{
+  "status": "healthy",
+  "timestamp": "2024-01-07T12:00:00Z",
+  "version": "0.1.0"
+}
+```
+
+### System Information
+
+Public endpoint, no authentication required.
+
+```bash
+GET /system/info
+```
+
+**Response:**
+
+```json
+{
+  "version": "0.1.0",
+  "uptime_seconds": 86400,
+  "environment": "production"
+}
+```
+
+### System Status
+
+```bash
+GET /system/status
+```
+
+**Response:**
+
+```json
+{
+  "status": "healthy",
+  "active_executions": 150,
+  "queued_tasks": 25
+}
+```
+
+---
+
+## Next Steps
+
+- [API Overview](/guides/api) -- Authentication and getting started
+- [Workflow Endpoints](/guides/api/workflows) -- Execute, monitor, and manage workflow executions
+- [Errors & Limits](/guides/api/errors-and-limits) -- Error handling and rate limiting
+- [Best Practices & Examples](/guides/api/best-practices) -- Usage patterns and code examples

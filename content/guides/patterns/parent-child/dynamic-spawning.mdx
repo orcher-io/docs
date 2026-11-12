@@ -1,0 +1,295 @@
+---
+id: 'parent-child-dynamic-spawning'
+title: 'Dynamic Child Spawning'
+description: 'Spawn child workflows dynamically based on runtime data for fan-out patterns with Orcher'
+sidebar_label: 'Dynamic Spawning'
+---
+
+## Dynamic Child Spawning
+
+When the number of child workflows isn't known at design time, you can spawn them dynamically based on runtime data. This is the foundation of fan-out patterns — iterate over a collection of items, spawn a child workflow for each one, then collect all results. Use `Promise.allSettled` (TypeScript) or sequential iteration with error handling (Rust/Python) to ensure that one failed child doesn't prevent others from completing.
+
+<div className="not-prose my-8 max-w-md mx-auto">
+  <div className="flex flex-col items-center">
+    <div className="border bg-surface-100 px-5 py-2.5 text-center w-full">
+      <div className="text-xs font-medium text-foreground">Parent Workflow</div>
+    </div>
+    <div className="w-px h-3 bg-border-strong" />
+    <div className="border bg-background px-5 py-2 text-center w-full">
+      <div className="text-xs font-medium text-foreground">Fetch Items</div>
+      <div className="text-[10px] text-foreground-muted mt-0.5">DB query returns N items</div>
+    </div>
+    <div className="w-px h-3 bg-border-strong" />
+    <div className="text-[10px] font-mono uppercase tracking-wider text-foreground-muted mb-1">for each item → spawn child</div>
+    <div className="relative w-full">
+      <div className="absolute top-0 h-px bg-border-strong" style={{ left: 'calc(10% - 0.2rem)', right: 'calc(10% - 0.2rem)' }} />
+      <div className="grid grid-cols-5 gap-1.5">
+        {['Item 1', 'Item 2', 'Item 3', '...', 'Item N'].map((item, i) => (
+          <div key={i} className="flex flex-col items-center">
+            <div className="w-px h-4 bg-border-strong" />
+            <div className={`border w-full py-2 px-1 text-center ${item === '...' ? 'border-dashed bg-transparent' : 'border-dashed bg-background'}`}>
+              <div className="text-[9px] font-medium text-foreground">{item}</div>
+              {item !== '...' && <div className="text-[8px] text-foreground-muted mt-0.5">child wf</div>}
+            </div>
+            <div className="w-px h-4 bg-border-strong" />
+          </div>
+        ))}
+      </div>
+      <div className="absolute bottom-0 h-px bg-border-strong" style={{ left: 'calc(10% - 0.2rem)', right: 'calc(10% - 0.2rem)' }} />
+    </div>
+    <div className="text-[10px] font-mono uppercase tracking-wider text-foreground-muted mt-1">collect all results</div>
+    <div className="w-px h-3 bg-border-strong" />
+    <div className="border bg-surface-75 px-5 py-2 text-center w-full">
+      <div className="text-xs font-medium text-foreground">Aggregate & Complete</div>
+    </div>
+  </div>
+</div>
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+// Child workflow - processes a single invoice
+#[workflow(name = "process_invoice", version = "1.0.0")]
+pub async fn process_invoice(
+    ctx: WorkflowContext,
+    invoice_id: String,
+) -> Result<InvoiceResult> {
+    println!("Processing invoice {}", invoice_id);
+
+    // Generate PDF
+    let pdf = ctx.execute_task(generate_pdf, invoice_id.clone()).await?;
+
+    // Send to customer
+    ctx.execute_task(send_invoice_email, pdf.clone()).await?;
+
+    Ok(InvoiceResult {
+        invoice_id,
+        sent: true,
+    })
+}
+
+// Parent workflow - processes multiple invoices in parallel
+#[workflow(name = "monthly_billing", version = "1.0.0")]
+pub async fn monthly_billing(
+    ctx: WorkflowContext,
+    customer_ids: Vec<String>,
+) -> Result<BillingResult> {
+    println!("Starting monthly billing for {} customers", customer_ids.len());
+
+    // Spawn a child workflow for each customer
+    let mut handles = Vec::new();
+
+    for customer_id in customer_ids.iter() {
+        let invoice_id = format!("inv-{}-{}", customer_id, ctx.workflow_id());
+
+        let handle = ctx
+            .start_child_workflow("process_invoice", invoice_id)
+            .await?;
+
+        handles.push(handle);
+    }
+
+    println!("Spawned {} invoice workflows", handles.len());
+
+    // Wait for all children to complete
+    let mut results = Vec::new();
+    for handle in handles {
+        match handle.result::<InvoiceResult>().await {
+            Ok(result) => results.push(result),
+            // Never swallow the suspend signal — re-throw it so the runtime can
+            // pause the parent until the child completes.
+            Err(e) if e.is_suspend() => return Err(e.into()),
+            Err(e) => {
+                eprintln!("Invoice failed: {}", e);
+                // Continue processing others
+            }
+        }
+    }
+
+    Ok(BillingResult {
+        total: results.len(),
+        successful: results.iter().filter(|r| r.sent).count(),
+        failed: results.len() - results.iter().filter(|r| r.sent).count(),
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import {
+  Workflow, Tasks, Task, WorkflowContext, TaskContext, createTaskRefs
+} from '@orcher/sdk';
+
+interface InvoiceResult {
+  invoiceId: string;
+  sent: boolean;
+}
+
+interface BillingResult {
+  total: number;
+  successful: number;
+  failed: number;
+}
+
+@Tasks()
+class InvoiceTasks {
+  @Task({ name: 'generatePdf' })
+  async generatePdf(ctx: TaskContext, invoiceId: string): Promise<PdfData> { /* ... */ }
+
+  @Task({ name: 'sendInvoiceEmail' })
+  async sendInvoiceEmail(ctx: TaskContext, pdf: PdfData): Promise<void> { /* ... */ }
+}
+
+const tasks = createTaskRefs(InvoiceTasks);
+
+// Child workflow - processes a single invoice
+@Workflow()
+class ProcessInvoice {
+  async execute(ctx: WorkflowContext, invoiceId: string): Promise<InvoiceResult> {
+    console.log(`Processing invoice ${invoiceId}`);
+
+    const pdf = await ctx.executeTask(tasks.generatePdf, invoiceId);
+    await ctx.executeTask(tasks.sendInvoiceEmail, pdf);
+
+    return { invoiceId, sent: true };
+  }
+}
+
+// Parent workflow - processes multiple invoices in parallel
+@Workflow()
+class MonthlyBilling {
+  async execute(
+    ctx: WorkflowContext,
+    customerIds: string[],
+  ): Promise<BillingResult> {
+    console.log(`Starting monthly billing for ${customerIds.length} customers`);
+
+    // Spawn a child workflow for each customer
+    const handles = await Promise.all(
+      customerIds.map(async (customerId) => {
+        const invoiceId = `inv-${customerId}-${ctx.workflowId()}`;
+        return ctx.startChildWorkflow('process_invoice', invoiceId);
+      }),
+    );
+
+    console.log(`Spawned ${handles.length} invoice workflows`);
+
+    // Wait for all children to complete
+    const results = await Promise.allSettled(
+      handles.map((handle) => handle.result<InvoiceResult>()),
+    );
+
+    const successful = results.filter(
+      (r) => r.status === 'fulfilled' && r.value.sent,
+    ).length;
+
+    return {
+      total: results.length,
+      successful,
+      failed: results.length - successful,
+    };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, task, WorkflowContext, TaskContext
+
+@task(name="generate_pdf")
+async def generate_pdf(ctx: TaskContext, invoice_id: str) -> dict:
+    # ... generate invoice PDF
+    return {"pdf_url": f"https://storage.example.com/{invoice_id}.pdf"}
+
+@task(name="send_invoice_email")
+async def send_invoice_email(ctx: TaskContext, pdf: dict) -> None:
+    # ... email the invoice to the customer
+    pass
+
+# Child workflow - processes a single invoice
+@workflow(name="process_invoice", version="1.0.0")
+async def process_invoice(ctx: WorkflowContext, invoice_id: str) -> dict:
+    print(f"Processing invoice {invoice_id}")
+
+    pdf = await ctx.execute_task(generate_pdf, invoice_id=invoice_id)
+    await ctx.execute_task(send_invoice_email, pdf=pdf)
+
+    return {"invoice_id": invoice_id, "sent": True}
+
+# Parent workflow - processes multiple invoices in parallel
+@workflow(name="monthly_billing", version="1.0.0")
+async def monthly_billing(ctx: WorkflowContext, customer_ids: list[str]) -> dict:
+    print(f"Starting monthly billing for {len(customer_ids)} customers")
+
+    # Spawn a child workflow for each customer
+    handles = []
+    for customer_id in customer_ids:
+        invoice_id = f"inv-{customer_id}-{ctx.info.workflow_id}"
+        handle = await ctx.start_child_workflow("process_invoice", args=(invoice_id,))
+        handles.append(handle)
+
+    print(f"Spawned {len(handles)} invoice workflows")
+
+    # Wait for all children to complete
+    successful = 0
+    failed = 0
+    for handle in handles:
+        try:
+            result = await handle.result()
+            if result["sent"]:
+                successful += 1
+        except Exception as e:
+            print(f"Invoice failed: {e}")
+            failed += 1
+
+    return {
+        "total": len(handles),
+        "successful": successful,
+        "failed": failed,
+    }
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/patterns/parent-child/event-coordination" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Event Coordination</h3>
+      <p className="text-sm text-foreground-light">
+        Send events between parent and child workflows for runtime control
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/parent-child/map-reduce" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Map-Reduce Pattern</h3>
+      <p className="text-sm text-foreground-light">
+        Split large datasets into batches, process in parallel, and aggregate results
+      </p>
+    </div>
+  </Link>
+</div>

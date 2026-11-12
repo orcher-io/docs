@@ -1,0 +1,54 @@
+---
+title: Local Development & CLI
+subtitle: Set up a local Orcher development environment
+---
+
+Develop and test workflows locally before deploying to production.
+
+## Prerequisites
+
+- **PostgreSQL 14+** — Workflow state and journals
+- **Redis 7+** — Task dispatch queues
+- **Rust 1.70+** / **Python 3.10+** / **Node.js 18+** — Depending on your SDK
+
+## Quickstart
+
+1. Get the quickstart, which runs the engine image with Docker Compose:
+
+   ```bash
+   git clone https://github.com/orcher-io/quickstart.git
+   cd quickstart
+   ```
+
+2. Start dependencies:
+
+   ```bash
+   docker-compose up -d postgres redis
+   ```
+
+3. Run the orchestrator:
+
+   ```bash
+   cargo run -p orchestrator -- --config services/orchestrator/config/development.toml
+   ```
+
+4. Run your worker:
+
+   ```bash
+   # Rust
+   cargo run -p my-workflow-worker
+
+   # TypeScript
+   npx ts-node worker.ts
+
+   # Python
+   python worker.py
+   ```
+
+## Guides
+
+- [Local Development Setup](/guides/local-development/getting-started) — Full setup instructions
+- [Configuration & Environment](/guides/local-development/configuration) — Configure your local environment
+- [Workflow Development](/guides/local-development/workflow-development) — Write and iterate on workflows
+- [Debugging Workflows](/guides/local-development/debugging-workflows) — Debug workflow execution
+- [Testing Workflows](/guides/local-development/testing-workflows) — Unit and integration testing

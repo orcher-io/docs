@@ -1,0 +1,11 @@
+.git
+.next
+node_modules
+**/node_modules
+samples/rust/target
+samples/python/.venv
+**/__pycache__
+public/search
+.internal
+Dockerfile
+.dockerignore

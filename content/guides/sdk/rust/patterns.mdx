@@ -1,0 +1,106 @@
+---
+id: rust-patterns
+title: Patterns
+description: Common workflow patterns with the Rust SDK — sagas, parallel tasks, fan-out/fan-in with child workflows, approvals, partial failures and state machines
+sidebar_label: 'Patterns'
+---
+
+Patterns that come up often, written against the Rust SDK. Each one is complete code that compiles against `orcher-sdk` 0.7.
+
+One rule runs through all of them: a step that hasn't finished yet returns the *suspension* error, and it must reach the worker unchanged. Handle the specific errors you mean to handle and return the rest ([Handling Failures](/guides/sdk/rust/workflows#handling-failures)).
+
+---
+
+## Saga (Compensation)
+
+When a business operation spans several services, undo the steps that succeeded if a later one fails. The SDK's `Saga` keeps the list of compensations and runs them in reverse order:
+
+<$CodeSample path="rust/sdk-patterns/src/lib.rs" region="saga" />
+
+- `add_step(&ctx, task, input).with_compensation(task).execute()` runs the task and, once it succeeds, registers the compensation with the same input. If the task fails, the compensations registered so far run, last first, and the task's error is returned.
+- `execute_without_compensation()` runs a step with nothing to undo; its failure doesn't trigger compensation.
+- `saga.add_compensation(task, input)` registers a compensation for a step you ran yourself, and `saga.compensate(&ctx)` runs them on demand.
+- A failing compensation doesn't stop the others. Give compensations generous retries and make them safe to repeat.
+- `Saga` passes the suspension through, so it never compensates a step that is merely still running. It is in `orcher_sdk::workflow`.
+
+---
+
+## Parallel Tasks
+
+<$CodeSample path="rust/sdk-patterns/src/lib.rs" region="parallel" />
+
+All the tasks are scheduled in one activation and run on whichever workers are free. Collecting the `Vec<Result<_>>` into a `Result<Vec<_>>` returns the first error, which is the suspension while any task is still running.
+
+---
+
+## Fan-Out / Fan-In with Child Workflows
+
+For work that is itself a multi-step workflow, or too large for one workflow's history, start a child per unit of work:
+
+<$CodeSample path="rust/sdk-patterns/src/lib.rs" region="fan-out" />
+
+`start_child_workflow_with_options` returns a handle without waiting, so all the children start before the parent waits on any of them. Each child has its own history, which keeps the parent's small. Ids derived from the parent's id are unique per parent and the same on replay.
+
+---
+
+## Human-in-the-Loop
+
+Wait for a person, with a deadline:
+
+<$CodeSample path="rust/sdk-patterns/src/lib.rs" region="approval" />
+
+A client delivers the decision with `handle.send_event("decision", ...)` ([Client](/guides/sdk/rust/client#workflow-handles)). The deadline is a durable timer, so the workflow can wait for days without holding a worker.
+
+---
+
+## Partial Failures in a Batch
+
+Record the items that fail and carry on with the rest:
+
+<$CodeSample path="rust/sdk-patterns/src/lib.rs" region="partial-failures" />
+
+Only `WorkflowError::TaskFailed` is counted as a failed item. A catch-all `Err(_)` arm would count every item whose task is still running as failed.
+
+---
+
+## State Machine
+
+<$CodeSample path="rust/sdk-patterns/src/lib.rs" region="state-machine" />
+
+Expose the current state with a query handler that reads `ctx.get_state("state")` ([Queries](/guides/sdk/rust/workflows#queries-updates-and-workflow-state)).
+
+---
+
+## Long-Running Loops
+
+A workflow that loops for weeks, polling or processing a stream, grows its history with every step, and replay reads all of it. Restart it with a fresh history every so many iterations, passing on the state it needs, with `ctx.restart_fresh_with` ([Workflows](/guides/sdk/rust/workflows#restarting-with-a-fresh-history)).
+
+---
+
+## Sharing Expensive Clients
+
+Create HTTP clients, connection pools and SDK clients once per worker process, not once per task attempt:
+
+<$CodeSample path="rust/sdk-patterns/src/lib.rs" region="shared-client" />
+
+---
+
+## Passing Large Data by Reference
+
+Each payload is limited to 8 MiB by default, and every activation of a workflow carries the payloads it has received. Write large results to object storage or a database and pass a reference:
+
+<$CodeSample path="rust/sdk-patterns/src/lib.rs" region="by-reference" />
+
+---
+
+## One Task per Item, or Batches
+
+One task per item retries each item on its own and shows each one's outcome, at the cost of a journal entry and a scheduling round trip per item. A task per batch has less overhead, but retries the whole batch when one item fails and must keep its input and result within the payload limit. Choose by how independent the items are, and measure with your own workload.
+
+---
+
+## Next Steps
+
+- [Workflows](/guides/sdk/rust/workflows): the workflow context
+- [Tasks](/guides/sdk/rust/tasks): retries and idempotency
+- [Testing](/guides/sdk/rust/testing): testing these workflows with mocked tasks

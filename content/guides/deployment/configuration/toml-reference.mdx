@@ -1,0 +1,215 @@
+---
+id: 'toml-reference'
+title: 'TOML Configuration Reference'
+description: 'Complete TOML configuration file reference for the Orcher orchestrator'
+sidebar_label: 'TOML Reference'
+---
+
+Pass a TOML file with `--config` or `ORCHER_ORCHESTRATOR_CONFIG`. All sections are optional — unspecified values use defaults.
+
+## `[server]`
+
+```toml
+[server]
+grpc_addr = "0.0.0.0:50051"       # gRPC bind address
+http_addr = "0.0.0.0:8001"        # HTTP bind address (metrics + health)
+max_concurrent_streams = 1000      # Maximum concurrent gRPC streams
+```
+
+## `[orchestrator]`
+
+```toml
+[orchestrator]
+max_workers = 100                  # Maximum registered workers
+max_concurrent_tasks = 1000        # Maximum concurrent task executions
+heartbeat_timeout_secs = 90        # Worker heartbeat timeout
+```
+
+## `[storage]`
+
+```toml
+[storage]
+database_url = "postgresql://orcher:orcher@localhost:6432/orcher"
+redis_url = "redis://localhost:6379"   # Optional
+```
+
+Environment variables `DATABASE_URL` and `REDIS_URL` override these values.
+
+## `[logging]`
+
+```toml
+[logging]
+level = "info"          # trace, debug, info, warn, error
+format = "json"         # compact, json, pretty, bunyan
+```
+
+## `[health]`
+
+```toml
+[health]
+readiness_enabled = true    # Enable /health/ready endpoint
+liveness_enabled = true     # Enable /health/live endpoint
+```
+
+## `[polling]`
+
+Controls how SDK workers poll for and execute workflow/task work.
+
+```toml
+[polling]
+# Claim lease duration (seconds). If a worker crashes, claims are reclaimed after this timeout.
+# Development: 60, Production: 300
+claim_timeout_secs = 300
+
+# PostgreSQL claim query timeout (milliseconds). How long to wait for the claim query to execute.
+claim_query_timeout_ms = 2000
+
+# Long-poll timeout (seconds). Workers wait up to this duration for work to become available.
+poll_timeout_secs = 60
+
+# Background reclaim interval (seconds). How often to check for expired claims.
+# Must be less than claim_timeout_secs.
+reclaim_interval_secs = 10
+
+# Enable notification-based wake-ups. Workers are notified immediately when work is available,
+# so a worker need not wait out poll_timeout_secs.
+enable_notifications = true
+
+# Batch claim size. Claims multiple workflow executions in a single query.
+# Reduces database contention with multiple workers. Recommended: 5-20.
+batch_claim_size = 10
+
+# Redis Streams (opt-in). Uses XADD/XREADGROUP instead of LPUSH/BRPOP.
+# Enables zero-config horizontal scaling with consumer groups.
+use_streams = false
+
+# Sync-match dispatch (opt-in, requires use_streams = true and redis_url).
+# Routes work directly to waiting workers via in-memory channels.
+use_sync_match = false
+
+# Maximum waiters per queue for sync-match. Limits memory usage.
+max_waiters_per_queue = 10000
+
+# Worker affinity for cache locality. Routes consecutive tasks from the same
+# workflow to the same worker.
+affinity_enabled = true
+affinity_lease_secs = 30           # Affinity mapping duration
+affinity_max_lease_secs = 300      # Maximum affinity duration (prevents imbalance)
+
+# Cleanup interval for expired waiters and affinity leases (seconds)
+routing_cleanup_interval_secs = 30
+```
+
+**Validation rules:**
+- `claim_timeout_secs` must be greater than `reclaim_interval_secs`
+- `use_sync_match` requires `use_streams = true` and `redis_url` to be configured
+- `affinity_max_lease_secs` must be >= `affinity_lease_secs`
+
+## `[timeout_watcher]`
+
+Detects and handles task and workflow timeouts.
+
+```toml
+[timeout_watcher]
+enabled = true                     # Enable timeout detection
+poll_interval_secs = 30            # How often to check for timeouts
+batch_size = 100                   # Tasks to process per poll
+grace_period_secs = 5              # Grace period before marking timeout
+
+# Individual timeout types (all enabled by default)
+enable_schedule_to_start = true    # Tasks scheduled but never claimed
+enable_start_to_close = true       # Tasks started but never completed
+enable_heartbeat = true            # Long-running tasks that stopped heartbeating
+enable_workflow_timeout = true     # Workflows exceeding configured timeout
+```
+
+## `[workflow_retry]`
+
+Automatic retry scheduling for failed workflows with exponential backoff.
+
+```toml
+[workflow_retry]
+enabled = true                        # Enable automatic retry scheduling
+poll_interval_secs = 30               # How often to poll for failed workflows
+batch_size = 50                       # Workflows to process per poll
+enable_realtime_notifications = false  # LISTEN/NOTIFY for immediate retry
+
+# Default retry policy (used when workflow doesn't specify its own)
+default_max_attempts = 3              # Maximum retry attempts
+default_initial_backoff_secs = 1      # First retry delay
+default_backoff_multiplier = 2.0      # Exponential multiplier (must be >= 1.0)
+default_max_backoff_secs = 300        # Maximum backoff cap (5 minutes)
+```
+
+## `[background_jobs]`
+
+Periodic maintenance tasks.
+
+```toml
+[background_jobs]
+metrics_enabled = true             # Enable metrics aggregation
+metrics_interval_secs = 3600       # Aggregation interval (1 hour)
+retention_enabled = true           # Enable data retention cleanup
+retention_interval_secs = 86400    # Cleanup interval (1 day)
+
+[background_jobs.retention_days]
+workflow_executions = 90           # Keep completed workflows for 90 days
+execution_logs = 30                # Keep execution logs for 30 days
+journal_entries = 90               # Keep journal entries for 90 days
+task_executions = 90               # Keep task executions for 90 days
+outbox_queue = 7                   # Keep completed outbox entries for 7 days
+```
+
+## `[security]`
+
+Authentication and TLS configuration.
+
+```toml
+[security]
+# Authentication mode: "none", "api-key", "mtls", "api-key-and-mtls"
+auth_mode = "none"
+
+# API key validation cache
+api_key_cache_ttl_secs = 300           # Cache TTL (5 minutes)
+api_key_cache_max_entries = 10000      # Maximum cached entries
+
+# TLS configuration (required when auth_mode includes "mtls")
+[security.tls]
+cert_path = "/etc/orchestrator/tls/server.crt"
+key_path = "/etc/orchestrator/tls/server.key"
+ca_cert_path = "/etc/orchestrator/tls/ca.crt"    # Required for client cert verification
+require_client_cert = true
+```
+
+## `[queue]` (Optional)
+
+Queue-based task dispatch. Uncomment to enable.
+
+```toml
+[queue]
+enabled = true
+dispatch_strategy = "direct"       # "direct", "queue", or "hybrid"
+
+# Queue provider — choose one:
+
+# Redis Streams
+[queue.provider]
+type = "redis"
+url = "redis://localhost:6379"
+pool_size = 10
+consumer_group = "orchestrator"
+
+# PostgreSQL-based queue
+# [queue.provider]
+# type = "postgres"
+# url = "postgresql://localhost:5432/orcher"
+# pool_size = 10
+# table_name = "task_queue"
+```
+
+---
+
+## Next Steps
+
+- [Configuration Overview](/guides/deployment/configuration) — Orchestrator CLI flags and environment variables
+- [Environments](/guides/deployment/configuration/environments) — Configuration priority and development vs production settings

@@ -1,0 +1,72 @@
+---
+id: data-engineers-production
+title: "Production Best Practices"
+description: "Performance optimization, monitoring, and deployment tips for data pipelines"
+sidebar_label: 'Production'
+---
+
+You've built the pieces — checkpointed ETL, incremental sync, parallel fan-out, error handling. Production is where they meet real data volumes, real failures, and the 3 a.m. page. This page is the checklist that separates a pipeline that *runs* from one you can *rely on*, with each habit pointing back to where you met it in this path.
+
+## Design Principles
+
+### Make Every Write Idempotent
+
+This is the one non-negotiable. Tasks are retried — after a crash, a timeout, a redelivered event — so any write that isn't idempotent will eventually duplicate. Use `UPSERT` (`INSERT ... ON CONFLICT DO UPDATE`) instead of `INSERT`, key writes on a stable business ID, and check "is this already done?" before doing it. You saw why in [crash recovery](/guides/learning/data-engineers/etl-pipelines): the journal skips *completed* tasks, but a task that died mid-write runs again.
+
+### Size Batches for Your Failure Budget
+
+Batch size is a dial between throughput and blast radius. Too small (10 rows) and per-batch overhead dominates; too large (a million) and a failure re-does a lot of work and risks running out of memory. Start at 1,000–10,000 records and tune by your row size and how often things fail — a flaky source argues for smaller batches. This is the same checkpoint-granularity tradeoff from [batch processing](/guides/learning/data-engineers/batch-processing).
+
+### Quarantine Bad Data, Don't Die on It
+
+A single malformed record must never take down a million-row run. Catch permanent failures, write them to a dead-letter table with their payload and reason, and keep going — the [error-handling pattern](/guides/learning/data-engineers/parallel-processing#error-handling-for-data-pipelines) from the last page. The dead-letter table is your triage queue, not a graveyard: fix the cause, then re-run just those rows.
+
+### Advance Watermarks Only After Loading
+
+For incremental syncs, the watermark is a promise that everything below it is loaded. Advance it *after* the load succeeds, never before — otherwise a mid-run failure skips a window silently and forever. [Incremental sync](/guides/learning/data-engineers/batch-processing#incremental-sync-cdc-pattern) builds this ordering in; in production, the thing to watch is that the watermark keeps *moving* (see below).
+
+### Test at Production Volume
+
+A pipeline that's correct on 100 rows can still OOM at 10 million, deadlock under concurrency, or expose an `OFFSET` that crawls. Load-test with production-scale data and realistic failure injection (kill a worker mid-run; feed it a poison row) *before* you deploy — durability you haven't watched recover is a hypothesis, not a guarantee.
+
+## What to Monitor
+
+Durable execution removes whole classes of failure, but it doesn't remove the need to watch. Four signals catch most data-pipeline trouble:
+
+| Signal | What it tells you | Alert when |
+| --- | --- | --- |
+| **Watermark lag** — `now() - sync_state.updated_at` | The sync is keeping up with the source | Lag exceeds a few sync intervals — the pipeline is stuck or falling behind |
+| **Dead-letter rate** — new rows in `failed_records` | How much data is being quarantined | The rate spikes — a schema change or upstream bug, not one-off bad rows |
+| **Workflow failures** — runs ending in error | Transient retries are being exhausted | Failures climb — a dependency is down, not just flaky |
+| **Throughput** — records processed per minute | The pipeline is moving at expected pace | It drops off its baseline — a slow source or contended destination |
+
+Because every step is journaled, you also get an audit trail for free: which run processed which records, when, and with what result — queryable without adding a logging system.
+
+## Performance
+
+Throughput, batch latency and recovery time depend on your row size, transform cost, destination and hardware, so measure your own workload before committing to SLAs. The [sdk-core benchmark suite](https://github.com/orcher-io/sdk-core/tree/main/bench) runs standard scenarios against any engine and is a starting point for your own.
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-4 not-prose">
+  <Link href="/guides/core/workflows" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Building Workflows</h3>
+    <p className="text-sm text-foreground-light">Deep dive into workflow primitives, deterministic execution, and composition patterns.</p>
+  </Link>
+  <Link href="/guides/core/tasks" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Defining Tasks</h3>
+    <p className="text-sm text-foreground-light">Retry policies, timeouts, heartbeats, and task context APIs.</p>
+  </Link>
+  <Link href="/guides/patterns/fan-out-fan-in" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Fan-Out/Fan-In</h3>
+    <p className="text-sm text-foreground-light">Parallel processing patterns for high-throughput data workloads.</p>
+  </Link>
+  <Link href="/guides/use-cases/data-processing" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Data Pipelines Use Cases</h3>
+    <p className="text-sm text-foreground-light">End-to-end reference examples for ETL, multi-source warehouses, and real-time analytics.</p>
+  </Link>
+</div>
+
+[Back to Overview](/guides/learning/data-engineers)

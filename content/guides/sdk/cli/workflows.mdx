@@ -1,0 +1,190 @@
+---
+id: cli-workflows
+title: Workflow Commands
+sidebar_label: Workflows
+---
+
+## `orcher workflow` (alias: `wf`)
+
+Manage workflow executions.
+
+### `workflow list`
+
+```bash
+orcher workflow list [OPTIONS]
+
+# Examples
+orcher workflow list
+orcher workflow list --status running --limit 10
+orcher workflow list --all-namespaces --output json
+orcher workflow list --type process-order --query "status=failed"
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-t, --type` | — | Filter by workflow type |
+| `-s, --status` | all | Filter: running, completed, failed, cancelled |
+| `-l, --limit` | `50` | Max results |
+| `-A, --all-namespaces` | `false` | Show across all namespaces |
+| `--query` | — | Advanced filter expression |
+
+### `workflow get`
+
+```bash
+orcher workflow get <workflow_id> [OPTIONS]
+
+# Examples
+orcher workflow get wf-abc123
+orcher workflow get wf-abc123 --execution-id exec-456 --full
+```
+
+| Option | Description |
+|--------|-------------|
+| `-e, --execution-id` | Specific execution ID |
+| `--full` | Show full execution details |
+
+### `workflow cancel`
+
+```bash
+orcher workflow cancel <workflow_id> [OPTIONS]
+
+# Examples
+orcher workflow cancel wf-abc123
+orcher workflow cancel wf-abc123 --reason "Duplicate order" --force
+```
+
+| Option | Description |
+|--------|-------------|
+| `-e, --execution-id` | Specific execution ID |
+| `-r, --reason` | Cancellation reason |
+| `-f, --force` | Skip confirmation prompt |
+
+### `workflow terminate`
+
+```bash
+orcher workflow terminate <workflow_id> [OPTIONS]
+
+# Examples
+orcher workflow terminate wf-abc123 --reason "Stuck in bad state" --force
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-e, --execution-id` | — | Specific execution ID |
+| `-r, --reason` | `"Terminated via CLI"` | Termination reason |
+| `-f, --force` | `false` | Skip confirmation |
+
+### `workflow reset`
+
+Rewind a workflow to a specific journal point and re-execute from there.
+
+```bash
+orcher workflow reset <workflow_id> --event-id <target_event_id> [OPTIONS]
+
+# Examples
+orcher workflow reset wf-abc123 --event-id 5 --reason "Bad deployment"
+orcher workflow reset wf-abc123 --event-id 3 -e exec_def456
+```
+
+| Option                 | Default              | Description                                       |
+| ---------------------- | -------------------- | ------------------------------------------------- |
+| `--event-id` (required) | —                   | Journal event ID to reset to                      |
+| `-e, --execution-id`  | latest               | Specific execution ID to reset                    |
+| `-r, --reason`         | `"Reset via CLI"`   | Reason for the reset (recorded in journal)        |
+| `-f, --force`          | `false`             | Skip confirmation                                 |
+
+The command creates a new execution that replays journal events up to the target event ID, then continues from that point. Use `workflow history` to find the event ID you want to reset to.
+
+### `workflow history` (aliases: `journal`, `events`)
+
+View the execution journal for a workflow.
+
+```bash
+orcher workflow history <workflow_id> [OPTIONS]
+
+# Examples
+orcher workflow history wf-abc123
+orcher workflow history wf-abc123 --compact --limit 20
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-e, --execution-id` | — | Specific execution ID |
+| `-l, --limit` | `100` | Max events |
+| `--compact` | `false` | Compact output format |
+
+### `workflow event`
+
+Send an event (signal) to a running workflow.
+
+```bash
+orcher workflow event <workflow_id> --name <event_name> [OPTIONS]
+
+# Examples
+orcher workflow event wf-abc123 --name approval --payload '{"approved": true}'
+```
+
+| Option | Description |
+|--------|-------------|
+| `-n, --name` | Event name (required) |
+| `-p, --payload` | Event payload as JSON string |
+
+---
+
+## `orcher describe` (alias: `desc`)
+
+Show detailed information about a resource.
+
+```bash
+orcher describe <resource_type> <name>
+
+# Examples
+orcher describe workflow process-order
+orcher describe task send-email
+orcher describe execution exec-abc123
+```
+
+Supported resource types: `workflow`/`workflows`/`wf`, `task`/`tasks`, `execution`/`executions`/`exec`
+
+---
+
+## `orcher logs`
+
+View workflow execution logs.
+
+```bash
+orcher logs <resource> [OPTIONS]
+
+# Examples
+orcher logs wf-abc123
+orcher logs wf-abc123 --follow
+orcher logs wf-abc123 --journal --tail 50
+orcher logs wf-abc123 --tasks --since 1h
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-f, --follow` | `false` | Follow log output in real-time (text logs only) |
+| `--since` | — | Show logs since time or duration (e.g., `1h`, `30m`) |
+| `--tail` | `100` | Number of lines from the end |
+| `--journal` | `false` | Show execution journal/history |
+| `--tasks` | `false` | Show task execution details |
+
+---
+
+## `orcher status`
+
+Show the status of resources in the current namespace.
+
+```bash
+orcher status [resource_type] [OPTIONS]
+
+# Examples
+orcher status
+orcher status workflow
+orcher status --all
+```
+
+| Option | Description |
+|--------|-------------|
+| `-A, --all` | Show all resource types |

@@ -1,0 +1,63 @@
+---
+id: 'debugging'
+title: 'Debugging Workflows'
+description: 'Inspect workflow executions, view journals, query logs, and troubleshoot failures with the Orcher CLI'
+sidebar_label: 'Debugging Workflows'
+---
+
+Orcher provides CLI tools and database-backed logs for debugging workflow executions. You can inspect execution state, view the event-sourced journal, stream real-time logs, query task execution details, and understand replay behavior — all without modifying your workflow code.
+
+- **Describe resources** — `orcher describe` shows detailed workflow, task, and execution information
+- **View logs** — `orcher logs` streams text logs, journal entries, or task execution details
+- **Workflow history** — `orcher workflow history` shows the event-sourced journal for replay analysis
+- **Execution management** — Cancel, terminate, or send events to running workflows
+
+---
+
+## Inspecting Executions
+
+### Describe a Workflow Execution
+
+Use `orcher describe` (alias: `desc`) to get detailed information about a workflow execution:
+
+```bash
+orcher describe workflow my-workflow-id
+```
+
+This shows execution status, input/output, timing, and step-level details fetched from the orchestrator.
+
+### List Workflow Executions
+
+Filter and list executions:
+
+```bash
+# List all executions
+orcher workflow list
+
+# Filter by status
+orcher workflow list --status running
+orcher workflow list --status failed
+
+# Filter by workflow name
+orcher workflow list --workflow order-processing
+```
+
+### Get Execution Details
+
+Get detailed info about a specific execution:
+
+```bash
+# Detailed execution info (aliases: describe, info)
+orcher workflow get <execution-id>
+```
+
+---
+
+## Next Steps
+
+- [Viewing Logs](/guides/observability/debugging/logs) — Text logs, journal entries, task execution details, and workflow history
+- [Understanding Replay](/guides/observability/debugging/replay) — How deterministic replay works and how to debug it
+- [Scenarios & Management](/guides/observability/debugging/scenarios) — Managing running workflows, common debugging scenarios, and CLI reference
+- [Logging](/guides/observability/logging) — Configure structured logging formats
+- [Metrics](/guides/observability/metrics) — Monitor performance with Prometheus
+- [Tracing](/guides/observability/tracing) — Distributed tracing with OpenTelemetry

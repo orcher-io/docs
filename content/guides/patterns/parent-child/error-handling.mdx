@@ -1,0 +1,437 @@
+---
+id: 'parent-child-error-handling'
+title: 'Error Handling & Monitoring'
+description: 'Strategies for handling child workflow failures and monitoring parent-child execution trees with Orcher'
+sidebar_label: 'Error Handling'
+---
+
+## Error Handling Strategies
+
+When a child workflow fails, the error propagates to the parent's `await` call on the child handle. Rather than letting this crash the parent, you should catch child failures and decide how to proceed — retry with different parameters, fall back to an alternative service, or collect partial results and continue. This is especially important in multi-child patterns where one failure shouldn't abort the entire operation.
+
+<div className="not-prose my-8 max-w-md mx-auto">
+  <div className="flex flex-col items-center">
+    <div className="border bg-surface-100 px-5 py-2 text-center w-full">
+      <div className="text-xs font-medium text-foreground">Parent Workflow</div>
+    </div>
+    <div className="w-px h-3 bg-border-strong" />
+    <div className="text-[10px] font-mono uppercase tracking-wider text-foreground-muted mb-1">spawn children</div>
+    {/* Children with mixed results */}
+    <div className="relative w-full">
+      <div className="absolute top-0 h-px bg-border-strong" style={{ left: 'calc(16.6% - 0.30rem)', right: 'calc(16.6% - 0.30rem)' }} />
+      <div className="grid grid-cols-3 gap-3">
+        {[
+          { name: 'Child A', status: 'ok' },
+          { name: 'Child B', status: 'fail' },
+          { name: 'Child C', status: 'ok' },
+        ].map((child) => (
+          <div key={child.name} className="flex flex-col items-center">
+            <div className="w-px h-4 bg-border-strong" />
+            <div className={`border w-full py-2.5 px-2 text-center ${child.status === 'fail' ? 'border-red-400/30 bg-red-500/5 border-dashed' : 'border-dashed bg-background'}`}>
+              <div className="text-[10px] font-medium text-foreground">{child.name}</div>
+              <div className={`text-[9px] mt-0.5 ${child.status === 'fail' ? 'text-red-400' : 'text-foreground-muted'}`}>
+                {child.status === 'fail' ? '✗ failed' : '✓ success'}
+              </div>
+            </div>
+            <div className="w-px h-4 bg-border-strong" />
+          </div>
+        ))}
+      </div>
+      <div className="absolute bottom-0 h-px bg-border-strong" style={{ left: 'calc(16.6% - 0.30rem)', right: 'calc(16.6% - 0.30rem)' }} />
+    </div>
+    <div className="text-[10px] font-mono text-foreground-muted mt-1 mb-1">error caught in parent</div>
+    <div className="w-px h-2 bg-border-strong" />
+    {/* Recovery strategies */}
+    <div className="relative w-full">
+      <div className="absolute top-0 h-px bg-border-strong" style={{ left: 'calc(16.6% - 0.30rem)', right: 'calc(16.6% - 0.30rem)' }} />
+      <div className="grid grid-cols-3 gap-3">
+        {[
+          { strategy: 'Retry', detail: 'Different params' },
+          { strategy: 'Fallback', detail: 'Alternative service' },
+          { strategy: 'Partial', detail: 'Continue without' },
+        ].map((s) => (
+          <div key={s.strategy} className="flex flex-col items-center">
+            <div className="w-px h-4 bg-border-strong" />
+            <div className="border bg-background w-full py-2 px-2 text-center flex flex-col justify-center min-h-[3rem]">
+              <div className="text-[10px] font-medium text-foreground">{s.strategy}</div>
+              <div className="text-[9px] text-foreground-muted mt-0.5">{s.detail}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </div>
+</div>
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+
+#[workflow(name = "resilient_order_processing", version = "1.0.0")]
+pub async fn resilient_order_processing(
+    ctx: WorkflowContext,
+    order: OrderData,
+) -> Result<ProcessingResult> {
+    let mut results = ProcessingResult::default();
+
+    // Try primary payment processor
+    let payment_handle = ctx
+        .start_child_workflow("process_payment", order.clone())
+        .await?;
+
+    match payment_handle.result::<PaymentResult>().await {
+        Ok(result) => {
+            results.payment = Some(result);
+        }
+        // Re-throw the suspend signal — never treat it as a child failure.
+        Err(e) if e.is_suspend() => return Err(e.into()),
+        Err(e) => {
+            eprintln!("Primary payment failed: {}", e);
+
+            // Fallback to secondary processor
+            let fallback_handle = ctx
+                .start_child_workflow("process_payment_fallback", order.clone())
+                .await?;
+
+            match fallback_handle.result::<PaymentResult>().await {
+                Ok(result) => {
+                    results.payment = Some(result);
+                }
+                Err(e) if e.is_suspend() => return Err(e.into()),
+                Err(e) => {
+                    eprintln!("Fallback payment also failed: {}", e);
+                    results.errors.push(format!("Payment failed: {}", e));
+                }
+            }
+        }
+    }
+
+    // Continue with fulfillment even if payment had issues
+    if results.payment.is_some() {
+        let fulfillment_handle = ctx
+            .start_child_workflow("fulfillment_workflow", order.id.clone())
+            .await?;
+
+        match fulfillment_handle.result::<FulfillmentResult>().await {
+            Ok(result) => results.fulfillment = Some(result),
+            Err(e) if e.is_suspend() => return Err(e.into()),
+            Err(e) => {
+                results.errors.push(format!("Fulfillment failed: {}", e));
+            }
+        }
+    }
+
+    results.success = results.payment.is_some() && results.fulfillment.is_some();
+
+    Ok(results)
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, WorkflowContext, isWorkflowSuspension } from '@orcher/sdk';
+
+interface ProcessingResult {
+  success: boolean;
+  payment?: PaymentResult;
+  fulfillment?: FulfillmentResult;
+  errors: string[];
+}
+
+@Workflow()
+class ResilientOrderProcessing {
+  async execute(ctx: WorkflowContext, order: OrderData): Promise<ProcessingResult> {
+    const results: ProcessingResult = {
+      success: false,
+      errors: [],
+    };
+
+    // Try primary payment processor
+    try {
+      const paymentHandle = await ctx.startChildWorkflow(
+        'process_payment',
+        order,
+      );
+
+      results.payment = await paymentHandle.result<PaymentResult>();
+    } catch (e) {
+      // Never swallow the suspend signal — re-throw it before handling failure.
+      if (isWorkflowSuspension(e)) throw e;
+      console.error('Primary payment failed:', e);
+
+      // Fallback to secondary processor
+      try {
+        const fallbackHandle = await ctx.startChildWorkflow(
+          'process_payment_fallback',
+          order,
+        );
+
+        results.payment = await fallbackHandle.result<PaymentResult>();
+      } catch (fallbackError) {
+        if (isWorkflowSuspension(fallbackError)) throw fallbackError;
+        console.error('Fallback payment also failed:', fallbackError);
+        results.errors.push(`Payment failed: ${fallbackError}`);
+      }
+    }
+
+    // Continue with fulfillment even if payment had issues
+    if (results.payment) {
+      try {
+        const fulfillmentHandle = await ctx.startChildWorkflow(
+          'fulfillment_workflow',
+          order.id,
+        );
+
+        results.fulfillment = await fulfillmentHandle.result<FulfillmentResult>();
+      } catch (e) {
+        if (isWorkflowSuspension(e)) throw e;
+        results.errors.push(`Fulfillment failed: ${e}`);
+      }
+    }
+
+    results.success = !!(results.payment && results.fulfillment);
+
+    return results;
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import workflow, WorkflowContext
+
+@workflow(name="resilient_order_processing", version="1.0.0")
+async def resilient_order_processing(ctx: WorkflowContext, order: dict) -> dict:
+    results = {"success": False, "payment": None, "fulfillment": None, "errors": []}
+
+    # Try primary payment processor
+    try:
+        payment_handle = await ctx.start_child_workflow("process_payment", args=(order,))
+        results["payment"] = await payment_handle.result()
+    except Exception as e:
+        print(f"Primary payment failed: {e}")
+
+        # Fallback to secondary processor
+        try:
+            fallback_handle = await ctx.start_child_workflow(
+                "process_payment_fallback", args=(order,)
+            )
+            results["payment"] = await fallback_handle.result()
+        except Exception as fallback_error:
+            print(f"Fallback payment also failed: {fallback_error}")
+            results["errors"].append(f"Payment failed: {fallback_error}")
+
+    # Continue with fulfillment even if payment had issues
+    if results["payment"]:
+        try:
+            fulfillment_handle = await ctx.start_child_workflow(
+                "fulfillment_workflow", args=(order["id"],)
+            )
+            results["fulfillment"] = await fulfillment_handle.result()
+        except Exception as e:
+            results["errors"].append(f"Fulfillment failed: {e}")
+
+    results["success"] = bool(results["payment"] and results["fulfillment"])
+
+    return results
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Monitoring Parent-Child Hierarchies
+
+When debugging production issues, you want to see the full execution tree — which children a parent spawned, their current status, and whether any grandchildren are stuck.
+
+<Admonition type="note">
+
+The snippets below show the *shape* of a recursive tree walk — they are conceptual pseudocode, not a copy-paste API. The client type is `Client` (not `OrcherClient`); per-workflow status is read through a workflow handle (`client.get_workflow(id)` / `getWorkflowHandle({ workflowId })` / `get_workflow_handle(id)`, then `handle.status()`); and the SDK does not currently expose a parent's child-workflow IDs for automatic recursion — track child IDs yourself (return them from the parent, or record them in your own store) to walk the tree.
+
+</Admonition>
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::client::OrcherClient;
+use anyhow::Result;
+
+async fn monitor_workflow_tree(parent_id: &str) -> Result<()> {
+    let client = OrcherClient::new("localhost:50051").await?;
+
+    // Get parent workflow status
+    let parent_status = client
+        .get_workflow_status(parent_id)
+        .await?;
+
+    println!("Parent Workflow: {}", parent_id);
+    println!("  State: {}", parent_status.state);
+    println!("  Started: {}", parent_status.started_at);
+
+    // Query all child workflows
+    if let Some(child_ids) = parent_status.child_workflow_ids {
+        println!("\nChild Workflows: {}", child_ids.len());
+
+        for child_id in child_ids {
+            let child_status = client.get_workflow_status(&child_id).await?;
+
+            println!("  └─ Child: {}", child_id);
+            println!("     State: {}", child_status.state);
+            println!("     Started: {}", child_status.started_at);
+
+            // Check for grandchildren
+            if let Some(grandchild_ids) = child_status.child_workflow_ids {
+                println!("     Grandchildren: {}", grandchild_ids.len());
+
+                for grandchild_id in grandchild_ids {
+                    let grandchild_status = client
+                        .get_workflow_status(&grandchild_id)
+                        .await?;
+
+                    println!("       └─ Grandchild: {}", grandchild_id);
+                    println!("          State: {}", grandchild_status.state);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { OrcherClient } from '@orcher/sdk';
+
+async function monitorWorkflowTree(parentId: string): Promise<void> {
+  const client = new OrcherClient('localhost:50051');
+
+  // Get parent workflow status
+  const parentStatus = await client.getWorkflowStatus(parentId);
+
+  console.log(`Parent Workflow: ${parentId}`);
+  console.log(`  State: ${parentStatus.state}`);
+  console.log(`  Started: ${parentStatus.startedAt}`);
+
+  // Query all child workflows
+  if (parentStatus.childWorkflowIds) {
+    console.log(`\nChild Workflows: ${parentStatus.childWorkflowIds.length}`);
+
+    for (const childId of parentStatus.childWorkflowIds) {
+      const childStatus = await client.getWorkflowStatus(childId);
+
+      console.log(`  └─ Child: ${childId}`);
+      console.log(`     State: ${childStatus.state}`);
+      console.log(`     Started: ${childStatus.startedAt}`);
+
+      // Check for grandchildren
+      if (childStatus.childWorkflowIds) {
+        console.log(`     Grandchildren: ${childStatus.childWorkflowIds.length}`);
+
+        for (const grandchildId of childStatus.childWorkflowIds) {
+          const grandchildStatus = await client.getWorkflowStatus(grandchildId);
+
+          console.log(`       └─ Grandchild: ${grandchildId}`);
+          console.log(`          State: ${grandchildStatus.state}`);
+        }
+      }
+    }
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from orcher import OrcherClient
+
+async def monitor_workflow_tree(parent_id: str) -> None:
+    client = OrcherClient("localhost:50051")
+
+    # Get parent workflow status
+    parent_status = await client.get_workflow_status(parent_id)
+
+    print(f"Parent Workflow: {parent_id}")
+    print(f"  State: {parent_status.state}")
+    print(f"  Started: {parent_status.started_at}")
+
+    # Query all child workflows
+    if parent_status.child_workflow_ids:
+        print(f"\nChild Workflows: {len(parent_status.child_workflow_ids)}")
+
+        for child_id in parent_status.child_workflow_ids:
+            child_status = await client.get_workflow_status(child_id)
+
+            print(f"  └─ Child: {child_id}")
+            print(f"     State: {child_status.state}")
+            print(f"     Started: {child_status.started_at}")
+
+            # Check for grandchildren
+            if child_status.child_workflow_ids:
+                print(f"     Grandchildren: {len(child_status.child_workflow_ids)}")
+
+                for grandchild_id in child_status.child_workflow_ids:
+                    grandchild_status = await client.get_workflow_status(grandchild_id)
+
+                    print(f"       └─ Grandchild: {grandchild_id}")
+                    print(f"          State: {grandchild_status.state}")
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/patterns/parent-child/map-reduce" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Map-Reduce Pattern</h3>
+      <p className="text-sm text-foreground-light">
+        Split large datasets into batches, process in parallel, and aggregate results
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/parent-child/best-practices" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Best Practices & Performance</h3>
+      <p className="text-sm text-foreground-light">
+        Guidelines for designing efficient parent-child hierarchies
+      </p>
+    </div>
+  </Link>
+</div>

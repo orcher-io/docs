@@ -1,0 +1,53 @@
+---
+id: 'distributed-best-practices'
+title: 'Best Practices & Performance'
+sidebar_label: 'Best Practices'
+---
+
+Everything on this page assumes the patterns from this section — [child workflows](/guides/use-cases/distributed-systems/child-workflows), the [saga pattern](/guides/use-cases/distributed-systems/saga-pattern), [event gates](/guides/use-cases/distributed-systems/event-gates), and [multi-service deployment](/guides/use-cases/distributed-systems/multi-service-deployment). Each practice below links back to the pattern that demonstrates it.
+
+## Design Principles
+
+### Make Compensation Actions Idempotent
+
+Compensation tasks might be replayed after a crash. Always check the current state before acting — for example, verify a booking isn't already cancelled before calling the cancellation API. This prevents double-refunds, double-cancellations, and other duplication issues. The [crash-mid-rollback walkthrough](/guides/use-cases/distributed-systems/saga-pattern#design-notes) shows why: the journal skips *completed* compensations on replay, but a compensation that died mid-flight will run again.
+
+### Pass All Required Data to Child Workflows
+
+Don't rely on shared state or external lookups that might return different results on replay. Pass the full input (amount, currency, customer ID) rather than just a reference ID that requires a database lookup. This makes child workflows self-contained and deterministic — see the [determinism rules](/guides/core/workflows/determinism) for the full reasoning.
+
+### Keep Workflow Hierarchies Shallow
+
+Two to three levels (parent, child, grandchild) is the practical limit. Deep hierarchies are harder to debug, slower to recover, and more complex to reason about. If you find yourself nesting deeper, flatten the structure by having the parent orchestrate more steps directly — and remember the [granularity rule](/guides/use-cases/distributed-systems/child-workflows#child-workflow-or-plain-task): not every unit deserves to be a workflow.
+
+### Use Timeouts on Every Event Gate
+
+A workflow waiting for an event with no timeout can wait forever. Always specify a timeout and handle the timeout path — escalate to a different approver, auto-reject, or retry with a different provider. And if you chain gates into an [escalation ladder](/guides/use-cases/distributed-systems/event-gates), make sure the ladder ends in a deliberate terminal default.
+
+### Compensate in Reverse Order — When Order Matters
+
+When rolling back a saga whose steps depend on each other, undo them in the reverse order they were executed — the [compensation stack](/guides/use-cases/distributed-systems/saga-pattern) pops newest-first. When the completed steps are independent, as in an [all-or-nothing fan-out](/guides/use-cases/distributed-systems/multi-service-deployment), run the compensations in parallel instead. The rule is dependency order, not ceremony.
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-8">
+  <Link href="/guides/patterns/saga" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Saga & Compensation Pattern</h3>
+      <p className="text-sm text-foreground-light">
+        Deep dive into saga orchestration strategies, compensation builders, and error handling patterns.
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/patterns/parent-child" className="not-prose group">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Parent-Child Orchestration</h3>
+      <p className="text-sm text-foreground-light">
+        Map-reduce patterns, hierarchical workflows, and strategies for composing reusable workflow components.
+      </p>
+    </div>
+  </Link>
+</div>

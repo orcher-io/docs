@@ -1,0 +1,110 @@
+---
+id: 'overview'
+title: 'Developer Guides'
+description: 'Learn how to build reliable workflows, orchestrate distributed systems, and handle complex business processes with Orcher.'
+sidebar_label: 'Overview'
+---
+
+These guides walk you through everything from your first workflow to production-grade distributed systems. Whether you're building background jobs, data pipelines, or multi-service orchestrations, you'll find patterns and examples in Rust, TypeScript, and Python.
+
+## Getting Started
+
+New to Orcher? Start here to get up and running quickly.
+
+**[Quickstart](/guides/getting-started/quickstart)**
+Install Orcher, write your first workflow, and run it locally in under five minutes.
+
+**[Local Development](/guides/local-development/getting-started)**
+Set up your development environment with hot reload, local server, and debugging tools.
+
+## Core Features
+
+Learn the fundamental building blocks that power every Orcher application.
+
+**[Understanding Orcher](/guides/core/understanding)**
+How Orcher's execution model works — journaling, deterministic replay, and durable state.
+
+**[Building Workflows](/guides/core/workflows)**
+Define workflows that survive crashes, restarts, and deployments. Compose sequential and parallel steps with automatic checkpointing.
+
+**[Defining Tasks](/guides/core/tasks)**
+Write the units of work that workflows execute — with retries, timeouts, and type-safe inputs/outputs.
+
+**[Automatic Journaling](/guides/core/journaling)**
+Understand how Orcher records every step so workflows can resume exactly where they left off.
+
+**[Managing State](/guides/core/state-management)**
+Work with workflow state, side effects, and deterministic execution constraints.
+
+**[Actors](/guides/core/actors)**
+Build stateful, keyed entities with per-instance state and single-writer concurrency. Ideal for shopping carts, counters, sessions, and device twins.
+
+**[Handling Events](/guides/core/events)**
+Send and receive events between workflows, implement human-in-the-loop approvals, and coordinate across services.
+
+**[Dealing with Errors](/guides/core/error-handling)**
+Configure retries, compensation logic, and failure handling strategies for robust applications.
+
+## Developer Patterns
+
+Proven architectural patterns for common distributed systems challenges.
+
+**[Parent-Child Orchestration](/guides/patterns/parent-child)**
+Compose complex workflows from reusable child components. Coordinate distributed services and build hierarchical orchestration trees.
+
+**[Saga & Compensation](/guides/patterns/saga)**
+Implement distributed transactions with the saga pattern and compensating actions. Ensure data consistency across multiple services without distributed locks.
+
+**[Fan-Out/Fan-In](/guides/patterns/fan-out-fan-in)**
+Split work across multiple parallel operations and aggregate results. Batch processing, multi-service calls, and data aggregation.
+
+**[Long-Running Processes](/guides/patterns/long-running)**
+Build workflows that span hours, days, or weeks. Handle human approvals, scheduled operations, and multi-stage business processes.
+
+## Use Cases
+
+End-to-end examples showing how Orcher solves real-world problems.
+
+**[Data Pipelines & ETL](/guides/use-cases/data-processing)**
+Build reliable extract-transform-load pipelines with automatic retries, checkpointing, and parallel processing.
+
+**[Payment Workflows](/guides/use-cases/financial-workflows)**
+Implement payment processing, refunds, and financial reconciliation with saga-based consistency guarantees.
+
+**[Service Orchestration](/guides/use-cases/distributed-systems)**
+Coordinate multiple microservices with child workflows, saga rollback, event gates, and parallel fan-out patterns.
+
+**[Background Jobs](/guides/use-cases/background-tasks)**
+Run email campaigns, scheduled reports, content processing, and other async workloads with batching and rate limiting.
+
+**[Event Processing](/guides/use-cases/event-driven)**
+Build event-driven order pipelines, stateful actors, windowed aggregation, and pattern detection workflows.
+
+## SDK & CLI Reference
+
+**[Rust SDK](/guides/sdk/rust)** · **[TypeScript SDK](/guides/sdk/typescript)** · **[Python SDK](/guides/sdk/python)** · **[CLI Reference](/guides/sdk/cli)**
+
+## Operations
+
+**[Observability](/guides/observability/metrics)** · **[Deployment](/guides/operations/orchestrator/deployment)** · **[Security](/guides/security)** · **[Logging](/guides/observability/logging)**
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 mt-4 not-prose">
+  <Link href="/guides/getting-started/quickstart" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Quickstart</h3>
+    <p className="text-sm text-foreground-light">Build and run your first workflow in minutes.</p>
+  </Link>
+  <Link href="/guides/core/understanding" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Understanding Orcher</h3>
+    <p className="text-sm text-foreground-light">Learn how the execution model works under the hood.</p>
+  </Link>
+  <Link href="/guides/patterns/parent-child" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Developer Patterns</h3>
+    <p className="text-sm text-foreground-light">Proven patterns for distributed systems.</p>
+  </Link>
+  <Link href="/guides/use-cases/distributed-systems" className="block border rounded-lg p-6 hover:border-foreground transition-colors">
+    <h3 className="text-lg font-semibold mb-2">Use Cases</h3>
+    <p className="text-sm text-foreground-light">See how Orcher solves real-world problems.</p>
+  </Link>
+</div>

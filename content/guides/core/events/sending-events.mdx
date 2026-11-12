@@ -1,0 +1,279 @@
+---
+id: 'events-sending'
+title: 'Sending Events & Signals'
+description: 'Learn how to send events between workflows and understand event buffering in Orcher.'
+sidebar_label: 'Sending'
+---
+
+## Workflow-to-Workflow Signals
+
+Workflows coordinate by forwarding events to other workflows. In Python, a workflow can send an event to a child via `child_handle.send_event()` (Rust exposes the same on its child handle). In all languages, external systems and API handlers send events through the client-side workflow handle's `send_event()` / `sendEvent()`. This enables coordination patterns where a parent workflow controls child execution, or sibling workflows notify each other of progress.
+
+> **Note:** In the TypeScript SDK, child-handle event forwarding (`childHandle.sendEvent(...)`) is not yet implemented. Forward events to children via the client handle instead, or use Rust/Python for in-workflow child signaling.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+use orcher::prelude::*;
+use anyhow::Result;
+use std::time::Duration;
+
+#[task]
+pub async fn expedited_fulfillment(_ctx: TaskContext, order_id: String) -> Result<()> { /* ... */ }
+
+#[task]
+pub async fn standard_fulfillment(_ctx: TaskContext, order_id: String) -> Result<()> { /* ... */ }
+
+// Child workflow that can be expedited via event
+#[workflow]
+pub async fn fulfillment_workflow(
+    ctx: WorkflowContext,
+    order_id: String,
+) -> Result<FulfillmentResult> {
+    // Check for expedite event (5 minute window)
+    let expedite: Option<bool> = ctx
+        .wait_for_event_with_timeout("expedite", Duration::from_secs(300))
+        .await?;
+
+    if expedite.unwrap_or(false) {
+        ctx.execute_task(expedited_fulfillment, order_id).await?;
+    } else {
+        ctx.execute_task(standard_fulfillment, order_id).await?;
+    }
+
+    Ok(FulfillmentResult { completed: true })
+}
+
+// Parent workflow that controls the child
+#[workflow]
+pub async fn parent_workflow(
+    ctx: WorkflowContext,
+    order_id: String,
+) -> Result<ParentResult> {
+    // Start child workflow
+    let child_handle = ctx
+        .start_child_workflow("fulfillment_workflow", order_id.clone())
+        .await?;
+
+    // Wait for an external expedite request (1 minute window)
+    let expedite: Option<bool> = ctx
+        .wait_for_event_with_timeout("expedite_request", Duration::from_secs(60))
+        .await?;
+
+    if expedite.unwrap_or(false) {
+        // Forward the expedite signal to the child workflow
+        child_handle.send_event("expedite", true).await?;
+    }
+
+    // Wait for child to complete
+    let result = child_handle.result::<FulfillmentResult>().await?;
+
+    Ok(ParentResult {
+        order_id,
+        expedited: expedite.unwrap_or(false),
+        child_completed: result.completed,
+    })
+}
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+import { Workflow, Tasks, Task, WorkflowContext, TaskContext, Duration, createTaskRefs } from '@orcher/sdk';
+
+@Tasks({ taskQueue: 'fulfillment' })
+class FulfillmentTasks {
+  @Task()
+  async expeditedFulfillment(ctx: TaskContext, orderId: string): Promise<void> { /* ... */ }
+
+  @Task()
+  async standardFulfillment(ctx: TaskContext, orderId: string): Promise<void> { /* ... */ }
+}
+
+const tasks = createTaskRefs(FulfillmentTasks);
+
+// Child workflow that can be expedited via event
+@Workflow()
+class FulfillmentWorkflow {
+  async run(ctx: WorkflowContext, orderId: string): Promise<FulfillmentResult> {
+    // Check for expedite event (5 minute window)
+    const expedite = await ctx.waitForEventWithTimeout<boolean>('expedite', Duration.fromMinutes(5));
+
+    if (expedite) {
+      await ctx.executeTask(tasks.expeditedFulfillment, orderId);
+    } else {
+      await ctx.executeTask(tasks.standardFulfillment, orderId);
+    }
+
+    return { completed: true };
+  }
+}
+
+// Parent workflow that controls the child
+@Workflow()
+class ParentWorkflow {
+  async run(ctx: WorkflowContext, orderId: string): Promise<ParentResult> {
+    // Start child workflow
+    const childHandle = await ctx.startChildWorkflow('fulfillmentWorkflow', orderId);
+
+    // Wait for an external expedite request (1 minute window)
+    const expedite = await ctx.waitForEventWithTimeout<boolean>('expedite_request', Duration.fromMinutes(1));
+
+    if (expedite) {
+      // NOTE: child-handle event forwarding is not yet implemented in the
+      // TypeScript SDK (childHandle.sendEvent throws "not implemented").
+      // Forward events to the child via the client handle instead, or use
+      // the Rust/Python SDK for in-workflow child signaling.
+    }
+
+    // Wait for child to complete
+    const result = await childHandle.result<FulfillmentResult>();
+
+    return {
+      orderId,
+      expedited: expedite || false,
+      childCompleted: result.completed,
+    };
+  }
+}
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+from datetime import timedelta
+from dataclasses import dataclass
+from orcher import workflow, task, WorkflowContext, TaskContext
+
+
+@dataclass
+class FulfillmentResult:
+    completed: bool
+
+
+@dataclass
+class ParentResult:
+    order_id: str
+    expedited: bool
+    child_completed: bool
+
+
+@task
+async def expedited_fulfillment(ctx: TaskContext, order_id: str) -> None:
+    ...
+
+@task
+async def standard_fulfillment(ctx: TaskContext, order_id: str) -> None:
+    ...
+
+
+# Child workflow that can be expedited via event
+@workflow
+async def fulfillment_workflow(ctx: WorkflowContext, order_id: str) -> FulfillmentResult:
+    # Check for expedite event (5 minute window)
+    expedite = await ctx.wait_for_event_with_timeout("expedite", timedelta(minutes=5))
+
+    if expedite:
+        await ctx.execute_task(expedited_fulfillment, arg=order_id)
+    else:
+        await ctx.execute_task(standard_fulfillment, arg=order_id)
+
+    return FulfillmentResult(completed=True)
+
+
+# Parent workflow that controls the child
+@workflow
+async def parent_workflow(ctx: WorkflowContext, order_id: str) -> ParentResult:
+    # Start child workflow
+    child_handle = await ctx.start_child_workflow("fulfillment_workflow", order_id)
+
+    # Wait for an external expedite request (1 minute window)
+    expedite = await ctx.wait_for_event_with_timeout(
+        "expedite_request", timedelta(minutes=1)
+    )
+
+    if expedite:
+        # Forward the expedite signal to the child workflow
+        await child_handle.send_event("expedite", True)
+
+    # Wait for child to complete
+    result = await child_handle.result()
+
+    return ParentResult(
+        order_id=order_id,
+        expedited=bool(expedite),
+        child_completed=result["completed"],
+    )
+```
+
+</TabPanel>
+
+</Tabs>
+
+---
+
+## Event Buffering
+
+Events are automatically buffered if they arrive before the workflow calls `wait_for_event()`. This means the order of "send" and "wait" doesn't matter — the event is never lost. On replay, buffered events are replayed from the journal.
+
+<div className="not-prose my-8 max-w-2xl mx-auto space-y-3">
+  <div className="border">
+    <div className="bg-surface-75 px-3 py-2 border-b text-[10px] font-mono uppercase tracking-wide text-foreground-muted">Scenario 1 · event arrives before wait</div>
+    <div className="p-3 space-y-1 text-[11px] text-foreground-muted">
+      <div><span className="font-mono text-foreground">T0</span> · client sends <span className="font-mono">"approve"</span> → buffered in journal</div>
+      <div><span className="font-mono text-foreground">T1</span> · workflow calls <span className="font-mono">wait_for_event()</span> → returns immediately from buffer</div>
+    </div>
+  </div>
+  <div className="border">
+    <div className="bg-surface-75 px-3 py-2 border-b text-[10px] font-mono uppercase tracking-wide text-foreground-muted">Scenario 2 · event arrives after wait</div>
+    <div className="p-3 space-y-1 text-[11px] text-foreground-muted">
+      <div><span className="font-mono text-foreground">T0</span> · workflow calls <span className="font-mono">wait_for_event()</span> → suspends, claim released</div>
+      <div><span className="font-mono text-foreground">T1</span> · client sends <span className="font-mono">"approve"</span> → workflow re-queued, resumes</div>
+    </div>
+  </div>
+  <div className="border">
+    <div className="bg-surface-75 px-3 py-2 border-b text-[10px] font-mono uppercase tracking-wide text-foreground-muted">Scenario 3 · multiple events of the same name</div>
+    <div className="p-3 space-y-1 text-[11px] text-foreground-muted">
+      <div><span className="font-mono text-foreground">T0</span> · client sends event #1 → buffered</div>
+      <div><span className="font-mono text-foreground">T1</span> · client sends event #2 → buffered</div>
+      <div><span className="font-mono text-foreground">T2</span> · <span className="font-mono">wait_for_event()</span> → returns event #1</div>
+      <div><span className="font-mono text-foreground">T3</span> · <span className="font-mono">wait_for_event()</span> again → returns event #2</div>
+    </div>
+  </div>
+</div>
+
+---
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/events/receiving-events" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Receiving Events</h3>
+      <p className="text-sm text-foreground-light">
+        Wait for events, use timeouts, and handle multi-step approval chains
+      </p>
+    </div>
+  </Link>
+
+  <Link href="/guides/core/events/patterns" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Event Patterns</h3>
+      <p className="text-sm text-foreground-light">
+        Human approval, webhook callbacks, and dynamic workflow control
+      </p>
+    </div>
+  </Link>
+</div>

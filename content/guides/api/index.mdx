@@ -1,0 +1,85 @@
+---
+id: api
+title: REST API
+description: Complete REST API reference for the Orcher orchestration platform
+sidebar_label: Overview
+---
+
+The Orcher REST API provides an HTTP/JSON interface for managing workflows, tasks, schedules, and system operations. It is served by the orchestrator itself, on the same process that serves the gRPC API.
+
+## Overview
+
+The REST API is the primary interface for interacting with the Orcher orchestration platform from external applications, CLIs, and integrations.
+
+**Base URL**: `http://localhost:8080/api/v1`
+
+**API Version**: `v1` (current stable)
+
+### Key Features
+
+- **RESTful Design**: Standard HTTP methods (GET, POST, PUT, DELETE)
+- **JSON Format**: All requests and responses use JSON
+- **Authentication**: One authentication layer shared with the gRPC API (API keys, OIDC)
+- **Versioning**: Versioned under `/api/v1`
+
+### Architecture
+
+There is no separate API service: the orchestrator is one process with two listeners.
+
+**HTTP listener (`HTTP_BIND_ADDR` / `--http-addr`, default `127.0.0.1:8080`)**
+
+- REST API under `/api/v1`
+- Health checks: `/health`, `/health/ready`, `/health/live`
+- Prometheus metrics: `/metrics`
+
+**gRPC listener (`GRPC_BIND_ADDR` / `--grpc-addr`, default `127.0.0.1:50051`)**
+
+- Used by SDK clients, workers and the CLI
+- Workers long-poll this listener to pull workflow and task work
+
+Both listeners share one authentication layer, and both read and write the same PostgreSQL database. To scale the REST API, run several orchestrator replicas behind a load balancer — every orchestrator serves REST.
+
+---
+
+## Authentication
+
+REST requests go through the same authentication layer as gRPC, configured in the orchestrator's `[security]` section (`auth_mode` = `none`, `api-key`, `oidc`, `mtls` or `api-key-and-mtls`). When `auth_mode` requires a client certificate (`mtls`, `api-key-and-mtls`), the orchestrator serves no REST API. Include your credential in the `Authorization` header:
+
+```bash
+GET /api/v1/workflows
+Authorization: Bearer eyJhbGciOiJIUzI1NiIs...
+```
+
+API keys are managed at `/api/v1/api-keys` (scope `api-keys:manage`) or with `orcher api-key create|list|get|revoke`; create the first one with `orchestrator api-key create --name admin --scope '*'`. Scopes: `workflows:read`, `workflows:write`, `workers:run`, `namespaces:manage`, `api-keys:manage`, `*`. See [Authentication & OAuth](/guides/api/authentication) for more.
+
+---
+
+## Namespaces
+
+All workflows and tasks execute within a namespace, providing logical isolation for multi-tenancy and environment separation. The default namespace is `default`. See [Namespaces](/guides/api/namespaces) for details.
+
+```bash
+POST /api/v1/workflows/execute
+{
+  "workflowName": "order-processor",
+  "namespace": "production",
+  ...
+}
+```
+
+---
+
+## Next Steps
+
+- [Authentication & OAuth](/guides/api/authentication) — JWT, OAuth 2.0, and Device Flow
+- [Namespaces](/guides/api/namespaces) — Multi-tenancy and environment isolation
+- [Workflow Endpoints](/guides/api/workflows) — Execute, monitor, and manage workflow executions
+- [Schedule Endpoints](/guides/api/schedules) — Cron-based recurring workflow executions
+- [Task Endpoints](/guides/api/tasks) — Submit and track tasks
+- [Users](/guides/api/users) — User account management
+- [Organizations](/guides/api/organizations) — Teams, members, and invitations
+- [Registry](/guides/api/registry) — Workflow registration and deployment
+- [Health & System](/guides/api/health) — Health checks and probes
+- [Version & System](/guides/api/system) — Version info and system status
+- [Errors & Limits](/guides/api/errors-and-limits) — Error handling, rate limiting, and pagination
+- [Best Practices & Examples](/guides/api/best-practices) — Usage patterns and code examples

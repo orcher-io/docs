@@ -1,0 +1,12 @@
+# Shown in content/guides/getting-started/quickstart.mdx. Mirrors rust/ in
+# https://github.com/orcher-io/quickstart.
+[package]
+name = "sample-quickstart"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+orcher-sdk.workspace = true
+tokio.workspace = true
+uuid.workspace = true
