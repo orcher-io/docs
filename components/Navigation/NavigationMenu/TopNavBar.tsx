@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 import { Command, Menu, Search } from "lucide-react";
 import dynamic from "next/dynamic";
 import Image from "next/image";

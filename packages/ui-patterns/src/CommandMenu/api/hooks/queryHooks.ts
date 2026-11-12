@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 import { useSnapshot } from 'valtio'
 
 import { useCommandContext } from '../../internal/Context'

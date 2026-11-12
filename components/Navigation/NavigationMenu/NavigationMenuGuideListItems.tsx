@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 import * as Accordion from '@radix-ui/react-accordion'
 import { usePathname } from 'next/navigation'
 import { useTheme } from 'next-themes'

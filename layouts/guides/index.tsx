@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 import 'katex/dist/katex.min.css'
 import type { ReactNode, PropsWithChildren } from 'react'
 

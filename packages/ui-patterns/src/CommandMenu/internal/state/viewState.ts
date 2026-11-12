@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 import { proxy } from 'valtio'
 import { type IViewState, type DialogSize, type ITouchHandlers } from './viewState.types'
 

@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 import '../styles/main.scss'
 import '../styles/new-docs.scss'
 

@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 'use client'
 
 // based on https://github.com/Andarist/use-constant

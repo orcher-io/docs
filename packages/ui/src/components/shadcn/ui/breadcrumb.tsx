@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 import { Slot } from '@radix-ui/react-slot'
 import { ChevronRightIcon } from 'lucide-react'
 import * as React from 'react'

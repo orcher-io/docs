@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 'use client'
 import * as React from 'react'
 import { cn } from '../../lib/utils/cn'

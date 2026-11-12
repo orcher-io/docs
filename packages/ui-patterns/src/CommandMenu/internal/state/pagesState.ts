@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 import { type ReactNode } from 'react'
 import { proxy } from 'valtio'
 import { type ICommandSection } from '../types'

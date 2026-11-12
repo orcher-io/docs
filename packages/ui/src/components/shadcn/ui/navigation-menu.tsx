@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 'use client'
 
 import * as NavigationMenuPrimitive from '@radix-ui/react-navigation-menu'

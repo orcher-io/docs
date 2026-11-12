@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 export { CommandHeader } from './api/CommandHeader'
 export { CommandInput } from './api/CommandInput'
 export { CommandList } from './api/CommandList'

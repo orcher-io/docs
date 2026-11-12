@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 import 'server-only'
 import { type Metadata, type ResolvingMetadata } from 'next'
 import { notFound } from 'next/navigation'

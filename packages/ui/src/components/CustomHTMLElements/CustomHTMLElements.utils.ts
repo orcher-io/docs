@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 // Check if heading has custom anchor first, before forming the anchor based on the title
 export const getAnchor = (text: any, { id }: { id?: string } = {}): string | undefined => {
   if (id) {

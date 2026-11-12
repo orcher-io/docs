@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 import { proxy } from 'valtio'
 import { type ICommandSection, type ICommandsState, type CommandOptions } from '../types'
 import { section$new } from '../CommandSection'

@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 import { type PropsWithChildren } from 'react'
 
 import HomePageCover from '~/components/HomePageCover'

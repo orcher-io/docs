@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 import * as TocPrimitive from './toc-primitive'
 import { ScrollProvider, TOCItem, type AnchorProviderProps, AnchorProvider } from './toc-primitive'
 import { Toc, TOCScrollArea, TOCItems } from './toc'

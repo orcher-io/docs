@@ -24,6 +24,10 @@ from that work and have been modified by The Orcher Authors:
   packages/ui/
   packages/ui-patterns/
 
+Each source file among them that has a counterpart at the same path in the
+upstream repository carries a one-line notice saying it was derived from
+that work and modified; this notice covers the rest.
+
 The upstream package manifests of packages/common, packages/config,
 packages/ui and packages/ui-patterns carry a "license": "MIT" field; the
 upstream repository as a whole is licensed under the Apache License,

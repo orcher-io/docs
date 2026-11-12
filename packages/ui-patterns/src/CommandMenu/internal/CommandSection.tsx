@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 import { ICommandSection } from './types'
 
 const toSectionId = (str: string) => str.toLowerCase().replace(/\s+/g, '-')

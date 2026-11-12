@@ -1,3 +1,4 @@
+// Derived from https://github.com/supabase/supabase; modified by The Orcher Authors. See NOTICE.
 'use client'
 
 import { createContext, forwardRef, useContext, useMemo, useRef } from 'react'
