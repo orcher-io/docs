@@ -142,13 +142,22 @@ function SdkCard({
   )
 }
 
-function IndexRow({ href, title }: { href: string; title: string }) {
+function IndexRow({
+  href,
+  title,
+  description,
+}: {
+  href: string
+  title: string
+  description: string
+}) {
   return (
     <Link href={href} className="no-underline group">
-      <div className="bg-background px-5 py-3.5 flex items-center gap-4 hover:bg-surface-75 transition-colors">
-        <span className="text-sm text-foreground-light group-hover:text-foreground transition-colors">
-          {title}
-        </span>
+      <div className="bg-background border border-default px-5 py-4 flex items-center gap-4 hover:border-foreground-muted hover:bg-surface-75 transition-colors">
+        <div className="flex flex-col gap-1 min-w-0">
+          <span className="text-sm font-medium text-foreground">{title}</span>
+          <span className="text-xs text-foreground-light leading-relaxed">{description}</span>
+        </div>
         <ArrowRight
           size={12}
           className="ml-auto text-foreground-muted opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
@@ -165,7 +174,7 @@ function IndexList({
 }: {
   label: string
   id: string
-  items: { title: string; href: string }[]
+  items: { title: string; href: string; description: string }[]
 }) {
   return (
     <div>
@@ -175,7 +184,7 @@ function IndexList({
       >
         {label}
       </h3>
-      <div className="flex flex-col gap-px bg-border-default border border-default">
+      <div className="flex flex-col gap-3">
         {items.map((item) => (
           <IndexRow key={item.title} {...item} />
         ))}
@@ -321,22 +330,22 @@ const HomePage = () => (
               label="Workflow patterns"
               id="workflow-patterns"
               items={[
-                { title: 'Saga & Compensation', href: '/guides/patterns/saga' },
-                { title: 'Fan-Out / Fan-In', href: '/guides/patterns/fan-out-fan-in' },
-                { title: 'Parent-Child Workflows', href: '/guides/patterns/parent-child' },
-                { title: 'Long-Running Processes', href: '/guides/patterns/long-running' },
-                { title: 'Error & Retry Handling', href: '/guides/core/error-handling' },
+                { title: 'Saga & Compensation', href: '/guides/patterns/saga', description: 'Undo the steps already done when a later one fails.' },
+                { title: 'Fan-Out / Fan-In', href: '/guides/patterns/fan-out-fan-in', description: 'Run work in parallel, then gather the results.' },
+                { title: 'Parent-Child Workflows', href: '/guides/patterns/parent-child', description: 'Split a large workflow into child workflows it starts and awaits.' },
+                { title: 'Long-Running Processes', href: '/guides/patterns/long-running', description: 'Runs that span hours or weeks, with durable timers and human approvals.' },
+                { title: 'Error & Retry Handling', href: '/guides/core/error-handling', description: 'Retry policies, timeouts, and what a workflow sees when a task fails.' },
               ]}
             />
             <IndexList
               label="Use cases"
               id="use-cases"
               items={[
-                { title: 'Financial Workflows', href: '/guides/use-cases/financial-workflows' },
-                { title: 'Data Processing & ETL', href: '/guides/use-cases/data-processing' },
-                { title: 'Event-Driven Systems', href: '/guides/use-cases/event-driven' },
-                { title: 'Background Tasks', href: '/guides/use-cases/background-tasks' },
-                { title: 'Distributed Systems', href: '/guides/use-cases/distributed-systems' },
+                { title: 'Financial Workflows', href: '/guides/use-cases/financial-workflows', description: 'Payments, refunds and reconciliation that must not repeat a charge.' },
+                { title: 'Data Processing & ETL', href: '/guides/use-cases/data-processing', description: 'Pipelines that resume from the last completed batch.' },
+                { title: 'Event-Driven Systems', href: '/guides/use-cases/event-driven', description: 'React to events, and keep per-entity state with actors.' },
+                { title: 'Background Tasks', href: '/guides/use-cases/background-tasks', description: 'Scheduled jobs and asynchronous work, with retries.' },
+                { title: 'Distributed Systems', href: '/guides/use-cases/distributed-systems', description: 'Coordinate calls across services, and compensate when one fails.' },
               ]}
             />
           </div>
