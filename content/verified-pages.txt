@@ -1,12 +1,18 @@
-# Guide pages whose code is fully checked. On these pages
-# scripts/check-samples.sh FAILS on any Rust/TypeScript/Python fence not taken
-# from samples/ via <$CodeSample> (and not opted out with a reason), and on any
-# `orcher ...` command in a shell block that the CLI does not accept. Every
-# other page is only counted.
+# Guide pages verified against the current release. A page is listed once it
+# has been checked against the engine and SDKs it documents, and all its code
+# is taken from samples/ (scripts/check-fences.mjs and scripts/check-samples.sh
+# FAIL on any Rust/TypeScript/Python fence not included via <$CodeSample> and
+# not opted out with a reason, and on any `orcher ...` command the CLI does not
+# accept). Every other page is only counted.
 #
-# Add a page here in the same change that converts it. When every page under
-# content/guides is listed, CI switches to `check-samples.sh --strict` and this
-# file can go.
+# The list also decides what the site publishes: only these pages appear in the
+# navigation and in search. The others still build, so links to them work, but
+# they carry a "not yet verified" notice and ask search engines not to index
+# them.
+#
+# Add a page here in the same change that verifies it. When every page under
+# content/guides is listed, CI switches to `check-samples.sh --strict` and the
+# notice can go.
 content/guides/getting-started/quickstart.mdx
 content/guides/sdk/python/actors.mdx
 content/guides/sdk/python/client.mdx

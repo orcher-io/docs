@@ -26,7 +26,7 @@
  *              from $ORCHER_CLI (default `orcher`; may be several words, e.g.
  *              `uvx --from orcher==0.1.1 orcher`).
  *
- * Enforcement: findings on a page listed in samples/checked-pages.txt fail the
+ * Enforcement: findings on a page listed in content/verified-pages.txt fail the
  * run; findings elsewhere are counted and reported only. --strict enforces
  * every page. Once every page is listed, CI flips to --strict.
  *
@@ -42,7 +42,7 @@ import { findSampleDirectives, resolveSample } from '../lib/samples.mjs'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const CONTENT = join(ROOT, 'content', 'guides')
 const SAMPLES = join(ROOT, 'samples')
-const CHECKED_PAGES = join(SAMPLES, 'checked-pages.txt')
+const CHECKED_PAGES = join(ROOT, 'content', 'verified-pages.txt')
 
 const args = process.argv.slice(2)
 const known = new Set(['--strict', '--cli', '--verbose', '--help'])
@@ -103,7 +103,7 @@ function readCheckedPages() {
     const line = raw.replace(/#.*/, '').trim()
     if (!line) continue
     if (!existsSync(join(ROOT, line))) {
-      console.error(`samples/checked-pages.txt: ${line} does not exist`)
+      console.error(`content/verified-pages.txt: ${line} does not exist`)
       bad = true
     }
     pages.add(line)
@@ -239,7 +239,7 @@ function checkFences() {
 
   const sum = (/** @type {Record<string, number>} */ o) => Object.values(o).reduce((a, b) => a + b, 0)
   console.log('')
-  console.log(`fence check: ${pages.length} pages, ${STRICT ? 'all enforced (--strict)' : `${checkedPages.size} enforced (samples/checked-pages.txt)`}`)
+  console.log(`fence check: ${pages.length} pages, ${STRICT ? 'all enforced (--strict)' : `${checkedPages.size} enforced (content/verified-pages.txt)`}`)
   console.log(
     `  included from samples/: ${sum(totals.included)}  (rust ${totals.included.rust}, typescript ${totals.included.typescript}, python ${totals.included.python}, other ${totals.included.other})`
   )

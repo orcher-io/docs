@@ -20,6 +20,12 @@ const nextConfig = {
     "/**": ["./content/**/*", "./samples/**/*.{rs,ts,py,toml,json}"],
   },
   transpilePackages: ["ui", "ui-patterns", "common", "icons", "next-mdx-remote"],
+  webpack(config) {
+    // content/verified-pages.txt decides what the site publishes; server and
+    // client code import it as text (lib/verified-pages.ts).
+    config.module.rules.push({ test: /verified-pages\.txt$/, type: "asset/source" });
+    return config;
+  },
   async headers() {
     return [
       {

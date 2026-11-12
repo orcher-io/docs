@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Check the code shown in the guides against the published SDKs and CLI.
 #
-#   scripts/check-samples.sh            enforce pages in samples/checked-pages.txt,
+#   scripts/check-samples.sh            enforce pages in content/verified-pages.txt,
 #                                       count everything else
 #   scripts/check-samples.sh --strict   enforce every page under content/guides
 #

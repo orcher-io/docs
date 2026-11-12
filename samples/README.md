@@ -57,7 +57,8 @@ real source file and is compiled against the **published** SDKs by
 4. **Run the check**: `scripts/check-samples.sh`.
 
 5. When a page has no hand-typed Rust/TS/Python fences left, **add it to
-   `checked-pages.txt`** (see below).
+   `content/verified-pages.txt`** once it is also checked against the current
+   release (see below).
 
 ## Fences that should not compile
 
@@ -77,21 +78,24 @@ async fn charge(order_id: String) -> Result<String> { ... }
 Shell, TOML, YAML and other fences are not compiled and need nothing. Shell
 blocks are still read for `orcher ...` commands.
 
-## `checked-pages.txt`: turning enforcement on page by page
+## `content/verified-pages.txt`: turning enforcement on page by page
 
 Most guide pages still have hand-typed samples, so the check runs in two
 modes:
 
-- **Pages listed in `checked-pages.txt`** are enforced: any Rust/TS/Python
+- **Pages listed in `content/verified-pages.txt`** are enforced: any Rust/TS/Python
   fence not taken from `samples/` (and not opted out with a reason), or any
   `orcher ...` command the CLI rejects, fails the run.
 - **Every other page** is counted and reported only.
 
 A broken `<$CodeSample>` (missing file or region) fails on every page.
 
-Add a page to the list in the change that converts it. When every page under
-`content/guides` is listed, CI switches to `scripts/check-samples.sh --strict`,
-which enforces every page, and the list can be deleted.
+Add a page to the list in the change that converts it and checks it against the
+current release. The list also decides what the site publishes: only listed
+pages appear in the navigation and in search; the others build with a "not yet
+verified" notice and are not indexed. When every page under `content/guides` is
+listed, CI switches to `scripts/check-samples.sh --strict`, which enforces every
+page, and the notice can go.
 
 `node scripts/check-fences.mjs --verbose` (or `--cli --verbose`) lists every
 unchecked fence or CLI mismatch on the report-only pages.
@@ -100,7 +104,7 @@ unchecked fence or CLI mismatch on the report-only pages.
 
 ```bash
 scripts/check-samples.sh            # what CI runs
-scripts/check-samples.sh --strict   # as if every page were in checked-pages.txt
+scripts/check-samples.sh --strict   # as if every page were in content/verified-pages.txt
 ```
 
 It needs, on `PATH`: Node 22+ and npm, `cargo` (stable Rust; with rustup it may

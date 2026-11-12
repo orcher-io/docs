@@ -3,6 +3,7 @@ import { type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 
 import { cn } from 'ui'
+import { Admonition } from 'ui-patterns/admonition'
 
 import Breadcrumbs from '~/components/Breadcrumbs'
 import GuidesTableOfContents from '~/components/GuidesTableOfContents'
@@ -54,13 +55,22 @@ interface BaseGuideTemplateProps {
   children?: ReactNode
   editLink: EditLink
   mdxOptions?: SerializeOptions
+  /** False for a page content/verified-pages.txt doesn't list yet. */
+  verified?: boolean
 }
 
 type GuideTemplateProps =
   | WithRequired<BaseGuideTemplateProps, 'children'>
   | WithRequired<BaseGuideTemplateProps, 'content'>
 
-const GuideTemplate = ({ meta, content, children, editLink, mdxOptions }: GuideTemplateProps) => {
+const GuideTemplate = ({
+  meta,
+  content,
+  children,
+  editLink,
+  mdxOptions,
+  verified,
+}: GuideTemplateProps) => {
   const hideToc = meta?.hideToc || meta?.hide_table_of_contents
 
   return (
@@ -88,6 +98,13 @@ const GuideTemplate = ({ meta, content, children, editLink, mdxOptions }: GuideT
               </h2>
             )}
             <hr className="not-prose border-t-0 border-b my-8" />
+
+            {verified === false && (
+              <Admonition type="caution" title="Not yet verified" className="not-prose mb-8">
+                This page has not yet been checked against the current Orcher release, so parts
+                of it may be out of date. The pages in the navigation have been.
+              </Admonition>
+            )}
 
             {content && (
               <MDXRemoteBase source={content} options={mdxOptions} />

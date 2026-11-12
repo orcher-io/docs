@@ -9,6 +9,7 @@ import { pluckPromise } from '~/features/helpers.fn'
 import type { OrPromise } from '~/features/helpers.types'
 import { BASE_PATH, GITHUB_DOCS_REPO } from '~/lib/constants'
 import { DOCS_DIRECTORY, GUIDES_DIRECTORY, isValidGuideFrontmatter, type GuideFrontmatter } from '~/lib/docs'
+import { VERIFIED_FILES } from '~/lib/verified-pages'
 import { newEditLink } from './GuidesMdx.template'
 
 const PUBLISHED_SECTIONS = [
@@ -58,15 +59,16 @@ const getGuidesMarkdown = async (slug: string[]) => {
       throw Error(`Type of frontmatter is not valid for path: ${fullPath}`)
     }
 
-    const editLink = newEditLink(
-      `${GITHUB_DOCS_REPO}/edit/main/${relative(DOCS_DIRECTORY, resolvedPath).split(sep).join('/')}`
-    )
+    const repoPath = relative(DOCS_DIRECTORY, resolvedPath).split(sep).join('/')
+    const editLink = newEditLink(`${GITHUB_DOCS_REPO}/edit/main/${repoPath}`)
 
     return {
       pathname: `/guides/${slug.join('/')}` satisfies `/${string}`,
       meta,
       content,
       editLink,
+      // Listed in content/verified-pages.txt: checked against the current release.
+      verified: VERIFIED_FILES.has(repoPath),
     }
   } catch (error: unknown) {
     console.log('Could not read Markdown at path: %s', fullPath)
@@ -96,11 +98,13 @@ const genGuidesStaticParams = (section: string) => async () => {
 
 const genGuideMeta =
   <Params,>(
-    generate: (params: Params) => OrPromise<{ meta: GuideFrontmatter; pathname: `/${string}` }>
+    generate: (
+      params: Params
+    ) => OrPromise<{ meta: GuideFrontmatter; pathname: `/${string}`; verified?: boolean }>
   ) =>
   async (props: { params: Promise<Params> }, parent: ResolvingMetadata): Promise<Metadata> => {
     const params = await props.params
-    const [parentAlternates, parentOg, { meta, pathname }] = await Promise.all([
+    const [parentAlternates, parentOg, { meta, pathname, verified }] = await Promise.all([
       pluckPromise(parent, 'alternates'),
       pluckPromise(parent, 'openGraph'),
       generate(params),
@@ -109,6 +113,9 @@ const genGuideMeta =
     return {
       title: `${meta.title} | Orcher Docs`,
       description: meta.description || meta.subtitle,
+      // A page not yet checked against the current release stays out of search
+      // engines; its links are still followed.
+      ...(verified === false ? { robots: { index: false, follow: true } } : {}),
       // @ts-ignore
       alternates: {
         ...parentAlternates,

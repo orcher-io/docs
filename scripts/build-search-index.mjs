@@ -1,17 +1,18 @@
 #!/usr/bin/env node
 // @ts-check
 /**
- * Build the client-side search index from every routed guide.
+ * Build the client-side search index from the published guides: the routed
+ * pages content/verified-pages.txt lists.
  *
  * Writes public/search/index.json, which the search box fetches. Runs before
  * `next dev` and `next build` (see package.json), so the index always matches
  * the pages being served; the output is git-ignored.
  */
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, relative, sep } from 'node:path'
 import matter from 'gray-matter'
 
-import { ROOT, guidePages, headingsOf, stripFences } from './lib/guides.mjs'
+import { ROOT, guidePages, headingsOf, stripFences, verifiedFiles } from './lib/guides.mjs'
 import { expandCodeSamples } from '../lib/samples.mjs'
 
 const OUT = join(ROOT, 'public', 'search', 'index.json')
@@ -37,8 +38,10 @@ function toText(body) {
     .trim()
 }
 
+const published = verifiedFiles()
 const documents = []
 for (const [route, file] of [...guidePages()].sort(([a], [b]) => a.localeCompare(b))) {
+  if (!published.has(relative(ROOT, file).split(sep).join('/'))) continue
   const { data, content } = matter(readFileSync(file, 'utf-8'))
   const body = expandCodeSamples(content)
   documents.push({

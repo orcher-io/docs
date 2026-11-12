@@ -1,6 +1,7 @@
 import type { GlobalMenuItems, NavMenuConstant } from '../Navigation.types'
+import { publishedGlobalMenu, publishedMenu } from './published'
 
-export const GLOBAL_MENU_ITEMS: GlobalMenuItems = [
+const all_GLOBAL_MENU_ITEMS: GlobalMenuItems = [
   [
     {
       label: 'Getting Started',
@@ -268,7 +269,7 @@ export const GLOBAL_MENU_ITEMS: GlobalMenuItems = [
   ],
 ]
 
-export const gettingstarted: NavMenuConstant = {
+const all_gettingstarted: NavMenuConstant = {
   icon: 'getting-started',
   title: 'Getting Started',
   url: '/guides/getting-started',
@@ -383,7 +384,7 @@ export const gettingstarted: NavMenuConstant = {
   ],
 }
 
-export const developerGuides: NavMenuConstant = {
+const all_developerGuides: NavMenuConstant = {
   icon: 'edge-functions',
   title: 'Guides',
   url: '/guides',
@@ -531,7 +532,7 @@ export const developerGuides: NavMenuConstant = {
   ],
 }
 
-export const sdkDocumentation: NavMenuConstant = {
+const all_sdkDocumentation: NavMenuConstant = {
   icon: 'reference-javascript',
   title: 'Reference',
   url: '/guides/sdk',
@@ -627,7 +628,7 @@ export const sdkDocumentation: NavMenuConstant = {
   ],
 }
 
-export const operations: NavMenuConstant = {
+const all_operations: NavMenuConstant = {
   icon: 'platform',
   title: 'Operations',
   url: '/guides/operations/orchestrator',
@@ -772,7 +773,7 @@ export const operations: NavMenuConstant = {
   ],
 }
 
-export const local_development: NavMenuConstant = {
+const all_local_development: NavMenuConstant = {
   icon: 'dev-cli',
   title: 'Local Dev / CLI',
   url: '/guides/local-development',
@@ -809,3 +810,11 @@ export const local_development: NavMenuConstant = {
   ],
 }
 
+// What the site shows: every menu without the pages content/verified-pages.txt
+// doesn't list yet.
+export const GLOBAL_MENU_ITEMS = publishedGlobalMenu(all_GLOBAL_MENU_ITEMS)
+export const gettingstarted = publishedMenu(all_gettingstarted)
+export const developerGuides = publishedMenu(all_developerGuides)
+export const sdkDocumentation = publishedMenu(all_sdkDocumentation)
+export const operations = publishedMenu(all_operations)
+export const local_development = publishedMenu(all_local_development)

@@ -4,11 +4,27 @@
  * guide pages exist and at what route, how fenced code is skipped, and the
  * heading anchors the site renders.
  */
-import { existsSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 
 export const ROOT = process.cwd()
 export const GUIDES = join(ROOT, 'content', 'guides')
+
+/**
+ * The pages content/verified-pages.txt lists, as repo-relative paths. Only
+ * these are published in the navigation and search (lib/verified-pages.ts
+ * reads the same file for the site).
+ *
+ * @returns {Set<string>}
+ */
+export function verifiedFiles() {
+  return new Set(
+    readFileSync(join(ROOT, 'content', 'verified-pages.txt'), 'utf-8')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith('#'))
+  )
+}
 
 /** @param {string} dir @returns {string[]} */
 export function walk(dir) {

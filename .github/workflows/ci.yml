@@ -47,6 +47,6 @@ jobs:
         with:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@v6
-      # Enforces pages listed in samples/checked-pages.txt and reports the rest;
+      # Enforces pages listed in content/verified-pages.txt and reports the rest;
       # switch to `--strict` once every page is listed.
       - run: bash scripts/check-samples.sh
