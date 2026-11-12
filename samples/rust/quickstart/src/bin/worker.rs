@@ -20,6 +20,7 @@ async fn ship(_ctx: TaskContext, order_id: String) -> Result<String> {
     Ok(format!("shipped {order_id}"))
 }
 
+// [start:hero]
 #[workflow(name = "order")]
 async fn order(ctx: WorkflowContext, order_id: String) -> Result<String> {
     let charged: String = ctx.execute_task(charge, order_id.clone()).await?;
@@ -28,6 +29,7 @@ async fn order(ctx: WorkflowContext, order_id: String) -> Result<String> {
     let shipped: String = ctx.execute_task(ship, order_id).await?;
     Ok(format!("{charged}, then {shipped}"))
 }
+// [end:hero]
 // [end:workflow]
 
 #[tokio::main]

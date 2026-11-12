@@ -24,14 +24,12 @@ const generateMetadata = async (_, parent: ResolvingMetadata): Promise<Metadata>
 // ─── Components ──────────────────────────────────────────────────────────────
 
 function SectionIntro({
-  index,
   kicker,
   title,
   description,
   id,
   action,
 }: {
-  index: string
   kicker: string
   title: string
   description?: string
@@ -41,8 +39,8 @@ function SectionIntro({
   return (
     <div className="flex items-end justify-between gap-6 mb-8 sm:mb-10">
       <div className="flex flex-col gap-2.5 max-w-xl">
-        <span className="font-mono text-[10px] uppercase tracking-widest text-foreground-muted">
-          {index} · {kicker}
+        <span className="font-mono text-[10px] uppercase tracking-widest text-foreground-lighter">
+          {kicker}
         </span>
         <h2
           id={id}
@@ -55,7 +53,7 @@ function SectionIntro({
       {action && (
         <Link
           href={action.href}
-          className="no-underline text-xs font-mono text-foreground-muted hover:text-foreground transition-colors flex items-center gap-1 shrink-0 pb-1"
+          className="no-underline text-xs font-mono text-foreground-lighter hover:text-foreground transition-colors flex items-center gap-1 shrink-0 pb-1"
         >
           {action.label}
           <ArrowRight size={10} />
@@ -66,26 +64,46 @@ function SectionIntro({
 }
 
 function ConceptCell({
-  num,
   href,
   title,
   description,
 }: {
-  num: string
   href: string
   title: string
   description: string
 }) {
   return (
     <Link href={href} className="no-underline group h-full">
-      <div className="h-full bg-background p-6 flex flex-col gap-3 hover:bg-surface-75 transition-colors">
-        <div className="flex items-baseline justify-between gap-3">
-          <span className="text-sm font-medium text-foreground">{title}</span>
-          <span className="font-mono text-[10px] text-foreground-muted">{num}</span>
-        </div>
+      <div className="h-full bg-background border border-default p-6 flex flex-col gap-3 hover:border-foreground-muted hover:bg-surface-75 transition-colors">
+        <span className="text-sm font-medium text-foreground">{title}</span>
         <p className="m-0 text-xs text-foreground-light leading-relaxed">{description}</p>
       </div>
     </Link>
+  )
+}
+
+/**
+ * An install command, coloured like the site's shell code blocks: the program,
+ * its subcommand, then the package.
+ */
+function InstallCommand({ command }: { command: string }) {
+  const words = command.split(' ')
+  const colorOf = (i: number) =>
+    i === 0
+      ? 'var(--code-token-function)'
+      : i === words.length - 1
+        ? 'var(--code-token-string)'
+        : 'var(--code-foreground)'
+  return (
+    <code className="font-mono text-xs">
+      <span className="select-none text-foreground-muted">$ </span>
+      {words.map((word, i) => (
+        <span key={i} style={{ color: colorOf(i) }}>
+          {i > 0 && ' '}
+          {word}
+        </span>
+      ))}
+    </code>
   )
 }
 
@@ -104,19 +122,16 @@ function SdkCard({
 }) {
   return (
     <Link href={href} className="no-underline group h-full">
-      <div className="h-full bg-background p-6 flex flex-col gap-4 hover:bg-surface-75 transition-colors">
+      <div className="h-full bg-background border border-default p-6 flex flex-col gap-4 hover:bg-surface-75 transition-colors">
         <div className="flex items-center justify-between gap-3">
           <span className="text-sm font-medium text-foreground">{title}</span>
-          <span className="font-mono text-[10px] text-foreground-muted border border-default px-1.5 py-0.5">
+          <span className="font-mono text-[10px] text-foreground-lighter border border-default px-1.5 py-0.5">
             {ext}
           </span>
         </div>
         <p className="m-0 text-xs text-foreground-light leading-relaxed flex-1">{description}</p>
         <div className="flex items-center justify-between gap-3 border-t border-default pt-4">
-          <code className="font-mono text-[11px] text-foreground-light">
-            <span className="text-foreground-muted">$ </span>
-            {install}
-          </code>
+          <InstallCommand command={install} />
           <ArrowRight
             size={12}
             className="text-foreground-muted opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
@@ -127,14 +142,22 @@ function SdkCard({
   )
 }
 
-function IndexRow({ num, href, title }: { num: string; href: string; title: string }) {
+function IndexRow({
+  href,
+  title,
+  description,
+}: {
+  href: string
+  title: string
+  description: string
+}) {
   return (
     <Link href={href} className="no-underline group">
-      <div className="bg-background px-5 py-3.5 flex items-center gap-4 hover:bg-surface-75 transition-colors">
-        <span className="font-mono text-[10px] text-foreground-muted w-5 shrink-0">{num}</span>
-        <span className="text-sm text-foreground-light group-hover:text-foreground transition-colors">
-          {title}
-        </span>
+      <div className="bg-background border border-default px-5 py-4 flex items-center gap-4 hover:border-foreground-muted hover:bg-surface-75 transition-colors">
+        <div className="flex flex-col gap-1 min-w-0">
+          <span className="text-sm font-medium text-foreground">{title}</span>
+          <span className="text-xs text-foreground-light leading-relaxed">{description}</span>
+        </div>
         <ArrowRight
           size={12}
           className="ml-auto text-foreground-muted opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
@@ -151,19 +174,19 @@ function IndexList({
 }: {
   label: string
   id: string
-  items: { title: string; href: string }[]
+  items: { title: string; href: string; description: string }[]
 }) {
   return (
     <div>
       <h3
         id={id}
-        className="scroll-mt-24 m-0 mb-4 font-mono text-[10px] uppercase tracking-widest text-foreground-muted font-normal"
+        className="scroll-mt-24 m-0 mb-4 font-mono text-[10px] uppercase tracking-widest text-foreground-lighter font-normal"
       >
         {label}
       </h3>
-      <div className="flex flex-col gap-px bg-border-default border border-default">
-        {items.map((item, i) => (
-          <IndexRow key={item.title} num={String(i + 1).padStart(2, '0')} {...item} />
+      <div className="flex flex-col gap-3">
+        {items.map((item) => (
+          <IndexRow key={item.title} {...item} />
         ))}
       </div>
     </div>
@@ -183,10 +206,10 @@ function PathCard({
 }) {
   return (
     <Link href={href} className="no-underline group h-full">
-      <div className="h-full bg-background p-6 flex flex-col gap-3 hover:bg-surface-75 transition-colors">
+      <div className="h-full bg-background border border-default p-6 flex flex-col gap-3 hover:border-foreground-muted hover:bg-surface-75 transition-colors">
         <span className="text-sm font-medium text-foreground">{title}</span>
         <p className="m-0 text-xs text-foreground-light leading-relaxed flex-1">{description}</p>
-        <span className="font-mono text-[10px] uppercase tracking-widest text-foreground-muted group-hover:text-foreground transition-colors flex items-center gap-1.5 pt-1">
+        <span className="font-mono text-[10px] uppercase tracking-widest text-foreground-lighter group-hover:text-foreground transition-colors flex items-center gap-1.5 pt-1">
           {tag}
           <ArrowRight size={10} />
         </span>
@@ -208,7 +231,7 @@ function PlatformColumn({
     <div>
       <h3
         id={id}
-        className="scroll-mt-24 m-0 mb-2 font-mono text-[10px] uppercase tracking-widest text-foreground-muted font-normal"
+        className="scroll-mt-24 m-0 mb-2 font-mono text-[10px] uppercase tracking-widest text-foreground-lighter font-normal"
       >
         {label}
       </h3>
@@ -250,23 +273,22 @@ const HomePage = () => (
       <section>
         <div className="max-w-7xl mx-auto px-5 py-14 sm:py-16">
           <SectionIntro
-            index="01"
             kicker="Concepts"
             title="The core model"
-            description="Six primitives that make workflows durable."
+            description="Six building blocks of a durable workflow."
             id="core-concepts"
             action={{ label: 'Overview', href: '/guides/core/understanding' }}
           />
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-px bg-border-default border border-default">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {[
-              { title: 'Workflows', href: '/guides/core/workflows', description: 'Define durable functions that survive crashes and restarts. Code-first, no YAML.' },
-              { title: 'Tasks', href: '/guides/core/tasks', description: 'Execute side effects with automatic retry, timeout, and idempotency guarantees.' },
-              { title: 'Journaling', href: '/guides/core/journaling', description: 'Every step is journaled for deterministic replay and auditability.' },
-              { title: 'Events', href: '/guides/core/events', description: 'Send and receive events between workflows for coordination and signaling.' },
-              { title: 'State', href: '/guides/core/state-management', description: 'Queryable workflow state with external visibility and persistence.' },
-              { title: 'Actors', href: '/guides/core/actors', description: 'Long-lived stateful entities with exclusive and shared operations.' },
-            ].map((item, i) => (
-              <ConceptCell key={item.title} num={String(i + 1).padStart(2, '0')} {...item} />
+              { title: 'Workflows', href: '/guides/core/workflows', description: 'Ordinary async functions whose progress survives crashes and restarts. Code-first, no YAML.' },
+              { title: 'Tasks', href: '/guides/core/tasks', description: 'Where side effects go: each task has its own retries and timeouts, and its result is journaled.' },
+              { title: 'Journaling', href: '/guides/core/journaling', description: 'Every step is recorded, so a run replays to where it stopped without repeating completed steps.' },
+              { title: 'Events', href: '/guides/core/events', description: 'Send an event to a running workflow, and have a workflow wait for one, with or without a timeout.' },
+              { title: 'State', href: '/guides/core/state-management', description: 'State a workflow keeps as it runs, and how callers read it from outside.' },
+              { title: 'Actors', href: '/guides/core/actors', description: 'Long-lived entities with their own state, exclusive and shared operations.' },
+            ].map((item) => (
+              <ConceptCell key={item.title} {...item} />
             ))}
           </div>
         </div>
@@ -276,17 +298,16 @@ const HomePage = () => (
       <section className="border-t border-default bg-alternative">
         <div className="max-w-7xl mx-auto px-5 py-14 sm:py-16">
           <SectionIntro
-            index="02"
             kicker="SDKs"
             title="Your language, first-class"
             description="Native, idiomatic APIs for Rust, Python, and TypeScript."
             id="sdks"
           />
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-px bg-border-default border border-default">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             {[
-              { title: 'Rust', ext: '.rs', href: '/guides/sdk/rust', install: 'cargo add orcher', description: '#[workflow] and #[task] macros, typed function refs, zero-cost abstractions, compile-time validation.' },
-              { title: 'Python', ext: '.py', href: '/guides/sdk/python', install: 'pip install orcher', description: '@workflow and @task decorators, async/await, fluent builder API for services and clients.' },
-              { title: 'TypeScript', ext: '.ts', href: '/guides/sdk/typescript', install: 'npm install @orcher/sdk', description: 'Class-based decorators, full type safety, NestJS-style dependency injection.' },
+              { title: 'Rust', ext: '.rs', href: '/guides/sdk/rust', install: 'cargo add orcher-sdk', description: '#[workflow] and #[task] macros, typed task references, and registration at startup with no manual wiring.' },
+              { title: 'Python', ext: '.py', href: '/guides/sdk/python', install: 'pip install orcher-sdk', description: '@workflow and @task decorators on plain async functions, a worker builder and a typed client.' },
+              { title: 'TypeScript', ext: '.ts', href: '/guides/sdk/typescript', install: 'npm install @orcher/sdk', description: 'Functional or decorator-based definitions, typed task references, and dependency injection for tasks.' },
             ].map((sdk) => (
               <SdkCard key={sdk.title} {...sdk} />
             ))}
@@ -298,10 +319,9 @@ const HomePage = () => (
       <section className="border-t border-default">
         <div className="max-w-7xl mx-auto px-5 py-14 sm:py-16">
           <SectionIntro
-            index="03"
             kicker="In practice"
             title="Patterns & use cases"
-            description="Battle-tested shapes for real-world systems."
+            description="Common workflow shapes, and the systems they are used in."
             id="patterns"
             action={{ label: 'All patterns', href: '/guides/patterns' }}
           />
@@ -310,22 +330,22 @@ const HomePage = () => (
               label="Workflow patterns"
               id="workflow-patterns"
               items={[
-                { title: 'Saga & Compensation', href: '/guides/patterns/saga' },
-                { title: 'Fan-Out / Fan-In', href: '/guides/patterns/fan-out-fan-in' },
-                { title: 'Parent-Child Workflows', href: '/guides/patterns/parent-child' },
-                { title: 'Long-Running Processes', href: '/guides/patterns/long-running' },
-                { title: 'Error & Retry Handling', href: '/guides/core/error-handling' },
+                { title: 'Saga & Compensation', href: '/guides/patterns/saga', description: 'Undo the steps already done when a later one fails.' },
+                { title: 'Fan-Out / Fan-In', href: '/guides/patterns/fan-out-fan-in', description: 'Run work in parallel, then gather the results.' },
+                { title: 'Parent-Child Workflows', href: '/guides/patterns/parent-child', description: 'Split a large workflow into child workflows it starts and awaits.' },
+                { title: 'Long-Running Processes', href: '/guides/patterns/long-running', description: 'Runs that span hours or weeks, with durable timers and human approvals.' },
+                { title: 'Error & Retry Handling', href: '/guides/core/error-handling', description: 'Retry policies, timeouts, and what a workflow sees when a task fails.' },
               ]}
             />
             <IndexList
               label="Use cases"
               id="use-cases"
               items={[
-                { title: 'Financial Workflows', href: '/guides/use-cases/financial-workflows' },
-                { title: 'Data Processing & ETL', href: '/guides/use-cases/data-processing' },
-                { title: 'Event-Driven Systems', href: '/guides/use-cases/event-driven' },
-                { title: 'Background Tasks', href: '/guides/use-cases/background-tasks' },
-                { title: 'Distributed Systems', href: '/guides/use-cases/distributed-systems' },
+                { title: 'Financial Workflows', href: '/guides/use-cases/financial-workflows', description: 'Payments, refunds and reconciliation that must not repeat a charge.' },
+                { title: 'Data Processing & ETL', href: '/guides/use-cases/data-processing', description: 'Pipelines that resume from the last completed batch.' },
+                { title: 'Event-Driven Systems', href: '/guides/use-cases/event-driven', description: 'React to events, and keep per-entity state with actors.' },
+                { title: 'Background Tasks', href: '/guides/use-cases/background-tasks', description: 'Scheduled jobs and asynchronous work, with retries.' },
+                { title: 'Distributed Systems', href: '/guides/use-cases/distributed-systems', description: 'Coordinate calls across services, and compensate when one fails.' },
               ]}
             />
           </div>
@@ -336,12 +356,11 @@ const HomePage = () => (
       <section className="border-t border-default bg-alternative">
         <div className="max-w-7xl mx-auto px-5 py-14 sm:py-16">
           <SectionIntro
-            index="04"
             kicker="Learning paths"
-            title="Guided journeys for your role"
+            title="Guides for your role"
             id="learning-paths"
           />
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-px bg-border-default border border-default">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             {[
               { title: 'Backend Engineers', href: '/guides/learning/backend-engineers', description: 'Core concepts, building patterns, distributed systems, and production readiness.', tag: '5 guides' },
               { title: 'Data Engineers', href: '/guides/learning/data-engineers', description: 'ETL pipelines, batch processing, parallel execution, and production data workflows.', tag: '5 guides' },
@@ -357,10 +376,9 @@ const HomePage = () => (
       <section className="border-t border-default">
         <div className="max-w-7xl mx-auto px-5 py-14 sm:py-16">
           <SectionIntro
-            index="05"
             kicker="Platform"
-            title="Run it in production"
-            description="Operate, deploy, and observe the orchestrator."
+            title="Run and operate"
+            description="Deploy, configure and observe the engine."
             id="operations"
           />
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-10">
@@ -406,9 +424,9 @@ const HomePage = () => (
               Get started
             </span>
             <h2 className="m-0 text-2xl sm:text-3xl font-heading font-bold tracking-tight text-background leading-tight">
-              Build your first workflow
+              Run your first workflow,
               <br />
-              in five minutes.
+              then kill it and watch it resume.
             </h2>
           </div>
           <div className="flex flex-wrap items-center gap-3">
@@ -420,12 +438,12 @@ const HomePage = () => (
               <ArrowRight size={13} />
             </Link>
             <a
-              href="https://github.com/orcher-io/quickstart"
+              href="https://github.com/orcher-io/orcher"
               target="_blank"
               rel="noreferrer noopener"
               className="no-underline border border-background/30 text-background px-5 py-2.5 text-sm flex items-center gap-2 hover:border-background transition-colors"
             >
-              GitHub
+              Engine on GitHub
               <ArrowUpRight size={13} />
             </a>
           </div>

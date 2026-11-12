@@ -24,6 +24,7 @@ async def ship(ctx: TaskContext, order_id: str) -> str:
     return f"shipped {order_id}"
 
 
+# [start:hero]
 @workflow(name="order")
 async def order(ctx: WorkflowContext, order_id: str) -> str:
     charged = await ctx.execute_task(charge, order_id=order_id)
@@ -31,6 +32,7 @@ async def order(ctx: WorkflowContext, order_id: str) -> str:
     await ctx.sleep(timedelta(seconds=10))
     shipped = await ctx.execute_task(ship, order_id=order_id)
     return f"{charged}, then {shipped}"
+# [end:hero]
 # [end:workflow]
 
 

@@ -26,6 +26,7 @@ export class OrderTasks {
 
 export const orderTasks = createTaskRefs(OrderTasks);
 
+// [start:hero]
 @Workflow({ name: 'order' })
 export class Order {
   async run(ctx: WorkflowContext, orderId: string): Promise<string> {
@@ -36,6 +37,7 @@ export class Order {
     return `${charged}, then ${shipped}`;
   }
 }
+// [end:hero]
 // [end:workflow]
 
 async function main(): Promise<void> {
