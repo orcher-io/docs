@@ -107,7 +107,7 @@ const genGuideMeta =
     ])
 
     return {
-      title: `${meta.title} | Orcher Docs`,
+      title: meta.title,
       description: meta.description || meta.subtitle,
       // @ts-ignore
       alternates: {
