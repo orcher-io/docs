@@ -82,6 +82,31 @@ function ConceptCell({
   )
 }
 
+/**
+ * An install command, coloured like the site's shell code blocks: the program,
+ * its subcommand, then the package.
+ */
+function InstallCommand({ command }: { command: string }) {
+  const words = command.split(' ')
+  const colorOf = (i: number) =>
+    i === 0
+      ? 'var(--code-token-function)'
+      : i === words.length - 1
+        ? 'var(--code-token-string)'
+        : 'var(--code-foreground)'
+  return (
+    <code className="font-mono text-xs">
+      <span className="select-none text-foreground-muted">$ </span>
+      {words.map((word, i) => (
+        <span key={i} style={{ color: colorOf(i) }}>
+          {i > 0 && ' '}
+          {word}
+        </span>
+      ))}
+    </code>
+  )
+}
+
 function SdkCard({
   href,
   title,
@@ -106,10 +131,7 @@ function SdkCard({
         </div>
         <p className="m-0 text-xs text-foreground-light leading-relaxed flex-1">{description}</p>
         <div className="flex items-center justify-between gap-3 border-t border-default pt-4">
-          <code className="font-mono text-[11px] text-foreground-light">
-            <span className="text-foreground-muted">$ </span>
-            {install}
-          </code>
+          <InstallCommand command={install} />
           <ArrowRight
             size={12}
             className="text-foreground-muted opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
