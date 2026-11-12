@@ -74,7 +74,7 @@ function ConceptCell({
 }) {
   return (
     <Link href={href} className="no-underline group h-full">
-      <div className="h-full bg-background p-6 flex flex-col gap-3 hover:bg-surface-75 transition-colors">
+      <div className="h-full bg-background border border-default p-6 flex flex-col gap-3 hover:border-foreground-muted hover:bg-surface-75 transition-colors">
         <span className="text-sm font-medium text-foreground">{title}</span>
         <p className="m-0 text-xs text-foreground-light leading-relaxed">{description}</p>
       </div>
@@ -97,7 +97,7 @@ function SdkCard({
 }) {
   return (
     <Link href={href} className="no-underline group h-full">
-      <div className="h-full bg-background p-6 flex flex-col gap-4 hover:bg-surface-75 transition-colors">
+      <div className="h-full bg-background border border-default p-6 flex flex-col gap-4 hover:bg-surface-75 transition-colors">
         <div className="flex items-center justify-between gap-3">
           <span className="text-sm font-medium text-foreground">{title}</span>
           <span className="font-mono text-[10px] text-foreground-lighter border border-default px-1.5 py-0.5">
@@ -175,7 +175,7 @@ function PathCard({
 }) {
   return (
     <Link href={href} className="no-underline group h-full">
-      <div className="h-full bg-background p-6 flex flex-col gap-3 hover:bg-surface-75 transition-colors">
+      <div className="h-full bg-background border border-default p-6 flex flex-col gap-3 hover:border-foreground-muted hover:bg-surface-75 transition-colors">
         <span className="text-sm font-medium text-foreground">{title}</span>
         <p className="m-0 text-xs text-foreground-light leading-relaxed flex-1">{description}</p>
         <span className="font-mono text-[10px] uppercase tracking-widest text-foreground-lighter group-hover:text-foreground transition-colors flex items-center gap-1.5 pt-1">
@@ -248,7 +248,7 @@ const HomePage = () => (
             id="core-concepts"
             action={{ label: 'Overview', href: '/guides/core/understanding' }}
           />
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-px bg-border-default border border-default">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {[
               { title: 'Workflows', href: '/guides/core/workflows', description: 'Ordinary async functions whose progress survives crashes and restarts. Code-first, no YAML.' },
               { title: 'Tasks', href: '/guides/core/tasks', description: 'Where side effects go: each task has its own retries and timeouts, and its result is journaled.' },
@@ -272,7 +272,7 @@ const HomePage = () => (
             description="Native, idiomatic APIs for Rust, Python, and TypeScript."
             id="sdks"
           />
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-px bg-border-default border border-default">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             {[
               { title: 'Rust', ext: '.rs', href: '/guides/sdk/rust', install: 'cargo add orcher-sdk', description: '#[workflow] and #[task] macros, typed task references, and registration at startup with no manual wiring.' },
               { title: 'Python', ext: '.py', href: '/guides/sdk/python', install: 'pip install orcher-sdk', description: '@workflow and @task decorators on plain async functions, a worker builder and a typed client.' },
@@ -329,7 +329,7 @@ const HomePage = () => (
             title="Guides for your role"
             id="learning-paths"
           />
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-px bg-border-default border border-default">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             {[
               { title: 'Backend Engineers', href: '/guides/learning/backend-engineers', description: 'Core concepts, building patterns, distributed systems, and production readiness.', tag: '5 guides' },
               { title: 'Data Engineers', href: '/guides/learning/data-engineers', description: 'ETL pipelines, batch processing, parallel execution, and production data workflows.', tag: '5 guides' },
