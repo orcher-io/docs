@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 220" width="1600" height="220" role="img" aria-label="ORCHER Docs">
+  <defs>
+    <linearGradient id="g" gradientUnits="userSpaceOnUse" x1="0" y1="4420" x2="4420" y2="0"><stop offset="0" stop-color="#04B385"/><stop offset="1" stop-color="#38BDF0"/></linearGradient>
+    <linearGradient id="t" gradientUnits="userSpaceOnUse" x1="231" y1="0" x2="310" y2="0"><stop offset="0" stop-color="#04B385"/><stop offset="1" stop-color="#38BDF0"/></linearGradient>
+    <pattern id="dots" width="8" height="8" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill="rgba(255,255,255,0.085)"/></pattern>
+    <linearGradient id="fade" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#fff" stop-opacity="0"/><stop offset="0.35" stop-color="#fff" stop-opacity="1"/></linearGradient>
+    <mask id="m"><rect x="620" y="0" width="980" height="220" fill="url(#fade)"/></mask>
+  </defs>
+  <rect width="1600" height="220" fill="#0A0A0A"/>
+  <rect x="620" y="0" width="980" height="220" fill="url(#dots)" mask="url(#m)"/>
+  <rect x="760" y="30" width="740" height="160" fill="#0E0E0E" stroke="#2A2A2A" stroke-width="2"/>
+  <line x1="930" y1="30" x2="930" y2="190" stroke="#2A2A2A" stroke-width="2"/>
+  <text x="780" y="56" font-family="'SF Mono', 'Fira Code', Menlo, Consolas, monospace" font-size="13" letter-spacing="2" fill="#5F646B">GUIDES</text>
+  <rect x="780" y="72" width="84" height="6" fill="#5F646B" opacity="0.55"/>
+  <rect x="762" y="86" width="166" height="18" fill="#1E1E1E"/>
+  <rect x="760" y="86" width="3" height="18" fill="#38BDF0"/>
+  <rect x="780" y="92" width="96" height="6" fill="#38BDF0" opacity="1"/>
+  <rect x="780" y="112" width="72" height="6" fill="#5F646B" opacity="0.55"/>
+  <rect x="780" y="132" width="104" height="6" fill="#5F646B" opacity="0.55"/>
+  <rect x="780" y="152" width="64" height="6" fill="#5F646B" opacity="0.55"/>
+  <rect x="780" y="172" width="90" height="6" fill="#5F646B" opacity="0.55"/>
+  <text x="952" y="62" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="22" font-weight="700" fill="#FAFAFA">Quickstart</text>
+  <rect x="952" y="76" width="300" height="6" fill="#5F646B" opacity="0.45"/>
+  <rect x="952" y="94" width="356" height="84" fill="#141414" stroke="#2A2A2A" stroke-width="2"/>
+  <line x1="952" y1="118" x2="1308" y2="118" stroke="#2A2A2A" stroke-width="2"/>
+  <rect x="953" y="95" width="54" height="22" fill="#1E1E1E"/><rect x="953" y="115" width="54" height="3" fill="#6AAB73"/>
+  <text x="964" y="111" font-family="'SF Mono', 'Fira Code', Menlo, Consolas, monospace" font-size="13" fill="#8B9299">rust</text>
+  <text x="1022" y="111" font-family="'SF Mono', 'Fira Code', Menlo, Consolas, monospace" font-size="13" fill="#5F646B">python</text>
+  <text x="1094" y="111" font-family="'SF Mono', 'Fira Code', Menlo, Consolas, monospace" font-size="13" fill="#5F646B">typescript</text>
+  <path d="M1222,106 l4,4 l8,-9" fill="none" stroke="#6AAB73" stroke-width="2.2" stroke-linecap="square"/>
+  <text x="1240" y="111" font-family="'SF Mono', 'Fira Code', Menlo, Consolas, monospace" font-size="12" fill="#6AAB73">compiled</text>
+  <rect x="966" y="130" width="62" height="6" fill="#38BDF0" opacity="0.9"/>
+  <rect x="1034" y="130" width="110" height="6" fill="#5F646B" opacity="0.55"/>
+  <rect x="982" y="144" width="44" height="6" fill="#6AAB73" opacity="0.9"/>
+  <rect x="1032" y="144" width="168" height="6" fill="#5F646B" opacity="0.55"/>
+  <rect x="982" y="158" width="44" height="6" fill="#6AAB73" opacity="0.9"/>
+  <rect x="1032" y="158" width="132" height="6" fill="#5F646B" opacity="0.55"/>
+  <line x1="1330" y1="30" x2="1330" y2="190" stroke="#2A2A2A" stroke-width="2"/>
+  <text x="1350" y="56" font-family="'SF Mono', 'Fira Code', Menlo, Consolas, monospace" font-size="12" letter-spacing="1.5" fill="#5F646B">ON THIS PAGE</text>
+  <line x1="1350" y1="70" x2="1350" y2="170" stroke="#2A2A2A" stroke-width="2"/>
+  <line x1="1350" y1="88" x2="1350" y2="106" stroke="#38BDF0" stroke-width="2"/>
+  <rect x="1364" y="74" width="78" height="6" fill="#5F646B" opacity="0.55"/>
+  <rect x="1364" y="94" width="96" height="6" fill="#38BDF0" opacity="1"/>
+  <rect x="1364" y="114" width="64" height="6" fill="#5F646B" opacity="0.55"/>
+  <rect x="1364" y="134" width="88" height="6" fill="#5F646B" opacity="0.55"/>
+  <rect x="1364" y="154" width="54" height="6" fill="#5F646B" opacity="0.55"/>
+  <g transform="translate(64,46) scale(0.2896)">
+    <g transform="translate(0,442) scale(0.1,-0.1)" fill="url(#g)"><path d="M530 4404 c-185 -40 -358 -178 -444 -354 -83 -171 -81 -152 -81 -770 0 -539 0 -546 23 -625 62 -218 222 -388 438 -466 50 -19 88 -23 242 -27 l182 -4 0 270 0 270 -103 4 c-95 3 -108 6 -152 33 -35 21 -56 45 -74 79 l-25 49 2 425 c1 410 2 426 23 468 25 52 80 100 129 114 20 6 207 10 436 10 l400 0 55 -27 c76 -39 110 -97 117 -198 l5 -75 262 0 263 0 6 23 c10 39 -5 219 -25 295 -37 142 -124 283 -227 368 -74 62 -126 91 -222 125 -65 23 -67 23 -615 25 -443 2 -563 0 -615 -12z"/><path d="M1620 3319 c-188 -51 -337 -176 -431 -364 -65 -130 -68 -167 -69 -756 0 -515 0 -517 24 -613 35 -135 75 -205 176 -307 68 -68 102 -94 170 -127 114 -57 192 -72 374 -72 l149 0 -7 37 c-3 21 -6 143 -6 271 l0 232 -79 0 c-127 0 -196 35 -244 125 -22 39 -22 49 -22 465 0 416 0 426 22 465 27 51 68 90 115 109 32 14 99 16 440 16 240 0 418 -4 439 -10 47 -13 124 -94 138 -146 6 -22 11 -63 11 -91 l0 -53 270 0 271 0 -7 128 c-7 142 -29 244 -70 324 -75 149 -177 254 -307 317 -145 72 -137 71 -742 70 -508 0 -544 -1 -615 -20z"/><path d="M2745 2244 c-206 -50 -400 -234 -472 -448 l-28 -81 -3 -558 c-3 -535 -2 -562 17 -640 34 -135 82 -219 180 -317 70 -71 102 -94 171 -127 145 -69 132 -68 755 -68 545 0 562 1 627 21 167 54 329 189 401 335 76 155 77 165 77 763 0 612 -1 614 -81 774 -82 163 -205 272 -379 334 -65 23 -67 23 -635 25 -470 1 -580 -1 -630 -13z m1068 -485 c49 -13 115 -73 138 -124 16 -36 18 -87 21 -495 3 -400 1 -459 -13 -490 -24 -52 -66 -98 -113 -123 -41 -22 -46 -22 -491 -22 -444 0 -451 0 -491 22 -53 28 -100 83 -113 130 -15 52 -15 905 0 957 14 51 80 121 132 140 34 12 119 15 467 15 271 1 439 -3 463 -10z"/></g>
+  </g>
+  <text x="228" y="118" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="68" font-weight="800" letter-spacing="5" fill="#FAFAFA">ORCHER</text>
+  <text x="231" y="162" font-family="'SF Mono', 'Fira Code', Menlo, Consolas, monospace" font-size="20" font-weight="600" letter-spacing="7" fill="url(#t)">DOCS</text>
+</svg>
