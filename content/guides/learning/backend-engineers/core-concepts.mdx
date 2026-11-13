@@ -1290,9 +1290,7 @@ Orcher uses a **client-server architecture**: an Orchestrator server handles wor
     <div className="text-[11px] font-medium font-mono text-foreground">PostgreSQL</div>
     <div className="text-[10px] text-foreground-muted mt-0.5">journal · queue (SKIP LOCKED) · app data — one database</div>
   </div>
-  <p className="text-[10px] text-foreground-muted text-center mt-3 mb-0">
-    Workers are stateless and disposable; all durability lives in the Orchestrator's Postgres. No message broker.
-  </p>
+  <p className="text-[10px] text-foreground-muted text-center mt-3 mb-0">Workers are stateless and disposable; all durability lives in the Orchestrator's Postgres. No message broker.</p>
 </div>
 
 **Layer 1 — Orchestrator Server**

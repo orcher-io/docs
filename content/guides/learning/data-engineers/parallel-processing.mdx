@@ -44,9 +44,7 @@ When your data is already partitioned — S3 date prefixes, table shards, per-te
       <div className="text-[11px] font-medium text-foreground">totalRows</div>
     </div>
   </div>
-  <p className="text-[10px] text-foreground-muted text-center mt-3 mb-0">
-    Each partition is its own journaled task — one failing partition retries alone; the rest keep their cached results.
-  </p>
+  <p className="text-[10px] text-foreground-muted text-center mt-3 mb-0">Each partition is its own journaled task — one failing partition retries alone; the rest keep their cached results.</p>
 </div>
 
 ### Step 1 — Discover and process one partition
