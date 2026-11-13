@@ -23,7 +23,7 @@ publish = false
 # Pin what the samples compile against here, once. Members take them with
 # `orcher-sdk.workspace = true`.
 [workspace.dependencies]
-orcher-sdk = "0.7.1"
+orcher-sdk = "0.17.0"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["v4"] }

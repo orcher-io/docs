@@ -21,8 +21,7 @@ async def order(ctx: WorkflowContext, order_id: str, amount: int) -> str:
 
 
 # [start:class]
-# orcher-sdk 0.4.4 types @workflow for functions only, so mypy needs the ignore.
-@workflow(name="order-v2")  # type: ignore[arg-type]
+@workflow(name="order-v2")
 class OrderWorkflow:
     async def run(self, ctx: WorkflowContext, order_id: str, amount: int) -> str:
         payment = await ctx.execute_task(charge, order_id=order_id, amount=amount)

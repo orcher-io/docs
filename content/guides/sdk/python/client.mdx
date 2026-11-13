@@ -100,12 +100,6 @@ Leave it unset and the engine allows a new run once the previous one has closed.
 
 `query` and `update` arguments follow the same rules as workflow input: a dict reaches the handler as keyword arguments, any other single value as one positional argument. See [State, queries and updates](/guides/sdk/python/workflows#state-queries-and-updates).
 
-<Admonition type="caution">
-
-In `orcher-sdk` 0.4.4, `result()` returns `None` for a workflow whose result is `0`, `False`, `""`, `[]` or `{}` ([sdk-py#6](https://github.com/orcher-io/sdk-py/issues/6)).
-
-</Admonition>
-
 To stop a workflow:
 
 <$CodeSample path="python/client/handle.py" region="stop" />

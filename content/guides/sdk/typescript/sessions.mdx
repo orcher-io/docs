@@ -58,12 +58,14 @@ On replay the session comes from the journal; it is not created again.
 
 ## Limitations
 
-- **A session lives and dies with its worker.** If the worker stops, its session queue has no
-  poller, and tasks sent to it wait. Nothing detects this for you: there is no heartbeat on the
-  session and no failed state.
-- **Session options are not enforced.** `createSession()` accepts `creationTimeout`,
-  `executionTimeout`, `maxConcurrentTasks` and `heartbeatInterval`, but the worker does not apply
-  them in 0.5.4.
+- **A session lives and dies with its worker.** If the worker stops while one of the session's
+  tasks is running, that task times out (its heartbeat timeout, a minute by default) and the
+  engine fails it and every other task on the session's queue as lost, so the workflow sees the
+  failure and can open a new session. A task only waiting on the queue is caught by its own queue
+  timeout, which by default is none.
+- **Two session options are not enforced.** `createSession()` accepts `maxConcurrentTasks` and
+  `heartbeatInterval`, but the worker does not apply them; `creationTimeout` and
+  `executionTimeout` are applied.
 - **No migration.** Worker-local state (files, models, connections) is not moved anywhere.
 - **One worker.** All of a session's tasks run on one worker; for work that can run anywhere, use
   ordinary tasks.

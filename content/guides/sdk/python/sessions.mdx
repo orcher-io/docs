@@ -40,9 +40,9 @@ Each worker hosts up to 10 sessions at a time. A worker with no free slot doesn'
 | Field | Default | Description |
 |---|---|---|
 | `creation_timeout` | `timedelta(seconds=30)` | How long creating the session may take; it is the timeout of the creation step |
-| `execution_timeout` | `timedelta(seconds=600)` | Sent to the worker, but not enforced in `orcher-sdk` 0.4.4 |
-| `max_concurrent_tasks` | `1` | Sent to the worker, but not enforced in `orcher-sdk` 0.4.4 |
-| `heartbeat_interval` | `timedelta(seconds=5)` | Sent to the worker, but not used in `orcher-sdk` 0.4.4 |
+| `execution_timeout` | `timedelta(seconds=600)` | How long the session may stay open; past it the worker closes the session and frees its slot |
+| `max_concurrent_tasks` | `1` | Sent to the worker, but not enforced |
+| `heartbeat_interval` | `timedelta(seconds=5)` | Sent to the worker, but not used |
 
 Because `execution_timeout` is not enforced, a session that is never completed holds its slot until the worker restarts.
 
@@ -68,9 +68,9 @@ Sessions are built from task queues; the engine has no separate session concept.
 
 ## Limitations
 
-- **A session ends with its worker.** If the worker stops, nothing else polls its session queue, and the worker-local state is gone anyway. A task scheduled there waits in the queue for as long as its `queue_timeout` allows, which by default is forever, so give session tasks a `queue_timeout`, catch the `TaskError`, and start over in a new session, as the example above does.
+- **A session ends with its worker.** If the worker stops while one of the session's tasks is running, that task times out (its heartbeat timeout, a minute by default) and the engine fails it and every other task on the session's queue as lost; the workflow gets a `TaskError` and can open a new session. A task only waiting on the queue is caught by its own `queue_timeout`, which by default is none, so give session tasks a `queue_timeout`, catch the `TaskError`, and start over in a new session, as the example above does.
 - **Everything runs on one machine.** For work that can run anywhere, use ordinary tasks, which spread across workers.
-- **Capacity is fixed.** Ten sessions per worker, not configurable in `orcher-sdk` 0.4.4; run more workers for more sessions.
+- **Capacity is fixed.** Ten sessions per worker, not configurable from Python; run more workers for more sessions.
 
 ---
 

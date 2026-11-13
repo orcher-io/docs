@@ -56,7 +56,11 @@ A shared operation can still call the state's write methods; the mode is a decla
 
 ## Invoking operations
 
-`orcher-sdk` 0.4.4 has no public API for invoking actor operations: neither `Client` nor `WorkflowContext` can call one. The `ActorInvocationClient` class in `orcher.actor` needs the worker's internal native bridge, which isn't part of the public API.
+Call an actor's operations from outside it with `ActorInvocationClient`, given a connected `Client`, the actor's name and the key of the instance. `invoke` sends the operation's input as JSON and returns its result decoded, and waits 30 seconds unless given `timeout_ms`:
+
+<$CodeSample path="python/actors/invoke.py" region="invoke" />
+
+Use the client while it is open: `invoke` goes through it. A workflow has no API for invoking an actor operation; call one from a task, which can open a client.
 
 ---
 

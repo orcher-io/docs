@@ -81,9 +81,8 @@ Or as a class. `@Workflow()` requires a `name`, and the class must have a `run()
 
 <Admonition type="note">
 
-A workflow and a task each take one input. Pass an object (or a single string, number or
-boolean), not a top-level array: in `@orcher/sdk` 0.5.4 an array input reaches the function
-as its first element only. Wrap lists in an object, as in `{ items: [...] }`.
+A workflow and a task each take one input: an object, an array, or a single string, number or
+boolean. Pass several values as one object; several arguments are refused.
 
 </Admonition>
 
