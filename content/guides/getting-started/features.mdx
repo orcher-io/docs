@@ -1,95 +1,97 @@
 ---
 id: 'features'
 title: 'Orcher Features'
-description: 'Explore the key features that make Orcher a powerful workflow orchestration platform.'
+description: 'What the Orcher engine and SDKs do: durable execution, timers, events, child workflows, actors, security and observability.'
 ---
 
-Orcher is a Rust-native workflow orchestration engine built for performance, reliability, and developer experience. It combines durable execution with a code-first approach, giving you compile-time safety and automatic crash recovery — all while letting you write workflows as straightforward async functions in Rust, TypeScript, or Python.
+Orcher is a durable workflow engine with SDKs for Rust, Python and TypeScript. You write a workflow as ordinary async code; the engine journals each step in PostgreSQL, so a run that loses its worker resumes from its last completed step.
 
 ## Durable Execution
 
-Every step of your workflow is automatically journaled to a persistent store, so if a worker crashes mid-execution, the workflow replays from the last completed step rather than starting over. This gives you crash recovery, no repeated steps, and the confidence that no work is lost — even across server restarts, deployments, or hardware failures.
+Every step of a workflow is journaled before the workflow moves on. If a worker crashes mid-run, another worker replays the workflow from the journal and continues from the last completed step instead of starting over. The same holds across engine restarts and deploys.
 
-- **Automatic Journaling** — Every task execution is recorded, enabling replay and recovery without any manual checkpointing code
-- **Crash Recovery** — Workflows automatically resume from the last completed step after server restarts or worker crashes
-- **No Repeated Steps** — Completed tasks return journaled results instead of re-executing on replay; use idempotency keys to keep external side effects safe under retries
+- **Automatic Journaling** — Task results, timers and events are recorded without any checkpointing code
+- **Crash Recovery** — Runs resume from the last completed step after an engine restart or a worker crash
+- **No Repeated Steps** — Completed tasks return their journaled results on replay instead of running again; use [idempotency keys](/guides/core/tasks/idempotency) to keep external side effects safe under retries
 
-## High Performance
+## Dispatch
 
-Orcher is written in Rust with an architecture optimized for throughput and latency. The worker-embedded execution model eliminates network hops between the scheduler and task runners, while eager task dispatch can return the next task directly in the completion response, saving a poll round trip.
+The engine is written in Rust. Workers are your own processes: they connect to the engine over gRPC, poll for tasks and report each result back.
 
-- **No Runtime Overhead** — Rust with no garbage collector, so throughput stays predictable under sustained load
-- **Eager Dispatch** — A worker that completes a step can be handed its next task in the same response, without waiting for a poll
+- **Eager Dispatch** — A worker that completes a step can be handed its next task in the same response, saving a poll round trip
+- **One Dependency** — The engine needs PostgreSQL and nothing else: no message broker and no separate scheduler
 
-## Type-Safe Workflows
+## Typed SDKs
 
-Orcher leverages Rust's type system (and typed decorators in TypeScript/Python) to catch errors at compile time rather than at runtime. Your IDE gives you full autocomplete, type hints, and inline documentation for workflow inputs, task arguments, and return values — making refactoring safe and large codebases manageable.
+Each SDK works in its own language's idioms, so your editor gives you autocomplete and inline documentation for workflow inputs, task arguments and return values.
 
-- **Compile-Time Validation** — Catch mismatched types, missing arguments, and incorrect return values before deployment
-- **Full IDE Support** — Autocomplete, go-to-definition, and inline documentation across all three SDKs
-- **Refactoring Safety** — Rename tasks and workflows with confidence; the compiler catches every callsite
+- **[Rust](/guides/sdk/rust)** — `#[workflow]` and `#[task]` macros with typed task references; the compiler checks task names, and inputs and outputs are checked when the task runs
+- **[Python](/guides/sdk/python)** — `@workflow` and `@task` decorators on plain async functions, with type hints your editor and type checker read
+- **[TypeScript](/guides/sdk/typescript)** — `@Workflow` and `@Task` decorators with typed task references
 
 ## Code-First Approach
 
-Workflows are defined as regular functions with decorators or macros — no YAML, no DSLs, no separate configuration files. This means your workflows live alongside your application code, are versioned in Git, can be unit-tested with standard testing frameworks, and benefit from your team's existing code review and CI/CD processes.
+Workflows are regular functions marked with decorators or macros: no YAML, no DSL, no separate configuration files. They live alongside your application code, are versioned in Git, and go through your team's existing code review and CI.
 
-- **Version Control** — Workflows are just code; track changes, review diffs, and roll back with Git
-- **Testing** — Unit test your workflows and tasks like any other function using standard test frameworks
-- **Reusability** — Extract common patterns into shared libraries and compose workflows from reusable building blocks
+- **Version Control** — Workflows are just code; track changes, review diffs and roll back with Git
+- **[Testing](/guides/local-development/testing-workflows)** — Test tasks and workflows with your language's usual test framework
+- **Reusability** — Extract common steps into shared libraries and compose workflows from them
 
-## Production-Grade Security
+## Security
 
-Orcher includes the security primitives you need for production deployments: encrypted communication between workers and the server, authentication for API access, and structured audit logs that record every workflow execution and state change for compliance and debugging.
+The engine encrypts its traffic and authenticates the clients and workers that call it. See [Security](/guides/security) for the configuration.
 
-- **TLS Encryption** — Secure all gRPC communication between workers, the orchestrator server, and API clients
-- **Authentication** — Built-in support for API keys and bearer tokens for programmatic access
-- **Audit Logging** — Complete, structured logs of all workflow executions, task completions, and configuration changes
+- **TLS Encryption** — Encrypt gRPC traffic between workers, clients and the engine
+- **Authentication** — API keys for programmatic access, and bearer tokens from an OIDC provider
 
-## Flexible Patterns
+## Patterns
 
-Orcher supports the full spectrum of workflow orchestration patterns out of the box. Decompose complex business processes into parent-child workflow hierarchies, implement distributed transactions using the saga pattern, fan out work across parallel tasks and collect results, or pause workflows to wait for external events and human approvals.
+The building blocks a workflow uses are journaled like task results, so they survive crashes too.
 
-- **[Parent-Child Workflows](/guides/patterns/parent-child)** — Decompose complex processes into manageable sub-workflows with independent error handling
-- **[Saga Pattern](/guides/patterns/saga)** — Implement compensating transactions to maintain consistency across distributed services
-- **[Fan-Out/Fan-In](/guides/patterns/fan-out-fan-in)** — Process items in parallel and aggregate results with rate limiting and partial failure handling
-- **[Event Gates](/guides/core/events)** — Wait for external signals or human approvals with configurable timeouts and escalation
+- **[Parent-Child Workflows](/guides/patterns/parent-child)** — Split a large process into child workflows, each with its own error handling
+- **[Saga Pattern](/guides/patterns/saga)** — Run compensating steps to undo completed work when a later step fails
+- **[Fan-Out/Fan-In](/guides/patterns/fan-out-fan-in)** — Run tasks in parallel and collect their results, handling the ones that fail
+- **[Events](/guides/core/events)** — Pause a run until an event arrives, such as a human approval, with an optional timeout
+- **[Durable Timers](/guides/patterns/long-running)** — Sleep for minutes or months; the engine holds the timer, so no worker has to stay busy while the run waits
+- **[Actors](/guides/core/actors)** — Long-lived, addressable state, such as a shopping cart, that you invoke by key
 
 ## Observability
 
-Orcher exposes Prometheus-compatible metrics, OpenTelemetry-based distributed tracing, and structured logging so you can monitor workflow throughput, track individual execution paths across services, and debug failures with full context — using the observability tools your team already runs.
+The engine reports what it is doing in formats your existing tools read.
 
-- **[Metrics](/guides/observability/metrics)** — Prometheus-compatible counters, histograms, and gauges for workflow and task execution monitoring
-- **[Tracing](/guides/observability/tracing)** — Distributed tracing with OpenTelemetry for end-to-end visibility across workflow steps
-- **[Logging](/guides/observability/logging)** — Structured, JSON-formatted logs with correlation IDs for efficient debugging
+- **[Metrics](/guides/observability/metrics)** — Prometheus-compatible metrics on `/metrics` for workflow and task execution
+- **[Logging](/guides/observability/logging)** — Structured logs, as JSON with `LOG_FORMAT=json`
+- **[Tracing](/guides/observability/tracing)** — The Python SDK can open an OpenTelemetry span around each workflow and task execution on the worker
 
-## Easy Deployment
+## Deployment
 
-Workers compile to self-contained binaries that include everything needed to connect to the orchestrator and execute workflows. There's no separate runtime to install, no JVM to configure, and no external dependencies to manage — just deploy the binary, point it at your Orcher server, and start processing.
+The engine ships as a Docker image, `ghcr.io/orcher-io/orcher`, and needs only PostgreSQL. Workers deploy like the rest of your code: a Rust binary, or a Python or Node.js application.
 
-- **Self-Contained Binaries** — Workers include the SDK, gRPC client, and all workflow definitions in a single executable
-- **Docker Support** — Official Docker images for containerized deployments with minimal image size
-- **Kubernetes Ready** — Horizontal scaling with standard Kubernetes deployments; workers are stateless and disposable
+- **[Docker](/guides/deployment/docker)** — Run the engine image with Docker or Docker Compose
+- **[Kubernetes](/guides/deployment/kubernetes)** — Run the engine and your workers as standard Kubernetes deployments
+- **Horizontal Scaling** — Add workers to handle more load; any worker registered for a workflow can pick up its next step
 
 ---
 
 ## Next Steps
 
-<div className="grid md:grid-cols-2 gap-4 mt-8">
-  <Link href="/guides/getting-started/architecture" className="not-prose group">
-    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
-      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Architecture</h3>
-      <p className="text-sm text-scale-1100">
-        Understand Orcher's modular crate structure and execution model.
-      </p>
+<div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-8 not-prose">
+  <Link href="/guides/getting-started/architecture" className="no-underline group">
+    <div className="h-full border p-5 flex flex-col gap-3 hover:border-brand-600 transition-colors">
+      <div className="flex items-center gap-2.5">
+        <IconLayers size={16} strokeWidth={1.5} className="text-brand-600" />
+        <span className="text-sm font-medium text-foreground">Architecture</span>
+      </div>
+      <div className="text-xs text-foreground-light leading-relaxed">How the engine, PostgreSQL and your workers fit together, and how a run is journaled and resumed.</div>
     </div>
   </Link>
-
-  <Link href="/guides/getting-started/quickstart" className="not-prose group">
-    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
-      <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Quickstart</h3>
-      <p className="text-sm text-scale-1100">
-        Build and run your first Orcher workflow in minutes.
-      </p>
+  <Link href="/guides/getting-started/quickstart" className="no-underline group">
+    <div className="h-full border border-brand-600 p-5 flex flex-col gap-3 hover:border-brand-600 transition-colors">
+      <div className="flex items-center gap-2.5">
+        <IconPlay size={16} strokeWidth={1.5} className="text-brand-600" />
+        <span className="text-sm font-medium text-foreground">Quickstart</span>
+      </div>
+      <div className="text-xs text-foreground-light leading-relaxed">Start the engine, run a worker, start a workflow, then kill the worker and watch the run resume.</div>
     </div>
   </Link>
 </div>

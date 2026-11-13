@@ -31,3 +31,21 @@
   --brand-300: 180deg 50% 7%;
   --brand-200: 180deg 40% 4%;
 }
+
+/*
+ * Prose links take the brand cyan, and list bullets the brand teal. Cards
+ * built from links opt out with `not-prose` or `no-underline`, as the
+ * typography plugin's own rules do.
+ */
+.prose a:not(:where([class~='not-prose'], [class~='not-prose'] *, [class~='no-underline'])) {
+  color: hsl(var(--brand-link));
+  text-decoration-color: hsl(var(--brand-link) / 0.4);
+}
+
+.prose a:not(:where([class~='not-prose'], [class~='not-prose'] *, [class~='no-underline'])):hover {
+  text-decoration-color: hsl(var(--brand-link));
+}
+
+.prose ul > li::before {
+  background-color: hsl(var(--brand-default));
+}
