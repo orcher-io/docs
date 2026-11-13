@@ -55,9 +55,7 @@ The pipeline is a small DAG: a serial spine of download → transcode → thumbn
       <div className="text-[9px] text-foreground-muted">status: ready</div>
     </div>
   </div>
-  <p className="text-[10px] text-foreground-muted text-center mt-3 mb-0">
-    Fan-out stages run their branches concurrently; each branch is checkpointed on its own.
-  </p>
+  <p className="text-[10px] text-foreground-muted text-center mt-3 mb-0">Fan-out stages run their branches concurrently; each branch is checkpointed on its own.</p>
 </div>
 
 ## Example: a video-processing pipeline
@@ -374,18 +372,14 @@ This is the payoff for long, costly steps. A crash during upload doesn't re-run 
   <Link href="/guides/use-cases/background-tasks/best-practices" className="not-prose group">
     <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
       <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Best Practices</h3>
-      <p className="text-sm text-foreground-light">
-        Guidelines for designing reliable background jobs, plus performance benchmarks.
-      </p>
+      <p className="text-sm text-foreground-light">Guidelines for designing reliable background jobs, plus performance benchmarks.</p>
     </div>
   </Link>
 
   <Link href="/guides/use-cases/background-tasks/email-campaigns" className="not-prose group">
     <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
       <h3 className="text-lg font-bold mb-2 group-hover:text-brand-600">Email Campaigns</h3>
-      <p className="text-sm text-foreground-light">
-        Bulk email sends with batching, rate limiting, and progress tracking.
-      </p>
+      <p className="text-sm text-foreground-light">Bulk email sends with batching, rate limiting, and progress tracking.</p>
     </div>
   </Link>
 </div>

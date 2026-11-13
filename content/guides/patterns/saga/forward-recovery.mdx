@@ -32,9 +32,7 @@ Instead of compensating failed steps (backward recovery), a forward recovery sag
       <div className={`px-4 py-2 flex items-center gap-3 ${i < arr.length - 1 ? 'border-b' : ''} ${s.status === 'fail' ? 'bg-red-500/5' : ''}`}>
         <code className="text-[11px] text-foreground flex-1">{s.task}</code>
         <span className="text-[9px] font-mono text-foreground-muted">#{s.attempt}</span>
-        <span className={`text-[10px] ${s.status === 'fail' ? 'text-red-400' : 'text-foreground-muted'}`}>
-          {s.status === 'fail' ? '✗' : '✓'}
-        </span>
+        <span className={`text-[10px] ${s.status === 'fail' ? 'text-red-400' : 'text-foreground-muted'}`}>{s.status === 'fail' ? '✗' : '✓'}</span>
       </div>
     </div>
   ))}
@@ -244,18 +242,14 @@ async def forward_recovery_saga(ctx: WorkflowContext, order: dict) -> dict:
   <Link href="/guides/patterns/saga/event-driven" className="no-underline">
     <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
       <h3 className="text-lg font-semibold mb-2">Event-Driven Saga</h3>
-      <p className="text-sm text-foreground-light">
-        Coordinate saga steps through external events and confirmations
-      </p>
+      <p className="text-sm text-foreground-light">Coordinate saga steps through external events and confirmations</p>
     </div>
   </Link>
 
   <Link href="/guides/patterns/saga/best-practices" className="no-underline">
     <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
       <h3 className="text-lg font-semibold mb-2">Best Practices & Pitfalls</h3>
-      <p className="text-sm text-foreground-light">
-        Idempotency, compensation order, performance, and common mistakes to avoid
-      </p>
+      <p className="text-sm text-foreground-light">Idempotency, compensation order, performance, and common mistakes to avoid</p>
     </div>
   </Link>
 </div>
