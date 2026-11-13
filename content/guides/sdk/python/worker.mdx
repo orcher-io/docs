@@ -51,7 +51,7 @@ The builder can also import modules for you:
 | `.workflow_interceptor(i)` / `.task_interceptor(i)` | none | Add an interceptor to one chain only |
 | `.auto_discover(paths, *, patterns, exclude)` | off | Import matching files before building |
 
-Durations accept a `timedelta`, or an `int` of milliseconds. `.workflow_poll_interval()`, `.task_poll_interval()`, `.force_shutdown_timeout()` and `.binary_checksum()` are accepted but have no effect in `orcher-sdk` 0.4.4.
+Durations accept a `timedelta`, or an `int` of milliseconds. `.workflow_poll_interval()`, `.task_poll_interval()`, `.force_shutdown_timeout()` and `.binary_checksum()` are accepted but have no effect on how the worker runs; `binary_checksum` is only reported back by `worker.get_identity()`.
 
 ### From the environment
 
@@ -131,7 +131,7 @@ To write your own, subclass `WorkflowInterceptor` or `TaskInterceptor` and overr
 
 Run more worker processes on the same task queue, on one machine or many; each polls for work independently and the engine hands each piece of work to one of them. Within a process, `max_concurrent_workflows` and `max_concurrent_tasks` cap how much runs at once.
 
-Each worker also hosts up to 10 [sessions](/guides/sdk/python/sessions) at a time, a limit the builder can't change in `orcher-sdk` 0.4.4.
+Each worker also hosts up to 10 [sessions](/guides/sdk/python/sessions) at a time, a limit the builder can't change.
 
 ---
 

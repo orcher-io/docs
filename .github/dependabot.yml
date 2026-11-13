@@ -1,0 +1,31 @@
+# The samples are checked against the published SDKs, so a new SDK release
+# should reach them as a pull request: its CI compiles every sample against
+# it, and the guides' version notes get reviewed in the same change.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /samples/rust
+    schedule:
+      interval: weekly
+    allow:
+      - dependency-name: orcher-sdk
+    commit-message:
+      prefix: chore(samples)
+
+  - package-ecosystem: npm
+    directory: /samples/typescript
+    schedule:
+      interval: weekly
+    allow:
+      - dependency-name: "@orcher/sdk"
+    commit-message:
+      prefix: chore(samples)
+
+  - package-ecosystem: pip
+    directory: /samples/python
+    schedule:
+      interval: weekly
+    allow:
+      - dependency-name: orcher-sdk
+    commit-message:
+      prefix: chore(samples)

@@ -116,13 +116,6 @@ Results are journaled once, but side effects need an idempotency key that is the
 attempt. Build it from the business identity of the work, as `chargeCard` above does with the
 order id, and pass it to the service you call.
 
-<Admonition type="caution">
-
-In `@orcher/sdk` 0.5.4, `ctx.taskId()` and `ctx.runId()` return `'unknown'` inside a task run by a
-worker. Don't build idempotency keys from them.
-
-</Admonition>
-
 ---
 
 ## Heartbeats
@@ -175,7 +168,7 @@ Or wait on the cancellation token, for example to abort a request in flight:
 | `ctx.isCancelled()` | Whether the engine has asked the attempt to stop |
 | `ctx.cancellationToken()` | A token with `isCancelled` and `waitForCancellation()` |
 | `ctx.logger()` | A logger that prefixes each line with the task's metadata |
-| `ctx.taskId()` / `ctx.runId()` | Return `'unknown'` in 0.5.4; see [idempotency](#idempotency) |
+| `ctx.taskId()` / `ctx.runId()` | The task's id and its run's id |
 
 ---
 

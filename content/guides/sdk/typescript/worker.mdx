@@ -86,8 +86,7 @@ To serve only some of them, pass `workflows` and `tasks`: the references `workfl
 
 <$CodeSample path="typescript/src/worker/options.ts" region="only" />
 
-Pass references, not `@Workflow()` classes: in `@orcher/sdk` 0.5.4 a class given in `workflows`
-is registered under its JavaScript class name rather than its workflow name.
+A `@Workflow()` class given in `workflows` is registered under the name its decorator declares.
 
 Names are global within a process: a second task or workflow registered under a name already
 in use replaces the first, with a warning in the log.

@@ -32,8 +32,7 @@ checked when the class is defined.
 <$CodeSample path="typescript/src/workflows/define.ts" region="class" />
 
 Both forms register the workflow under its name, which is the `workflowType` clients start it
-by. A workflow takes one input: an object, or a single string, number or boolean. A top-level
-array is not delivered intact in `@orcher/sdk` 0.5.4, so wrap lists in an object.
+by. A workflow takes one input: an object, an array, or a single string, number or boolean.
 
 The other `workflow()` and `@Workflow()` options (`version`, `description`, `timeout`,
 `cronSchedule`) are recorded but have no effect on how the workflow runs. Set timeouts and

@@ -19,11 +19,11 @@ Decorate an `async` function whose first parameter is the `WorkflowContext`:
 
 `name` is required, and is the type clients start. `version` is a label recorded on the execution for logs and metrics (see [Changing workflow code](#changing-workflow-code)); `description` is free text.
 
-A class with an `async def run(self, ctx, ...)` method works too. `orcher-sdk` 0.4.4 types the decorator for functions only, so mypy needs the `type: ignore` shown:
+A class with an `async def run(self, ctx, ...)` method works too, and keeps its type under the decorator:
 
 <$CodeSample path="python/workflows/defining.py" region="class" />
 
-`@workflow` also accepts `cron_schedule=`, but in `orcher-sdk` 0.4.4 that value is only kept in the workflow's metadata: the worker doesn't send it to the engine. See [cron schedules](/guides/sdk/python/client#cron-schedules) for running a workflow on a schedule.
+`@workflow` also accepts `cron_schedule=`, but that value is only kept in the workflow's metadata: the worker doesn't send it to the engine. See [cron schedules](/guides/sdk/python/client#cron-schedules) for running a workflow on a schedule.
 
 ---
 
@@ -38,12 +38,6 @@ A workflow's input arrives the way it was sent. A dict is spread into keyword ar
 Several values in `args` arrive as **one** list argument, not as separate arguments, so send a dict when the workflow takes more than one parameter.
 
 Inputs and results travel as JSON: return dicts, lists, strings, numbers, booleans or `None` from a workflow.
-
-<Admonition type="caution">
-
-In `orcher-sdk` 0.4.4 a workflow whose result is falsy (`0`, `False`, `""`, `[]` or `{}`) reaches the caller as `None` ([sdk-py#6](https://github.com/orcher-io/sdk-py/issues/6)). Until that is fixed, wrap such a result, for example `{"count": 0}`.
-
-</Admonition>
 
 ---
 

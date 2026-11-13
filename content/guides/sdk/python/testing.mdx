@@ -73,11 +73,11 @@ In the environment a mocked task is called once: there are no retries, and a fai
 
 ## What the environment supports
 
-The workflow runs with a test context, not a `WorkflowContext`, and in `orcher-sdk` 0.4.4 that context supports only part of the API:
+The workflow runs with a test context, not a `WorkflowContext`, and that context supports only part of the API:
 
 | Supported | Not supported |
 |---|---|
-| `execute_task`, `sleep`, `set_state`, `get_state(key)` (no default argument) | `execute`, `ctx.time`, `ctx.random`, `ctx.info`, events, child workflows, sessions, `restart_fresh`, queries and updates |
+| `execute_task`, `sleep`, `set_state`, `get_state(key)` (no default argument), `now()`, `is_replaying`, `workflow_id`, `workflow_type` | `execute`, `ctx.time`, `ctx.random`, `ctx.info`, events, child workflows, sessions, `restart_fresh`, queries and updates |
 
 A workflow that uses the unsupported parts fails in the environment with `AttributeError` or `TypeError`. Test those workflows against a real engine instead: the [quickstart](/guides/getting-started/quickstart) starts one locally.
 
