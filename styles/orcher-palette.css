@@ -1,0 +1,33 @@
+/*
+ * ORCHER's colours on the docs theme. The theme's brand tokens were neutral
+ * greys; these give them the teal-to-cyan of the ORCHER mark (#04B385 to
+ * #38BDF0). Dark mode uses those colours as they are; light mode uses darker
+ * shades, since the banner cyan on white is under 3:1 contrast and text needs
+ * 4.5:1. Values are HSL channels, like the theme's own.
+ */
+
+[data-theme='light'],
+.light {
+  --brand-link: 198deg 80% 36%;
+  --brand-default: 164deg 96% 24%;
+  --brand-600: 198deg 80% 36%;
+  --brand-500: 198deg 77% 47%;
+  --brand-400: 180deg 45% 78%;
+  --brand-300: 180deg 50% 88%;
+  --brand-200: 180deg 55% 95%;
+}
+
+[data-theme='deep-dark'],
+.deep-dark,
+[data-theme='classic-dark'],
+.classic-dark,
+[data-theme='dark'],
+.dark {
+  --brand-link: 197deg 86% 58%;
+  --brand-default: 164deg 96% 36%;
+  --brand-600: 197deg 86% 58%;
+  --brand-500: 180deg 60% 14%;
+  --brand-400: 180deg 55% 10%;
+  --brand-300: 180deg 50% 7%;
+  --brand-200: 180deg 40% 4%;
+}
