@@ -1160,9 +1160,9 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
 name = "orcher-proto"
-version = "0.15.0"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "118e84bc3f0a540bff63ed77735289961bf119ea98b818db3af8fd8dfb4a1f43"
+checksum = "51b149e1617a67ee71a05d64ce77375bf4b0d09f5ea4f896d40d80005d0051c9"
 dependencies = [
  "prost",
  "prost-types",
@@ -1174,9 +1174,9 @@ dependencies = [
 
 [[package]]
 name = "orcher-sdk"
-version = "0.17.0"
+version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4183b587b9c70a4f5da814fc1543a53323d1c9d16956e9f34b2c2f858cf6d78f"
+checksum = "21c36a5ca00d6a86cda8040513f0bf2be3768f4005caf6fef576a35262f5df09"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1205,9 +1205,9 @@ dependencies = [
 
 [[package]]
 name = "orcher-sdk-core"
-version = "0.23.0"
+version = "0.23.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0f6c5758c32711afea29a155fc2ae360f2b81488272ed4dd631657c223f6542"
+checksum = "3d01702a9dfe68f467c613850b4a7c46047ac85897c1a3989178f42d6b265131"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1235,9 +1235,9 @@ dependencies = [
 
 [[package]]
 name = "orcher-sdk-macros"
-version = "0.17.0"
+version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e48588fcbf7cfbdb666033d078737d4327b0f3ef33e37478d947cb80c0e0bf6"
+checksum = "0795172721381ac7da1693f64dea771222d4a825d4657d0f0b5eb37c04989698"
 dependencies = [
  "ctor",
  "darling",
