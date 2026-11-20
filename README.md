@@ -16,7 +16,8 @@
 
 <br />
 
-The source of the ORCHER documentation site: guides for the
+The source of the ORCHER documentation site, published at
+[docs.orcher.io](https://docs.orcher.io): guides for the
 [engine](https://github.com/orcher-io/orcher), the Rust, Python and TypeScript
 SDKs and the CLI. It is a Next.js app that renders MDX files on the server.
 
@@ -81,9 +82,23 @@ With a base path, `/` redirects to it.
 
 ### <img height="16" src="https://octicons-col.vercel.app/rocket/38BDF0"> Deploy
 
-The site is a Node server (`next start`), not a static export: pages are
-rendered from the MDX on disk. Nothing is deployed from this repository
-automatically.
+**docs.orcher.io** is published from this repository by
+`.github/workflows/pages.yml` on every push to `main`: a static export
+(`NEXT_OUTPUT=export`, empty base path) served by GitHub Pages, with the custom
+domain set in the repository's Pages settings and a `CNAME` record for
+`docs.orcher.io` pointing at `orcher-io.github.io`. To build the same site
+locally:
+
+```bash
+NEXT_OUTPUT=export NEXT_PUBLIC_BASE_PATH= NEXT_PUBLIC_SITE_URL=https://docs.orcher.io pnpm build
+npx serve out                                # every page is a file under out/
+```
+
+A static export sets no response headers and makes no redirects; the server
+builds below do both.
+
+The site also runs as a Node server (`next start`), rendering pages from the
+MDX on disk:
 
 **Docker** (any container host, including a Render Docker service):
 
