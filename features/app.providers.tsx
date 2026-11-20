@@ -13,7 +13,7 @@ import { ScrollRestoration } from './ui/helpers.scroll.client'
  */
 function GlobalProviders({ children }: PropsWithChildren) {
   return (
-    <ThemeProvider defaultTheme="system" enableSystem disableTransitionOnChange>
+    <ThemeProvider defaultTheme="dark" enableSystem disableTransitionOnChange>
       <TooltipProvider delayDuration={0}>
         <DocsCommandProvider>
           <ScrollRestoration />
