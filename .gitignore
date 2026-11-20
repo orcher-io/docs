@@ -17,3 +17,6 @@ samples/**/target/
 samples/**/node_modules/
 samples/**/.venv/
 __pycache__/
+
+# Static export (NEXT_OUTPUT=export)
+/out
