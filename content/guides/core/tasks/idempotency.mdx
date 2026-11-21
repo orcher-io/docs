@@ -9,7 +9,9 @@ Tasks should be designed to be safely retried without causing duplicate side eff
 
 ### Using Idempotency Keys
 
-Pass a unique idempotency key with external API calls so that retries don't create duplicate side effects. The `TaskContext` provides a task token and attempt number that you can combine to build a stable key for each execution attempt.
+A task runs **at least once**. If a worker charges a card and then crashes before its result reaches the engine, the journal has no result for that step, so the engine retries the task once its start-to-close or heartbeat timeout expires, and the task calls the payment provider again. Replay cannot prevent this: it only skips steps whose results are already in the journal.
+
+Pass the external system an idempotency key that is **the same on every attempt**, so a repeated call returns the original result instead of acting twice. Build it from a business id (an order or payment id), or from the workflow id together with the task id (Rust `ctx.workflow_id()` and `ctx.task_id()`, TypeScript `ctx.workflowId()` and `ctx.taskId()`, Python `ctx.info.workflow_id` and `ctx.task_id`). The task id stays the same across a task's retries, but it is numbered within one workflow, so the same id appears in every workflow: on its own, two customers' charges would share a key. Never include the attempt number: that gives each retry a new key, and the provider would charge again.
 
 <Tabs
   scrollable
@@ -59,29 +61,6 @@ Ok(ChargeResult {
 }
 ```
 
-**What happens on retry:**
-```rust
-// First execution (workflow run #1):
-// 1. Orcher executes task
-// 2. Stripe receives request with idempotency_key="order_12345"
-// 3. Stripe creates charge, stores key
-// 4. Returns charge_id="ch_abc123"
-// 5. Orcher saves result to journal
-
-// Second execution (if workflow retried):
-// 1. Orcher checks journal first
-// 2. Finds cached result: charge_id="ch_abc123"
-// 3. Returns cached result immediately (NO API call to Stripe)
-// 4. Customer charged only once ✓
-
-// Third execution (if task manually re-run outside workflow):
-// 1. Task executes again
-// 2. Stripe receives request with same idempotency_key="order_12345"
-// 3. Stripe recognizes the key
-// 4. Returns original charge_id="ch_abc123" (NO new charge created)
-// 5. Customer still charged only once ✓
-```
-
 </TabPanel>
 
 <TabPanel id="typescript" label="TypeScript">
@@ -121,29 +100,6 @@ status: 'succeeded',
 }
 ```
 
-**What happens on retry:**
-```typescript
-// First execution (workflow run #1):
-// 1. Orcher executes task
-// 2. Stripe receives request with idempotencyKey="order_12345"
-// 3. Stripe creates charge, stores key
-// 4. Returns chargeId="ch_abc123"
-// 5. Orcher saves result to journal
-
-// Second execution (if workflow retried):
-// 1. Orcher checks journal first
-// 2. Finds cached result: chargeId="ch_abc123"
-// 3. Returns cached result immediately (NO API call to Stripe)
-// 4. Customer charged only once ✓
-
-// Third execution (if task manually re-run outside workflow):
-// 1. Task executes again
-// 2. Stripe receives request with same idempotencyKey="order_12345"
-// 3. Stripe recognizes the key
-// 4. Returns original chargeId="ch_abc123" (NO new charge created)
-// 5. Customer still charged only once ✓
-```
-
 </TabPanel>
 
 <TabPanel id="python" label="Python">
@@ -155,74 +111,101 @@ from dataclasses import dataclass
 
 @dataclass
 class PaymentInput:
-amount: int
-card_token: str
-order_id: str
+    amount: int
+    card_token: str
+    order_id: str
 
 @dataclass
 class ChargeResult:
-charge_id: str
-amount: int
-status: str
+    charge_id: str
+    amount: int
+    status: str
 
 @task(
-name="charge_card",
-retry_policy={"max_attempts": 3},  # Task may be retried up to 3 times
+    name="charge_card",
+    retry_policy={"max_attempts": 3},  # Task may be retried up to 3 times
 )
 async def charge_card(ctx: TaskContext, input: PaymentInput) -> ChargeResult:
-# Create charge with idempotency key
-charge = stripe.Charge.create(
-    amount=input.amount,           # e.g., 5000 (= $50.00)
-    currency="usd",                # USD currency
-    source=input.card_token,       # Customer's card token
-    # THE KEY LINE: Idempotency key prevents duplicate charges
-    # Format: "order_12345"
-    # If Stripe sees this key again, it returns the original charge
-    # without creating a new one
-    idempotency_key=f"order_{input.order_id}",
-)
+    # Create charge with idempotency key
+    charge = stripe.Charge.create(
+        amount=input.amount,           # e.g., 5000 (= $50.00)
+        currency="usd",                # USD currency
+        source=input.card_token,       # Customer's card token
+        # THE KEY LINE: Idempotency key prevents duplicate charges
+        # Format: "order_12345"
+        # If Stripe sees this key again, it returns the original charge
+        # without creating a new one
+        idempotency_key=f"order_{input.order_id}",
+    )
 
-# Return charge details
-return ChargeResult(
-    charge_id=charge.id,       # e.g., "ch_abc123"
-    amount=charge.amount,      # 5000
-    status="succeeded",
-)
-```
-
-**What happens on retry:**
-```python
-# First execution (workflow run #1):
-# 1. Orcher executes task
-# 2. Stripe receives request with idempotency_key="order_12345"
-# 3. Stripe creates charge, stores key
-# 4. Returns charge_id="ch_abc123"
-# 5. Orcher saves result to journal
-
-# Second execution (if workflow retried):
-# 1. Orcher checks journal first
-# 2. Finds cached result: charge_id="ch_abc123"
-# 3. Returns cached result immediately (NO API call to Stripe)
-# 4. Customer charged only once
-
-# Third execution (if task manually re-run outside workflow):
-# 1. Task executes again
-# 2. Stripe receives request with same idempotency_key="order_12345"
-# 3. Stripe recognizes the key
-# 4. Returns original charge_id="ch_abc123" (NO new charge created)
-# 5. Customer still charged only once
+    # Return charge details
+    return ChargeResult(
+        charge_id=charge.id,       # e.g., "ch_abc123"
+        amount=charge.amount,      # 5000
+        status="succeeded",
+    )
 ```
 
 </TabPanel>
 
 </Tabs>
 
+**What happens when the worker crashes after the charge:**
+
+1. Attempt 1 sends the charge with key `order_12345`; Stripe charges the card.
+2. The worker crashes before reporting the result, so the journal has none.
+3. The task's timeout expires and the engine schedules attempt 2.
+4. Attempt 2 sends the same key; Stripe returns the original charge and does not charge again.
+5. The result reaches the journal. From then on, replay returns it without running the task.
+
 **Key Takeaways:**
-- Idempotency key should be based on workflow/order ID, not timestamps
-- Use same key format consistently: `order_{orderId}`, `payment_{paymentId}`
-- External system (Stripe) deduplicates based on key
-- Orcher's journal provides first layer of deduplication
-- Idempotency key provides second layer (if task runs outside workflow)
+- A task can run more than once, so every external side effect needs a key the external system deduplicates on
+- Base the key on something stable: an order id, a payment id, or the workflow id with the task id; never a timestamp, the attempt number, or the task id alone
+- The journal covers steps whose results it recorded; the key covers the gap between the side effect and that record
+- Set a start-to-close or heartbeat timeout so a task lost with its worker is retried promptly
+
+### Generating the key in the workflow
+
+When no business id exists yet, generate the key in the workflow and pass it to the task as input. A workflow's random values are deterministic, so the key is the same on every replay and on every retry of the task.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+```rust
+// Inside the workflow: the same value on every replay.
+let key = format!("charge-{}", ctx.rand().uuid());
+```
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+```typescript
+// Inside the workflow: the same value on every replay.
+const key = `charge-${ctx.random.uuid()}`;
+```
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+```python
+# Inside the workflow: the same value on every replay.
+key = f"charge-{ctx.random.uuid()}"
+```
+
+</TabPanel>
+
+</Tabs>
+
+Pass `key` in the task's input and send it to the provider as the idempotency key. If the external system has no idempotency keys, use the check-before-execute pattern below: look up whether the operation already happened under your id before performing it.
 
 ---
 
