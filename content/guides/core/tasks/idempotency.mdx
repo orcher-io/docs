@@ -11,7 +11,7 @@ Tasks should be designed to be safely retried without causing duplicate side eff
 
 A task runs **at least once**. If a worker charges a card and then crashes before its result reaches the engine, the journal has no result for that step, so the engine retries the task once its start-to-close or heartbeat timeout expires, and the task calls the payment provider again. Replay cannot prevent this: it only skips steps whose results are already in the journal.
 
-Pass the external system an idempotency key that is **the same on every attempt**, so a repeated call returns the original result instead of acting twice. Build it from a business id (an order or payment id), or from the workflow id together with `ctx.taskId()`. The task id stays the same across a task's retries, but it is numbered within one workflow, so the same id appears in every workflow: on its own, two customers' charges would share a key. Never include the attempt number: that gives each retry a new key, and the provider would charge again.
+Pass the external system an idempotency key that is **the same on every attempt**, so a repeated call returns the original result instead of acting twice. Build it from a business id (an order or payment id), or from the workflow id together with the task id (Rust `ctx.workflow_id()` and `ctx.task_id()`, TypeScript `ctx.workflowId()` and `ctx.taskId()`, Python `ctx.info.workflow_id` and `ctx.task_id`). The task id stays the same across a task's retries, but it is numbered within one workflow, so the same id appears in every workflow: on its own, two customers' charges would share a key. Never include the attempt number: that gives each retry a new key, and the provider would charge again.
 
 <Tabs
   scrollable
@@ -160,7 +160,7 @@ async def charge_card(ctx: TaskContext, input: PaymentInput) -> ChargeResult:
 
 **Key Takeaways:**
 - A task can run more than once, so every external side effect needs a key the external system deduplicates on
-- Base the key on something stable: an order id, a payment id, or the workflow id with `ctx.taskId()`; never a timestamp, the attempt number, or the task id alone
+- Base the key on something stable: an order id, a payment id, or the workflow id with the task id; never a timestamp, the attempt number, or the task id alone
 - The journal covers steps whose results it recorded; the key covers the gap between the side effect and that record
 - Set a start-to-close or heartbeat timeout so a task lost with its worker is retried promptly
 
