@@ -36,3 +36,9 @@ content/guides/sdk/typescript/testing.mdx
 content/guides/sdk/typescript/worker.mdx
 content/guides/sdk/typescript/workflows.mdx
 content/guides/security/payload-encryption.mdx
+content/guides/local-development.mdx
+content/guides/local-development/configuration.mdx
+content/guides/local-development/debugging-workflows.mdx
+content/guides/local-development/getting-started.mdx
+content/guides/local-development/testing-workflows.mdx
+content/guides/local-development/workflow-development.mdx

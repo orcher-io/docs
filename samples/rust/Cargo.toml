@@ -15,6 +15,7 @@ members = [
     "sdk-testing",
     "sdk-patterns",
     "sdk-encryption",
+    "local-dev",
 ]
 
 [workspace.package]
