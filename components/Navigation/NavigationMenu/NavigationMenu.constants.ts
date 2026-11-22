@@ -634,6 +634,7 @@ export const operations: NavMenuConstant = {
   url: '/guides/operations/orchestrator',
   items: [
     { name: 'Security', url: '/guides/security' },
+    { name: 'Payload Encryption', url: '/guides/security/payload-encryption' },
     {
       name: 'Running Orcher',
       items: [

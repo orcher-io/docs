@@ -1174,9 +1174,9 @@ dependencies = [
 
 [[package]]
 name = "orcher-sdk"
-version = "0.17.2"
+version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21c36a5ca00d6a86cda8040513f0bf2be3768f4005caf6fef576a35262f5df09"
+checksum = "0ebdc7cc42a94ad6e4d7e22ae894a3303c1c68a19fc2afdc7d791096972bc2a2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1205,12 +1205,13 @@ dependencies = [
 
 [[package]]
 name = "orcher-sdk-core"
-version = "0.23.2"
+version = "0.23.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d01702a9dfe68f467c613850b4a7c46047ac85897c1a3989178f42d6b265131"
+checksum = "6322840a90bc53c78c66d513096662de8194816d06474dbc7ff39e237cfd897c"
 dependencies = [
  "aes-gcm",
  "anyhow",
+ "base64",
  "bincode",
  "bytes",
  "flate2",
@@ -1235,9 +1236,9 @@ dependencies = [
 
 [[package]]
 name = "orcher-sdk-macros"
-version = "0.17.2"
+version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0795172721381ac7da1693f64dea771222d4a825d4657d0f0b5eb37c04989698"
+checksum = "b504aa1c35999157eb40ad8b9a195e0edcd719a6e0f6f957fb2968d81fe2c4bf"
 dependencies = [
  "ctor",
  "darling",
@@ -1671,6 +1672,13 @@ dependencies = [
  "orcher-sdk",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "sample-sdk-encryption"
+version = "0.0.0"
+dependencies = [
+ "orcher-sdk",
 ]
 
 [[package]]

@@ -1,0 +1,169 @@
+---
+id: 'payload-encryption'
+title: 'Payload Encryption'
+description: 'Encrypt workflow inputs, results and every other payload in your clients and workers, so the engine stores only what it cannot read.'
+sidebar_label: 'Payload Encryption'
+---
+
+Give your clients and workers a key and they encrypt every payload before it leaves the process and decrypt it after it arrives. The engine never holds the key. It stores what it is sent and returns it unchanged, so the values cannot be read in its database, in a backup of it, or in the dashboard without the key.
+
+Encryption is off unless you turn it on. It needs SDK releases that carry it (Rust 0.18, TypeScript 0.5.21, Python 0.5) and engine 0.7.5 or later.
+
+## Turn it on
+
+Give the same 32-byte key to every client and every worker that exchange payloads. The cipher is AES-256-GCM.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+<$CodeSample path="rust/sdk-encryption/src/lib.rs" region="basic" />
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+<$CodeSample path="typescript/src/encryption/encryption.ts" region="basic" />
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+<$CodeSample path="python/encryption/keys.py" region="basic" />
+
+</TabPanel>
+
+</Tabs>
+
+Generate the key with a cryptographic random source, such as `openssl rand -base64 32`, and keep it in a secret store. Do not put it in source control or in a worker's command line.
+
+## What is encrypted
+
+Every value your code passes through Orcher:
+
+- Workflow inputs and results, including child workflows and batch starts
+- Task inputs and results, and step results
+- Event payloads
+- Query and update arguments and their answers
+- Actor operation arguments and results, and actor state values
+
+## What is not encrypted
+
+The engine needs these to route and report work, so they stay readable to anyone with access to the engine or its database:
+
+- Workflow, task, actor, event, query and update names
+- Workflow ids, actor keys and actor state key names
+- Namespaces, task queues, labels, annotations and headers
+- Error messages, failure types and stack traces
+- Payload sizes, timestamps and statuses
+
+Do not put secrets in a name, an id or an error message. Encryption also does not cover your own logs: a worker that logs its inputs writes them in the clear.
+
+## A worker without the right key
+
+A worker that cannot open a payload does not run your code with it.
+
+- **Workflows**: the worker logs an error, hands the work back to the engine, and tries again every 10 seconds. The run stays open and is not failed, so it continues once a worker with the right key is running.
+- **Tasks**: the attempt fails with the failure type `PayloadCodecError` and is retried under the task's retry policy. A task can use up its attempts this way.
+- **Actor operations**: the caller gets an error.
+
+A client without the key gets an error when it reads a result, a query answer or an update answer.
+
+Roll a key out to every worker on a task queue before any client starts sending encrypted payloads to it.
+
+## Rotate keys
+
+Name the key from the start. The name is stored beside each payload in the clear, and it is what lets a reader pick the right key later.
+
+To rotate, give every client and worker the new key as the current one and keep the old one for reading. New payloads are written with the new key. Runs that started under the old key keep working, because their history is still readable.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+<$CodeSample path="rust/sdk-encryption/src/lib.rs" region="rotation" />
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+<$CodeSample path="typescript/src/encryption/encryption.ts" region="rotation" />
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+<$CodeSample path="python/encryption/keys.py" region="rotation" />
+
+</TabPanel>
+
+</Tabs>
+
+Deploy the new configuration to readers before writers: a process that still holds only the old key cannot read what the new key wrote. Drop an old key only when no open run and no stored result you still need was written with it.
+
+A payload written without a key name is tried against every key the reader holds.
+
+## Compression
+
+Payloads can be gzip-compressed, alone or before encryption. Compressing first is the only order that helps, since encrypted bytes do not compress. The length of a compressed payload says something about its content, so leave compression off where that matters.
+
+<Tabs
+  scrollable
+  size="small"
+  type="underlined"
+  defaultActiveId="rust"
+  queryGroup="language"
+>
+
+<TabPanel id="rust" label="Rust">
+
+<$CodeSample path="rust/sdk-encryption/src/lib.rs" region="compression" />
+
+</TabPanel>
+
+<TabPanel id="typescript" label="TypeScript">
+
+<$CodeSample path="typescript/src/encryption/encryption.ts" region="compression" />
+
+</TabPanel>
+
+<TabPanel id="python" label="Python">
+
+<$CodeSample path="python/encryption/keys.py" region="compression" />
+
+</TabPanel>
+
+</Tabs>
+
+## In the dashboard
+
+The dashboard shows an encrypted value as **Encrypted**. To read it, add the key under **Settings → Encryption**. The dashboard decrypts in your browser: the key is kept for that tab only, is gone when the tab closes, and is never sent to the engine.
+
+## Turning it on for a running system
+
+Payloads written before encryption was turned on stay as they were, and a client or worker with a key still reads them. Nothing already stored is re-encrypted.
+
+## What the engine stores
+
+An encrypted payload is stored as a small JSON object: the encoding, the key name if there is one, and the ciphertext in base64.
+
+```json
+{
+  "metadata": { "encoding": "binary/encrypted", "encryption-key-id": "2026" },
+  "data": "EX0VeznVYsaQ91AV9IF+DYSG+FfT..."
+}
+```
+
+A value of your own with exactly this shape, an object holding only `metadata` and `data`, is read as an encoded payload. Wrap it in another object if you need to send one.
