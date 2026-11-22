@@ -35,3 +35,4 @@ content/guides/sdk/typescript/tasks.mdx
 content/guides/sdk/typescript/testing.mdx
 content/guides/sdk/typescript/worker.mdx
 content/guides/sdk/typescript/workflows.mdx
+content/guides/security/payload-encryption.mdx

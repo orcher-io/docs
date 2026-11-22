@@ -17,6 +17,7 @@ Orcher supports API key authentication for SDK-to-orchestrator communication. Wo
 
 ## Data Security
 
+- **Payload encryption** — Clients and workers can encrypt every payload with a key the engine never holds, so workflow data is unreadable in the database and the dashboard. See [Payload Encryption](/guides/security/payload-encryption)
 - **PostgreSQL ACID guarantees** — All workflow state, journals, and execution logs are stored in PostgreSQL with full transactional integrity
 - **No external dependencies** — Orcher does not phone home or send telemetry to third-party services
 - **Credential management** — Database and Redis credentials are configured via environment variables or TOML configuration files

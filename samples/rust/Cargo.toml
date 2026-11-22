@@ -14,6 +14,7 @@ members = [
     "sdk-actors",
     "sdk-testing",
     "sdk-patterns",
+    "sdk-encryption",
 ]
 
 [workspace.package]

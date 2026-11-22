@@ -158,7 +158,7 @@ Client calls return `orcher_sdk::Error`. The variants you will match most are `E
 
 ## Payload Encoding
 
-`client.with_gzip_compression()` and `client.with_encryption(&key)` encode workflow inputs before they are sent, with gzip or AES-256-GCM. The worker must decode them with the matching `WorkerBuilder::with_gzip_compression()` or `with_encryption(&key)`. The server decodes payloads and stores plain JSON, so encryption protects data in transit only; it is not end-to-end encryption.
+`client.with_encryption(&key)` encrypts every payload the client sends with AES-256-GCM and decrypts every payload it reads; `client.with_gzip_compression()` does the same with gzip. Workers need the matching `WorkerBuilder::with_encryption(&key)` or `with_gzip_compression()`. The engine stores what it is sent and cannot read it. To name a key, rotate keys or combine the two, pass a chain to `with_codec_chain`. See [Payload Encryption](/guides/security/payload-encryption).
 
 ---
 

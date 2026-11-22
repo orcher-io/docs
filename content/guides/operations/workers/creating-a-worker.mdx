@@ -135,10 +135,8 @@ All SDKs support the same core configuration through their builder APIs. Default
 Worker::builder()
     .server_url("https://orchestrator:50051")
     .task_queue("orders")
-    // AES-256-GCM payload encryption
+    // Encrypt every payload with AES-256-GCM; clients need the same key
     .with_encryption(&encryption_key)
-    // gRPC compression
-    .with_gzip_compression()
     // Custom interceptor for logging/auth
     .interceptor(LoggingInterceptor::new())
     .build()

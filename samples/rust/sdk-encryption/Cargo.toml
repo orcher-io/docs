@@ -1,0 +1,9 @@
+# Shown in content/guides/security/payload-encryption.mdx.
+[package]
+name = "sample-sdk-encryption"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+orcher-sdk.workspace = true

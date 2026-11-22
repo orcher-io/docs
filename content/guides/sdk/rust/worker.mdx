@@ -36,7 +36,7 @@ A `Worker` connects to the Orcher server over gRPC, polls one task queue in one 
 | `max_sessions(n)` | 10 | [Sessions](/guides/sdk/rust/sessions) this worker accepts at once |
 | `heartbeat_interval(duration)` | 10 s | How often the worker re-announces itself to the server |
 | `poll_interval(duration)` | 100 ms | Pause between polls |
-| `with_gzip_compression()` / `with_encryption(&key)` | None | Decode payloads the [client](/guides/sdk/rust/client#payload-encoding) encoded |
+| `with_encryption(&key)` / `with_gzip_compression()` / `with_codec_chain(chain)` | None | Encrypt or compress every payload; must match the [client](/guides/sdk/rust/client#payload-encoding). See [Payload Encryption](/guides/security/payload-encryption) |
 | `interceptor(hook)` | None | Run code around every workflow and task execution |
 
 <$CodeSample path="rust/sdk-worker/src/main.rs" region="tuning" />
