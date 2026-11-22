@@ -6,9 +6,9 @@ real source file and is compiled against the **published** SDKs by
 
 | Language   | Package checked against                  | How                                   |
 |------------|------------------------------------------|---------------------------------------|
-| Rust       | `orcher-sdk` 0.7 (crates.io)             | `cargo check` of the `rust/` workspace, warnings are errors |
+| Rust       | `orcher-sdk` 0.18 (crates.io)            | `cargo check` of the `rust/` workspace, warnings are errors |
 | TypeScript | `@orcher/sdk` 0.5 (npm)                  | `tsc --noEmit` over `typescript/`     |
-| Python     | `orcher-sdk` 0.4 (PyPI)                  | `compileall` + `mypy --strict` per `python/<topic>/` |
+| Python     | `orcher-sdk` 0.5 (PyPI)                  | `compileall` + `mypy --strict` per `python/<topic>/` |
 | CLI        | `orcher` (the CLI on `PATH`, or `$ORCHER_CLI`) | every `orcher ...` line in a shell block must be a real subcommand with real flags |
 
 ## Adding a sample to a page
