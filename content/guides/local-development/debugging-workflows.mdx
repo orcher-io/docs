@@ -144,7 +144,7 @@ The engine logs at `info`. For more, restart it at `debug`. The data is kept:
 
 ```bash
 orcher dev stop
-orcher server start --engine-version 0.7.2 --log-level debug
+orcher server start --engine-version 0.7.5 --log-level debug
 ```
 
 With Compose, set `ORCHER_LOG_LEVEL=debug` when you run `docker compose up -d --wait`.
@@ -170,7 +170,7 @@ When the local engine has collected more runs than you want to look through, del
 
 ```bash
 orcher dev stop --delete-data
-orcher dev start --engine-version 0.7.2
+orcher dev start --engine-version 0.7.5
 ```
 
 With Compose, `docker compose down -v` and then `docker compose up -d --wait`.
