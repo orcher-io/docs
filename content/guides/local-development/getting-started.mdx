@@ -80,7 +80,7 @@ This guide was checked with `orcher 0.1.4`. Every release also has binaries and 
 ## 2. Start the engine
 
 ```bash
-orcher dev start --engine-version 0.7.2
+orcher dev start --engine-version 0.7.5
 ```
 
 The first run pulls two images, the engine and Postgres, and then prints where the engine listens:
@@ -88,7 +88,7 @@ The first run pulls two images, the engine and Postgres, and then prints where t
 ```
 Local engine
   State     ready
-  Image     ghcr.io/orcher-io/orcher:0.7.2
+  Image     ghcr.io/orcher-io/orcher:0.7.5
   gRPC      http://localhost:50051
   Dashboard http://localhost:8080
   Health    http://localhost:8080/health/ready
@@ -110,7 +110,7 @@ Pass `--engine-version`. Without it, CLI 0.1.4 starts engine 0.6.2, which has no
 Port taken? Pick others. The command prints the `export` line that points the CLI and your workers at the new gRPC port:
 
 ```bash
-orcher dev start --engine-version 0.7.2 --port 50061 --http-port 8081
+orcher dev start --engine-version 0.7.5 --port 50061 --http-port 8081
 export ORCHER_SERVER=http://localhost:50061
 ```
 
@@ -291,7 +291,7 @@ orcher dev stop --delete-data    # also deletes every workflow it ran
 
 ## Without the CLI
 
-The engine is a container, so Docker alone can run it. The [quickstart repository](https://github.com/orcher-io/quickstart) has a Compose file that starts Postgres and engine 0.7.2 on the same ports:
+The engine is a container, so Docker alone can run it. The [quickstart repository](https://github.com/orcher-io/quickstart) has a Compose file that starts Postgres and engine 0.7.5 on the same ports:
 
 ```bash
 git clone https://github.com/orcher-io/quickstart.git
