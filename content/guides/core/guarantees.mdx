@@ -1,0 +1,107 @@
+---
+id: 'guarantees'
+title: 'Guarantees'
+description: 'What Orcher promises about your workflows and tasks, what it does not, and what your code has to do in return.'
+sidebar_label: 'Guarantees'
+---
+
+This page states what the engine promises, what it does not, and what that asks of your code. It describes engine 0.7.5 with the current SDKs (Rust 0.18, TypeScript 0.5.21, Python 0.5).
+
+## In short
+
+| | The promise |
+| --- | --- |
+| A started workflow | Runs until it completes, fails, or is cancelled or terminated. A worker or engine crash does not lose it. |
+| A task | Runs **at least once**. Its result is recorded **once**. |
+| A task that fails | Is tried three times by default, then fails the workflow. |
+| A timer | Is kept by the engine, so it fires whether or not a worker is running. |
+| A workflow id | Names at most one open run at a time. |
+| Workflow code | Is run again from the top on every resume, so it must be deterministic. |
+
+## What is stored, and when
+
+PostgreSQL is the only place Orcher keeps state. The engine holds nothing that would be lost with it: it can be stopped, restarted or replaced at any point and every run carries on.
+
+- A start is acknowledged after the run and its first journal entry are committed.
+- A task's result, and the journal entry that records it, are committed in one transaction.
+
+So Orcher is as durable as your database. A run survives anything a committed PostgreSQL transaction survives, and nothing more. Back the database up and replicate it as you would for any system of record.
+
+## Tasks run at least once
+
+A task is where side effects go, and Orcher guarantees it is attempted until it succeeds or its attempts run out. It does not guarantee the task body runs only once.
+
+A task runs a second time when:
+
+- **It failed.** A task that returns an error is retried. By default it gets three attempts, with a growing delay between them, and then the workflow fails with the task's error. A retry policy on the task changes the number of attempts and the delays.
+- **Its worker died or stopped answering.** Workers send heartbeats for the tasks they run. When they stop, the engine times the attempt out and gives the task to another worker. With the default heartbeat timeout this happens within about a minute.
+
+In the second case the first attempt may have done its work before the worker died. The payment was taken, and then the process was killed before it could say so. The task runs again.
+
+What Orcher does guarantee is that only one result counts:
+
+- The result of a task is recorded once. A second report for the same task does not replace it.
+- A report from an attempt that was timed out and handed on is refused.
+- Once the result is recorded, the task is never run again for that workflow, however many times the workflow resumes.
+
+**What this asks of you:** make tasks safe to run twice. Pass the service you call an idempotency key derived from the workflow id, or check whether the work was already done before doing it.
+
+## Workflow code is replayed
+
+A worker does not keep a workflow in memory while it waits. Each time there is something new for a run (a task finished, a timer fired, an event arrived), a worker runs the workflow function from the top. Steps that are already in the journal return their recorded results at once and are not run again. The function then carries on from where it had stopped.
+
+For this to work, the function must take the same path every time it is given the same journal. Workflow code must not read the clock, generate random values, or do I/O directly. Each SDK gives the workflow context a clock and a random source that are safe to use, and everything else belongs in a task.
+
+A step you run inline in workflow code, rather than as a task, has a weaker guarantee than a task: if the worker crashes after running it but before its result is saved, it runs again on resume.
+
+### When the code no longer matches the journal
+
+If a worker replays a run and the code asks for something different from what the journal holds, the worker detects it. It logs that the workflow "is not deterministic", does not apply the result, and hands the run back.
+
+The run is **not failed**. It stays open, and workers keep trying it with a growing delay of up to a minute. A run in this state finishes as soon as a worker with matching code picks it up, so deploying the previous code again lets it complete. You can also cancel or terminate it.
+
+## Changing workflow code while runs are open
+
+Runs that are already open were journaled by the old code and will be replayed by the new code. Whether a change is safe depends on whether the new code still takes the path those journals recorded.
+
+Safe for open runs:
+
+- Changing what a task does inside. The journal holds the task's name, input and result, not its code.
+- Adding steps after every step the old code had. A run that has not reached the end yet simply continues into them.
+- Any change at all to a workflow that has no open runs.
+
+Not safe for open runs:
+
+- Adding, removing or reordering steps before a point an open run has already passed. This is the case described above: the run stays open and makes no progress on the new code.
+
+Two ways to make an unsafe change:
+
+1. **Give the new version a new workflow name**, and start new runs under it. Keep the old workflow registered in your workers until its open runs have finished, then delete it.
+2. **Let the open runs finish first.** Stop starting new ones, wait until none is open, then deploy.
+
+## Starting a workflow
+
+- A workflow id names at most one open run. Starting a second run with the id of an open one is refused with an "already exists" error.
+- After a run has closed, the same id can start a new run by default. A reuse policy on the start can forbid that.
+
+**What this asks of you:** choose a workflow id that identifies the business operation, such as the order number. A client that retries a start it is unsure about then gets "already exists" instead of a second run.
+
+## Events
+
+An event the engine accepts for a running workflow is stored in its journal. It is not lost if a worker or the engine stops, and it is not delivered again when the workflow resumes. If your own code sends the same event twice, for example by retrying after a timeout, the workflow receives it twice. Handle a repeated event as you would a repeated message from any queue.
+
+## Workflow failures and time limits
+
+- A workflow that fails is not retried unless you give it a retry policy when you start it.
+- A workflow has no time limit unless you set one. It can wait on a timer or an event for as long as you need.
+- A task has no overall time limit unless you set one. The heartbeat timeout covers a worker that died, not a task that is slow.
+
+## What Orcher does not promise
+
+- **Exactly-once side effects.** No system can promise this for a call to something outside itself. Orcher gives you at-least-once execution with a result recorded once, and idempotent tasks close the gap.
+- **Durability beyond PostgreSQL.** If committed data is lost from the database, the runs in it are lost.
+- **A throughput figure.** No benchmark numbers are published yet. Measure with your own workload before you size a deployment.
+
+## Releases and upgrades
+
+Each component publishes release notes: the [engine](https://github.com/orcher-io/orcher/releases), and the [Rust](https://github.com/orcher-io/sdk-rust/releases), [TypeScript](https://github.com/orcher-io/sdk-ts/releases) and [Python](https://github.com/orcher-io/sdk-py/releases) SDKs. Changes to the engine that need action when you upgrade are listed in [UPGRADING.md](https://github.com/orcher-io/orcher/blob/main/UPGRADING.md).
