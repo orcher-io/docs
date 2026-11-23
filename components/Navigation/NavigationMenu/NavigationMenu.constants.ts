@@ -395,6 +395,7 @@ export const developerGuides: NavMenuConstant = {
       name: 'Core Features',
       items: [
         { name: 'Understanding Orcher', url: '/guides/core/understanding' },
+        { name: 'Guarantees', url: '/guides/core/guarantees' },
         {
           name: 'Building Workflows',
           url: '/guides/core/workflows',
