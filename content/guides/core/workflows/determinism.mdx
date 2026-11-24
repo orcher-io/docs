@@ -1,215 +1,87 @@
 ---
 id: 'workflows-determinism'
 title: 'Determinism Rules'
-description: 'Understand what is safe and unsafe in workflow code, and why determinism matters for replay.'
+description: 'What workflow code may and may not do, why, and what happens when it breaks the rule.'
 sidebar_label: 'Determinism'
 ---
 
-Workflow code **must be deterministic** — meaning it must produce the same sequence of context calls every time it executes with the same inputs. This is a fundamental requirement, not a suggestion.
+Workflow code must be **deterministic**: given the same journal, it must ask for the same steps in the same order.
 
-The reason is replay. When a workflow resumes after a crash, the runtime re-executes your workflow function from the beginning. It matches each context call to a journal entry by sequence number: the first `execute_task` in your code corresponds to journal entry #1, the second to #2, and so on. If replay encounters a different sequence of calls than the original execution, the journal entries won't match and the workflow will fail with a **non-determinism error**.
+The reason is replay. A worker does not keep a workflow in memory while it waits. Each time there is something new for a run (a task finished, a timer fired, an event arrived), a worker runs the workflow function again from the top. Each step the function asks for is matched, in order, against the journal: a step that is already there returns its recorded result at once, and the first step that is not there is the new work. If the function asks for a different step than the one the journal holds at that position, the two no longer match and the run cannot go on.
 
-### What is Safe
+## What is safe
 
-Any operation that produces the same result every time is safe to use directly in workflow code:
+- **Pure computation.** Arithmetic, string handling, building and transforming data.
+- **Steps taken through the workflow context.** Running a task, sleeping, waiting for an event, starting a child workflow. Each is journaled.
+- **Branching on a journaled value.** An `if` on a task's result takes the same branch on every replay, because the result comes from the journal.
+- **The context's clock and random source.** See below.
 
-- **Pure computation** — math, string manipulation, data transformation
-- **Context methods** — `execute_task`, `execute`, `sleep`, `wait_for_event`, `execute_child_workflow` (these are journaled)
-- **Branching on task results** — `if`/`else` based on journaled values is safe because the same journaled values will be replayed
+## What is not safe
 
-<Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
-  <TabPanel id="rust" label="Rust">
+Anything that can give a different answer the next time the function runs:
 
-```rust
-use orcher::prelude::*;
-use anyhow::Result;
-use std::time::Duration;
+| Not in workflow code | Use instead |
+| --- | --- |
+| The system clock | The workflow context's clock |
+| Random numbers and UUIDs from the language or the OS | The workflow context's random source |
+| Network calls, file and database access | A task |
+| Environment variables, configuration read at run time, global state that changes | Pass the value in the workflow's input, or read it in a task |
+| Iterating a collection whose order is not fixed, when the order decides which steps run | Sort it first |
 
-#[workflow(name = "safe_workflow", version = "1.0.0")]
-pub async fn safe_workflow(
-    ctx: WorkflowContext,
-    input: MyInput,
-) -> Result<String> {
-    // Safe: Pure computation (same input always gives same output)
-    let computed = input.amount * 2;
+## Time and randomness
 
-    // Safe: Using task execution (result is journaled)
-    let result: String = ctx
-        .execute_task(get_data, ())
-        .await?;
+You do not need a task to read the time or draw a random value. Each SDK gives the workflow context a clock and a random source that return the same values on every replay.
 
-    // Safe: Using workflow context (sleep is journaled)
-    ctx.sleep(Duration::from_secs(60)).await?;
-
-    Ok(result)
-}
-```
-
-  </TabPanel>
-  <TabPanel id="typescript" label="TypeScript">
-
-```typescript
-import { Workflow, WorkflowContext, Duration } from '@orcher/sdk';
-
-@Workflow({ name: 'safe_workflow', version: '1.0' })
-class SafeWorkflow {
-  async run(ctx: WorkflowContext, input: { amount: number }): Promise<string> {
-    // Safe: Pure computation (same input always gives same output)
-    const computed = input.amount * 2;
-
-    // Safe: Using task execution (result is journaled)
-    const result = await ctx.executeTask(dataTasks.getData, {});
-
-    // Safe: Using workflow context (sleep is journaled)
-    await ctx.sleep(Duration.fromSeconds(60));
-
-    return result;
-  }
-}
-```
-
-  </TabPanel>
-  <TabPanel id="python" label="Python">
-
-```python
-from datetime import timedelta
-from orcher import workflow, WorkflowContext
-
-@workflow(name="safe_workflow", version="1.0")
-async def safe_workflow(ctx: WorkflowContext, amount: float) -> str:
-    # Safe: Pure computation (same input always gives same output)
-    computed = amount * 2
-
-    # Safe: Using task execution (result is journaled)
-    result = await ctx.execute_task(get_data)
-
-    # Safe: Using workflow context (timer is journaled)
-    await ctx.sleep(timedelta(seconds=60))
-
-    return result
-```
-
-  </TabPanel>
-</Tabs>
-
-### What is NOT Safe
-
-Operations that can return different values on each execution will break replay. These must always be wrapped in tasks:
-
-- **Current time** — `DateTime::now()`, `new Date()`, `datetime.now()` return different values on replay. If you need the current time, get it inside a task and return it as a result.
-- **Random values** — `rand::random()`, `Math.random()`, `random.randint()` produce different values on each call. Wrap randomness in a task.
-- **UUIDs** — UUID generation is random. Generate UUIDs inside tasks.
-- **Direct I/O** — Network calls, file reads, database queries outside of tasks are not journaled. If the result differs on replay, your workflow will diverge.
+- **The clock is read from the journal.** It starts at the moment the engine journaled the workflow's start and moves forward each time the workflow receives something it waited for. It does not move while your code runs between those points.
+- **The random source is seeded per run.** It draws the same sequence on every replay.
 
 <Tabs scrollable size="small" type="underlined" defaultActiveId="rust" queryGroup="language">
   <TabPanel id="rust" label="Rust">
 
-```rust
-use orcher::prelude::*;
-use anyhow::Result;
-use std::time::SystemTime;
-use rand::Rng;
-
-#[workflow(name = "unsafe_workflow", version = "1.0.0")]
-pub async fn unsafe_workflow(
-    ctx: WorkflowContext,
-    _input: MyInput,
-) -> Result<String> {
-    // UNSAFE: Current time changes on replay
-    let now = SystemTime::now();
-
-    // UNSAFE: Random values differ on replay
-    let random = rand::thread_rng().gen::<u32>();
-
-    // UNSAFE: Direct network call (not journaled)
-    let response = reqwest::get("https://api.example.com").await?;
-
-    // CORRECT: Use execute() or execute_task() for all external interactions
-    let result: String = ctx
-        .execute("fetch_data", || async {
-            let resp = reqwest::get("https://api.example.com").await?;
-            Ok(resp.text().await?)
-        })
-        .await?;
-
-    Ok(result)
-}
-```
+<$CodeSample path="rust/sdk-workflows/src/lib.rs" region="deterministic" />
 
   </TabPanel>
   <TabPanel id="typescript" label="TypeScript">
 
-```typescript
-import { Workflow, WorkflowContext } from '@orcher/sdk';
-
-@Workflow({ name: 'unsafe_workflow', version: '1.0' })
-class UnsafeWorkflow {
-  async run(ctx: WorkflowContext, input: { amount: number }): Promise<string> {
-    // UNSAFE: Current time changes on replay
-    const now = new Date();
-
-    // UNSAFE: Random values differ on replay
-    const random = Math.random();
-
-    // UNSAFE: Direct network call (not journaled)
-    const response = await fetch('https://api.example.com');
-
-    // CORRECT: Use execute() or executeTask() for all external interactions
-    const result = await ctx.execute('fetch_data', async () => {
-      const resp = await fetch('https://api.example.com');
-      return resp.text();
-    });
-
-    return result;
-  }
-}
-```
+<$CodeSample path="typescript/src/workflows/deterministic.ts" region="deterministic" />
 
   </TabPanel>
   <TabPanel id="python" label="Python">
 
-```python
-import random
-from datetime import datetime
-from orcher import workflow, WorkflowContext
-
-@workflow(name="unsafe_workflow", version="1.0")
-async def unsafe_workflow(ctx: WorkflowContext) -> str:
-    # UNSAFE: Current time changes on replay
-    now = datetime.now()
-
-    # UNSAFE: Random values differ on replay
-    rand_val = random.randint(0, 100)
-
-    # UNSAFE: Direct network call (not journaled)
-    import httpx
-    response = await httpx.AsyncClient().get("https://api.example.com")
-
-    # CORRECT: Use execute() or execute_task() for all external interactions
-    result = await ctx.execute_task(fetch_data)
-
-    return result
-```
+<$CodeSample path="python/workflows/determinism.py" region="helpers" />
 
   </TabPanel>
 </Tabs>
+
+The full list of helpers is on each SDK's Workflows page: [Rust](/guides/sdk/rust/workflows), [TypeScript](/guides/sdk/typescript/workflows), [Python](/guides/sdk/python/workflows).
+
+## When the rule is broken
+
+A worker that replays a run and finds the code asking for something the journal does not hold detects it. It logs that the workflow "is not deterministic", does not apply the result, and hands the run back.
+
+The run is **not failed**. It stays open, and workers keep trying it with a growing delay of up to a minute. It finishes as soon as a worker whose code matches the journal picks it up. You can also cancel or terminate it.
+
+In practice this shows up in two ways:
+
+- **A bug in the code**, such as a branch on the system clock. Fix the code so that it takes the path the journal recorded, and deploy it. The open runs then carry on.
+- **A deploy that changed the steps** while runs were open. The code is deterministic, but it is no longer the code that wrote those journals. [Changing workflow code while runs are open](/guides/core/guarantees#changing-workflow-code-while-runs-are-open) says which changes are safe and how to make the ones that are not.
 
 ---
 
 ## Next Steps
 
 <div className="grid md:grid-cols-2 gap-6 mt-8">
+  <Link href="/guides/core/guarantees" className="no-underline">
+    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
+      <h3 className="text-lg font-semibold mb-2">Guarantees</h3>
+      <p className="text-sm text-foreground-light">What Orcher promises about workflows and tasks, and what your code has to do in return</p>
+    </div>
+  </Link>
+
   <Link href="/guides/core/workflows/patterns" className="no-underline">
     <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
       <h3 className="text-lg font-semibold mb-2">Common Patterns</h3>
       <p className="text-sm text-foreground-light">Sequential, parallel, conditional, and error handling patterns</p>
-    </div>
-  </Link>
-
-  <Link href="/guides/core/workflows/lifecycle" className="no-underline">
-    <div className="border rounded-lg p-6 hover:border-brand-600 transition-colors">
-      <h3 className="text-lg font-semibold mb-2">Versioning, Lifecycle & Queries</h3>
-      <p className="text-sm text-foreground-light">Manage workflow versions, understand lifecycle states, and query workflows</p>
     </div>
   </Link>
 </div>

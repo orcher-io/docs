@@ -5,9 +5,9 @@ description: 'Pin an in-flight workflow execution to the code release that start
 sidebar_label: 'Versioning'
 ---
 
-A running workflow replays its journal. If you deploy new workflow code while executions are still in flight, those executions resume against code that did not write their history — the replay can diverge, silently.
+A running workflow replays its journal. If you deploy new workflow code while executions are still in flight, those executions resume against code that did not write their history. When the new code asks for different steps, the worker detects it and the execution stops making progress until code that matches its journal is running again (see [Guarantees](/guides/core/guarantees#changing-workflow-code-while-runs-are-open)).
 
-Versioning closes that gap. A worker declares the **code release** it is running; the server records that release on an execution the first time the worker claims it, and from then on only workers declaring the same release are given that execution.
+Versioning lets both releases run side by side so that never happens. A worker declares the **code release** it is running; the server records that release on an execution the first time the worker claims it, and from then on only workers declaring the same release are given that execution.
 
 <Admonition type="note">
 
@@ -37,48 +37,19 @@ You can also set it explicitly, which takes precedence over the environment:
 
 <TabPanel id="rust" label="Rust">
 
-```rust
-use orcher::prelude::*;
-
-let worker = Worker::builder()
-    .server_url("http://localhost:50051")
-    .task_queue("orders")
-    .version_id("v1.4.2-abc123")
-    .build()
-    .await?;
-```
+<$CodeSample path="rust/sdk-worker/src/bin/release.rs" region="release" />
 
 </TabPanel>
 
 <TabPanel id="typescript" label="TypeScript">
 
-```typescript
-import { Worker } from '@orcher/sdk';
-
-const worker = new Worker({
-  serverUrl: 'http://localhost:50051',
-  taskQueue: 'orders',
-  versionId: 'v1.4.2-abc123',
-  workflows: [processOrder],
-  tasks: [chargeCard],
-});
-```
+<$CodeSample path="typescript/src/worker/release.ts" region="release" />
 
 </TabPanel>
 
 <TabPanel id="python" label="Python">
 
-```python
-from orcher import Worker
-
-worker = (
-    Worker.builder()
-    .server_url("http://localhost:50051")
-    .task_queue("orders")
-    .version_id("v1.4.2-abc123")
-    .build()
-)
-```
+<$CodeSample path="python/worker/release.py" region="release" />
 
 </TabPanel>
 
@@ -161,18 +132,20 @@ An empty or whitespace-only value counts as *not declared*. This matters more th
   </div>
 </div>
 
+**Treats a worker with no release as a different release.** A worker that declares nothing is never given a bound execution. An execution it claims first stays unbound, and binds to the first declaring worker that claims it later. So declare a release on every worker of a queue, or on none: a mix leaves some executions unpinned.
+
 ## The trade-off worth understanding
 
 A bound execution whose release has no running workers **waits**. It is not handed to a worker on a different release.
 
-That is deliberate. The alternative — letting a mismatched worker take it once none match — trades a visible stall for a silent divergence:
+That is deliberate. The alternative — letting a mismatched worker take it once none match — trades a stall you can plan for with one you cannot:
 
 | | no matching worker running |
 |---|---|
 | **Wait** (what Orcher does) | the execution pauses; it resumes as soon as a worker on its release starts |
-| Hand it over anyway | the execution replays against code its journal was not written by, with no signal |
+| Hand it over anyway | the execution replays against code its journal was not written by; if the steps differ it stops making progress, and nothing tells you which release it needs |
 
-A stall is recoverable by an action always available to you: start a worker on that release. A divergence may not be recoverable at all.
+A waiting execution tells you what it needs: the release is listed with a count (see [below](#knowing-when-a-release-is-safe-to-retire)), and starting a worker on that release resumes it.
 
 ## Choosing where new work goes
 
@@ -264,10 +237,10 @@ Run this during an incident too — a workflow that appears stuck is often one b
 
 ## Unsticking an execution
 
-If a release is already gone and executions are still bound to it, the first answer is to start a worker on that release. When that build no longer exists, move the execution instead:
+If a release is already gone and executions are still bound to it, the first answer is to start a worker on that release. When that build no longer exists, move the execution instead. The path takes the engine's **execution id**, not the workflow id you started it with; `orcher workflow describe <workflow-id>` prints both.
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/executions/<executionId>/rebind \
+curl -X POST http://localhost:8080/api/v1/executions/<execution-id>/rebind \
   -H 'content-type: application/json' \
   -d '{"versionId": "v1.4.2-abc123"}'
 ```
@@ -276,12 +249,12 @@ Sending `null` unbinds it entirely, so any release may pick it up.
 
 <Admonition type="caution">
 
-Rebinding is deliberately a manual, considered action. Replay against different code is exactly what binding prevents, and Orcher cannot tell whether the new release is compatible with the journal the execution has already written — only you can. Executions that have already finished are refused.
+Rebinding is deliberately a manual, considered action. Replay against different code is exactly what binding prevents, and Orcher cannot tell whether the new release is compatible with the journal the execution has already written — only you can. An execution that has already finished is refused with a 404.
 
 </Admonition>
 
 ## Not affected by versioning
 
-**Tasks.** A release binds a *workflow execution*, because that is what replays a journal. Tasks are dispatched to any worker serving the queue.
+**Tasks.** A release binds a *workflow execution*, because that is what replays a journal. Tasks are dispatched to any worker serving the queue, so during a rollout a task of an execution bound to one release can run on a worker of the other. Keep a task's name, input and result compatible across the two releases.
 
 **Actors.** Actor operations are not replayed from a workflow journal, so there is nothing to pin. Actor pollers deliberately do not carry a release.
