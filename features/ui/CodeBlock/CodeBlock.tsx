@@ -43,7 +43,7 @@ export async function CodeBlock({
         'w-full overflow-x-auto',
         'border border-default rounded-lg',
         'bg-200',
-        'text-xs',
+        'text-sm',
         className
       )}
     >
