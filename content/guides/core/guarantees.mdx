@@ -104,4 +104,15 @@ An event the engine accepts for a running workflow is stored in its journal. It 
 
 ## Releases and upgrades
 
+The engine, the SDKs and the CLI are versioned separately. This set is tested together: the [quickstart](https://github.com/orcher-io/quickstart) runs a workflow in each language against the engine on every change.
+
+| Component | Version |
+| --- | --- |
+| Engine | 0.7.5 |
+| Rust SDK (`orcher-sdk` on crates.io) | 0.18 |
+| TypeScript SDK (`@orcher/sdk` on npm) | 0.5.21 |
+| Python SDK (`orcher-sdk` on PyPI) | 0.5.0 |
+
+Other combinations are not tested. When you upgrade, move the engine and the SDKs to a set listed here.
+
 Each component publishes release notes: the [engine](https://github.com/orcher-io/orcher/releases), and the [Rust](https://github.com/orcher-io/sdk-rust/releases), [TypeScript](https://github.com/orcher-io/sdk-ts/releases) and [Python](https://github.com/orcher-io/sdk-py/releases) SDKs. Changes to the engine that need action when you upgrade are listed in [UPGRADING.md](https://github.com/orcher-io/orcher/blob/main/UPGRADING.md).
