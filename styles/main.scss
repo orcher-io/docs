@@ -23,12 +23,15 @@ h1, h2, h3, h4, h5, h6 {
   @apply font-heading;
 }
 
+// Body text at 16px on a 28px line: the size long-form documentation is
+// comfortable to read at. Headings, tables and inline code are sized in em by
+// the typography plugin, so they follow.
 .prose {
-  @apply text-sm;
+  @apply text-base leading-7;
 }
 
 .prose h1 {
-  @apply font-heading text-2xl;
+  @apply font-heading text-4xl;
 }
 
 .prose h2,
