@@ -427,6 +427,7 @@ export const developerGuides: NavMenuConstant = {
             { name: 'Overview', url: '/guides/core/journaling' },
             { name: 'How It Works', url: '/guides/core/journaling/how-it-works' },
             { name: 'Replay Safety', url: '/guides/core/journaling/replay-safety' },
+            { name: 'Versioning', url: '/guides/core/journaling/versioning' },
             { name: 'Best Practices', url: '/guides/core/journaling/best-practices' },
           ],
         },

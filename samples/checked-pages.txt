@@ -43,3 +43,5 @@ content/guides/local-development/getting-started.mdx
 content/guides/local-development/testing-workflows.mdx
 content/guides/local-development/workflow-development.mdx
 content/guides/core/guarantees.mdx
+content/guides/core/workflows/determinism.mdx
+content/guides/core/journaling/versioning.mdx

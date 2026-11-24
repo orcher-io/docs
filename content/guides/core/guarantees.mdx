@@ -74,10 +74,11 @@ Not safe for open runs:
 
 - Adding, removing or reordering steps before a point an open run has already passed. This is the case described above: the run stays open and makes no progress on the new code.
 
-Two ways to make an unsafe change:
+Three ways to make an unsafe change:
 
 1. **Give the new version a new workflow name**, and start new runs under it. Keep the old workflow registered in your workers until its open runs have finished, then delete it.
 2. **Let the open runs finish first.** Stop starting new ones, wait until none is open, then deploy.
+3. **Run both releases side by side.** Give each worker a release id. The engine then keeps every open run on the release that started it, and sends new runs to the release you name as the queue's current one. See [Versioning](/guides/core/journaling/versioning).
 
 ## Starting a workflow
 
