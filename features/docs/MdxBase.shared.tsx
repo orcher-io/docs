@@ -31,6 +31,8 @@ import { Admonition, type AdmonitionProps } from 'ui-patterns/admonition'
 import { GlassPanel } from 'ui-patterns/GlassPanel'
 import { IconPanel } from 'ui-patterns/IconPanel'
 import { GlassPanelWithIconPicker } from '~/features/ui/GlassPanelWithIconPicker'
+import ArchitectureDiagram from '~/components/Diagrams/ArchitectureDiagram'
+import RunCrashDiagram from '~/components/Diagrams/RunCrashDiagram'
 import ReplayTimeline from '~/components/ReplayTimeline'
 import { Heading } from 'ui/src/components/CustomHTMLElements'
 import ButtonCard from '~/components/ButtonCard'
@@ -113,6 +115,8 @@ const components = {
   IconMessageSquare: MessageSquare,
   IconPanel,
   ReplayTimeline,
+  RunCrashDiagram,
+  ArchitectureDiagram,
   IconPlay: Play,
   IconRefreshCw: RefreshCw,
   IconSend: Send,
