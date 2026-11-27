@@ -234,22 +234,22 @@ It prints `worker polling hello-py on http://localhost:50051` (with your project
 In a second terminal, start `hello` on the project's task queue and wait for the result. The input is JSON, so a string needs its quotes:
 
 ```bash
-orcher workflow start hello --task-queue hello-py --input '"Ada"' --wait    # Python
-orcher workflow start hello --task-queue hello-ts --input '"Ada"' --wait    # TypeScript
-orcher workflow start hello --task-queue hello-rs --input '"Ada"' --wait    # Rust
+orcher workflow start hello --task-queue hello-py --input '"world"' --wait  # Python
+orcher workflow start hello --task-queue hello-ts --input '"world"' --wait  # TypeScript
+orcher workflow start hello --task-queue hello-rs --input '"world"' --wait  # Rust
 ```
 
 ```
 Started d5313967-5220-48f2-b048-bbc3984183a4 (execution e0448b9d-cf72-4da4-a09e-e32559fb7242); waiting for it to finish...
-"Hello, Ada!"
+"Hello, world!"
 ```
 
 The project's starter does the same from code, in the project directory:
 
 ```bash
-.venv/bin/python start.py Ada      # Python
-npm run start-workflow -- Ada      # TypeScript
-cargo run -- start Ada             # Rust
+.venv/bin/python start.py world    # Python
+npm run start-workflow -- world    # TypeScript
+cargo run -- start world           # Rust
 ```
 
 ## 6. Look at what ran
