@@ -4,46 +4,15 @@ title: 'Orcher Architecture'
 description: 'Understand how Orcher is built and how its components work together.'
 ---
 
-Orcher is a Rust-native workflow orchestration engine with a modular crate architecture. Workflows are defined as regular async functions using macros and decorators, compiled directly into your worker binary, and executed in-process — eliminating the need for external runtimes, YAML definitions, or separate deployment pipelines. The system is built around three core components: an orchestrator server that manages state and scheduling, workers that execute your workflow and task code, and a PostgreSQL storage backend that persists journals, state, and execution history.
+Orcher has three parts. The engine coordinates runs and keeps no state of its own. Your workers are your own processes, running your workflows and tasks on an Orcher SDK. PostgreSQL holds every run, journal entry, task and timer, and is the only thing the engine depends on.
 
 ## System Overview
 
-The three main components communicate over gRPC. Your application embeds an Orcher worker that connects to the orchestrator server, polls for work, executes tasks locally, and reports results back. The server coordinates scheduling, manages workflow state machines, and persists everything to PostgreSQL.
+<ArchitectureDiagram />
 
-<div className="not-prose my-8 max-w-xl mx-auto">
-  <div className="grid grid-cols-3 gap-0 items-center">
-    <div className="border bg-surface-75 p-4 text-center">
-      <div className="text-xs font-medium text-foreground">Your App</div>
-      <div className="text-[10px] text-foreground-muted mt-1">+ Worker</div>
-    </div>
-    <div className="flex flex-col items-center gap-0.5 px-2">
-      <div className="flex items-center w-full">
-        <div className="h-px flex-1 bg-border-strong" />
-        <span className="text-[10px] font-mono text-foreground-muted px-1.5">gRPC</span>
-        <div className="h-px flex-1 bg-border-strong" />
-      </div>
-    </div>
-    <div className="border bg-surface-100 p-4 text-center">
-      <div className="text-xs font-medium text-foreground">Orchestrator</div>
-      <div className="text-[10px] text-foreground-muted mt-1">:50051</div>
-    </div>
-  </div>
-  <div className="flex justify-end pr-[16.6%] mt-0">
-    <div className="w-px h-5 bg-border-strong" />
-  </div>
-  <div className="flex justify-end">
-    <div className="w-1/3">
-      <div className="border bg-background p-3 text-center flex flex-col justify-center min-h-[4.5rem]">
-        <div className="text-xs font-medium text-foreground">PostgreSQL</div>
-        <div className="text-[10px] text-foreground-muted mt-1">Journal · State · Queue</div>
-      </div>
-    </div>
-  </div>
-</div>
-
-- **Orchestrator Server** — Manages workflow lifecycle, schedules tasks onto queues, handles journal persistence, fires durable timers, and exposes the gRPC API on port `50051`
-- **Workers** — Embed your workflow and task code, poll the server for work, execute tasks in-process, and report completions with eager dispatch for reduced latency
-- **Storage Backend** — PostgreSQL stores workflow executions, journal entries, task state, timer schedules, and the outbox queue for reliable delivery
+- **Engine** — Serves the gRPC API on port `50051`, and the REST API, the dashboard, health checks and metrics on port `8080`. It dispatches runs and tasks to workers, records results in the journal, fires timers and starts scheduled runs.
+- **Workers** — Your processes. They call in to the engine and wait for work on a long poll; the engine never calls them. A worker runs your workflow code and your task code.
+- **PostgreSQL** — Holds all state. Because nothing lives in the engine, it can be stopped, restarted or replaced at any time and every run carries on.
 
 ## Code-First Design
 
@@ -164,58 +133,46 @@ async def order_workflow(ctx: WorkflowContext, order: Order) -> OrderResult:
 
 </Tabs>
 
-## Worker-Embedded Execution
+## Your Code Runs in Your Workers
 
-Workflows and tasks execute inside your application's worker process rather than in a separate runtime. The worker binary includes the SDK, gRPC client, and all your workflow definitions — there's nothing else to install or run. This architecture eliminates serialization overhead for local data, gives your tasks direct access to your application's services and databases, and simplifies deployment to a single binary.
+Workflows and tasks run inside your own worker processes, not in a runtime Orcher provides. A worker is your application with an Orcher SDK added: it uses your libraries, your configuration and your access to your own services and databases. The engine never runs your code; it only decides what runs next and records what happened.
 
-- **No External Dependencies** — Workers are self-contained; no JVM, no runtime, no sidecar processes
-- **Direct Data Access** — Tasks can call your application's services, query your databases, and use your existing libraries
-- **Low Latency** — In-process execution avoids network hops and serialization overhead between scheduler and executor
+Workers talk to the engine over gRPC. Each task is handed to a worker by the engine and its result is reported back, so a step of a workflow is a round trip to the engine, not a function call.
 
 ## Automatic Journaling
 
-Every task execution is automatically journaled to PostgreSQL without any manual checkpointing code. Before a task runs, the input is recorded; after it completes, the output is stored. On replay (after a crash or restart), the journal returns cached results instead of re-executing tasks — giving you crash recovery with no repeated work on replay: completed tasks return their journaled result instead of running again.
+You write no checkpointing code. When a task completes, its result and the journal entry that records it are committed to PostgreSQL in one transaction. When a workflow resumes, after a crash or simply after waiting, its code runs again from the top and each step that is already in the journal returns its recorded result instead of running again.
 
-1. **Before Execution** — Task input and metadata are recorded to the journal
-2. **After Execution** — Task output and completion status are persisted
-3. **On Replay** — Cached results are returned instantly, skipping re-execution
+Tasks run at least once: a task whose worker died part way runs again. Only one result is recorded. [Guarantees](/guides/core/guarantees) sets out exactly what is promised.
 
-This enables crash recovery (resume from the last completed step), no repeated work on replay (completed tasks are not re-run — their journaled result is reused), and full execution history for debugging and auditing.
+## Typed Workflows and Tasks
 
-## Compile-Time Validation
-
-Orcher's Rust SDK validates workflows at compile time through the type system and proc macros. Task input/output types must match, all referenced tasks must exist, and configuration errors are caught before your code ever ships. The TypeScript and Python SDKs provide similar validation through typed decorators and runtime checks during worker startup.
-
-- **Type Checking** — Task inputs and outputs are statically validated; mismatched types are compile errors
-- **Dependency Validation** — Referenced tasks must exist and have compatible signatures
-- **Configuration Validation** — Invalid retry policies, timeout values, and queue names are caught early
+In Rust, a workflow refers to its tasks through typed references, so calling a task that does not exist, or passing it the wrong input type, is a compile error. In TypeScript, task references created with `createTaskRefs` are typed in the same way. Python has no such check before the code runs.
 
 ## Eager Dispatch
 
-In a traditional workflow engine, completing a task requires a full round-trip: the worker reports the result, then polls again for the next task. Orcher's eager dispatch optimization eliminates that second poll — when a worker completes a task, the server checks whether the same workflow has another task ready and returns it directly in the completion response. This removes one full round-trip per task, which is where most of the latency in a sequential workflow accumulates.
+When a task completes and the same workflow has its next task ready, the engine can hand that task back in its reply to the completion, saving the worker a separate poll for it.
 
 ```
-Traditional:  complete task → poll → receive next task  (2 round-trips)
-Eager:        complete task → receive next task          (1 round-trip)
+Without:  complete task → poll → receive next task
+Eager:    complete task → receive next task
 ```
 
-The server uses a short-TTL soft claim to prevent double execution: if the worker doesn't start the eager task within 10 seconds, a background reclaimer resets it back to the queue for normal polling. This means eager dispatch is a pure optimization — it never compromises correctness.
+The worker takes the task under a short claim. If it does not start the task within 10 seconds, the engine puts the task back for any worker to poll; a task with a heartbeat or a timeout of its own is recovered by that instead. Eager dispatch only saves a round trip; it never lets a task run that would not otherwise have run.
 
-## Events & Signals
+## Events
 
-Workflows can pause and wait for external events using `wait_for_event`, then resume when a signal arrives via the `send_event` gRPC API. This is the foundation for human-in-the-loop approvals, webhook callbacks, and inter-workflow communication. Events are journaled just like task completions, so they survive crashes and replay correctly.
+A workflow can wait for a named event with `wait_for_event`, and resume when one is sent to it. Events are kept in the journal, so an event is not lost if a worker stops, and an event sent before the workflow waits is kept until it does.
 
-- **External signals** — Send events from your API, webhooks, or other services via `SendEvent` gRPC call
-- **Inter-workflow communication** — Workflows can signal other workflows using `ctx.send_event(target_workflow, event_name, payload)`
-- **Timeouts** — `wait_for_event_with_timeout` returns `None` if no signal arrives within the deadline, enabling escalation and fallback logic
+- **From outside** — Your application or a webhook handler sends an event through the gRPC API or a workflow handle in any SDK.
+- **Between workflows** — A workflow sends an event to another through that workflow's handle.
+- **With a deadline** — `wait_for_event_with_timeout` returns nothing if no event arrives in time, so the workflow can escalate or fall back.
 
-## Scalability
+## Scaling
 
-Orcher scales horizontally by adding workers. Each worker connects to the orchestrator server, polls for tasks on its registered queues, and executes work independently. The orchestrator itself is stateless (all state lives in PostgreSQL) and can run as multiple replicas behind a load balancer for high availability.
+Add workers to do more work at once. Each worker polls the task queues it serves and runs tasks independently, and a task queue spreads its work across every worker polling it. Use separate task queues to keep kinds of work apart, or to send work to workers with particular resources.
 
-- **Multiple Workers** — Add workers to increase throughput; each worker handles tasks concurrently with configurable capacity
-- **Partitioned Queues** — Route tasks to specific workers by queue name, enabling workload isolation and resource tuning
-- **Stateless Orchestrator** — Run multiple orchestrator instances for high availability; PostgreSQL is the single source of truth
+Run one engine. Because all state is in PostgreSQL, restarting or replacing the engine loses nothing, and runs carry on once it is back.
 
 ---
 
