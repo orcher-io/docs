@@ -32,6 +32,7 @@ import { GlassPanel } from 'ui-patterns/GlassPanel'
 import { IconPanel } from 'ui-patterns/IconPanel'
 import { GlassPanelWithIconPicker } from '~/features/ui/GlassPanelWithIconPicker'
 import ArchitectureDiagram from '~/components/Diagrams/ArchitectureDiagram'
+import SystemDiagram from '~/components/Diagrams/SystemDiagram'
 import RunCrashDiagram from '~/components/Diagrams/RunCrashDiagram'
 import { RoutingDiagram, StatesDiagram } from '~/components/Diagrams/StatesDiagram'
 import { FanOutDiagram, StepsDiagram } from '~/components/Diagrams/StaticDiagrams'
@@ -119,6 +120,7 @@ const components = {
   ReplayTimeline,
   RunCrashDiagram,
   ArchitectureDiagram,
+  SystemDiagram,
   StepsDiagram,
   FanOutDiagram,
   StatesDiagram,

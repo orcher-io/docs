@@ -76,3 +76,50 @@
 [data-theme='classic-dark'] .orx.orxd {
   --edge: #7d8c90;
 }
+
+// The system diagram (SystemDiagram.tsx): boundaries, icon nodes, connectors.
+.orx.orxsys {
+  --edge: #6c797c;
+  margin: 2rem 0;
+  background: var(--panel);
+  padding: 28px 20px 24px;
+
+  svg { display: block; width: 100%; max-width: 760px; margin: 0 auto; height: auto; overflow: visible; }
+
+  .zone .z-edge { fill: none; stroke: var(--edge); stroke-width: 0.3; }
+  .zone.dash .z-edge { stroke-dasharray: 3 4; }
+  .zone.engine .z-edge { stroke: var(--cyan); fill: color-mix(in srgb, var(--cyan) 6%, transparent); }
+  .zone .z-tab { fill: var(--panel); }
+  .zone .z-ic path { fill: none; stroke: var(--fg-2); stroke-width: 1.2; }
+  .zone text { fill: var(--fg-2); font: 400 11px var(--font-jetbrains-mono), monospace; }
+  .zone.engine text { fill: var(--cyan); }
+
+  .node .tile { fill: var(--bg); stroke: var(--edge); stroke-width: 0.3; }
+  .node .ic path { fill: none; stroke: var(--fg-2); stroke-width: 0.75; stroke-linejoin: round; stroke-linecap: round; }
+  .node.accent .tile { stroke: var(--cyan); }
+  .node.accent .ic path { stroke: var(--cyan); }
+  .node text.t { fill: var(--fg); font: 400 13px var(--font-rubik), sans-serif; }
+  .node text.m { fill: var(--fg-3); font: 400 10px var(--font-jetbrains-mono), monospace; }
+
+  .part rect { fill: var(--bg); stroke: var(--edge); stroke-width: 0.3; }
+  .part text { fill: var(--fg); font: 400 12px var(--font-rubik), sans-serif; }
+
+  .arrow .line { fill: none; stroke: var(--edge); stroke-width: 0.4; }
+  .arrow .head { fill: var(--edge); }
+  .lab rect { fill: var(--panel); }
+  .lab text { fill: var(--fg-2); font: 400 10.5px var(--font-jetbrains-mono), monospace; }
+  .sub { fill: var(--fg-3); font: 400 10.5px var(--font-jetbrains-mono), monospace; }
+
+  .co circle { fill: var(--fg); }
+  .co text { fill: var(--bg); font: 500 10px var(--font-jetbrains-mono), monospace; }
+  ol.keyed { list-style: none; margin: 20px 0 0; padding: 0; counter-reset: k; display: grid; gap: 8px; }
+  ol.keyed li { counter-increment: k; display: grid; grid-template-columns: 18px 1fr; gap: 12px; font-size: 14px; line-height: 22px; color: var(--fg-2); }
+  ol.keyed li::before { content: counter(k); width: 18px; height: 18px; margin-top: 2px; border-radius: 50% !important; background: var(--fg); color: var(--bg); font: 500 10.5px/18px var(--font-jetbrains-mono), monospace; text-align: center; }
+}
+
+.dark .orx.orxsys,
+[data-theme='dark'] .orx.orxsys,
+[data-theme='deep-dark'] .orx.orxsys,
+[data-theme='classic-dark'] .orx.orxsys {
+  --edge: #7d8c90;
+}
