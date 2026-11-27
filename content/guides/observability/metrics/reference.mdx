@@ -58,11 +58,6 @@ All metric names are defined in the `orcher-monitoring` crate and use the `orche
 | `orcher_poll_timeout_total` | Counter | Polls that timed out (no work available) |
 | `orcher_poll_error_total` | Counter | Polls that errored |
 | `orcher_claim_duration_seconds` | Histogram | Time to claim an execution after poll |
-| `orcher_push_to_claim_latency_seconds` | Histogram | End-to-end latency from LPUSH to BRPOP return |
-| `orcher_redis_push_duration_seconds` | Histogram | Time for Redis LPUSH |
-| `orcher_redis_pop_duration_seconds` | Histogram | Time for Redis BRPOP |
-| `orcher_postgres_fallback_total` | Counter | Times PostgreSQL fallback was used (Redis unavailable) |
-| `orcher_redis_retry_total` | Counter | Redis operation retries |
 | `orcher_batch_claim_size` | Histogram | Number of items claimed per batch |
 | `orcher_batch_claim_success_ratio` | Gauge | Ratio of successful claims in a batch |
 

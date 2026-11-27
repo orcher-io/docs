@@ -1,7 +1,7 @@
 ---
 id: 'managed-databases'
 title: 'Managed Databases'
-description: 'Configure managed PostgreSQL, PgBouncer connection pooling, and Redis for Orcher cloud deployments'
+description: 'Configure managed PostgreSQL and PgBouncer connection pooling for Orcher cloud deployments'
 sidebar_label: 'Managed Databases'
 ---
 
@@ -43,34 +43,6 @@ For high-concurrency workloads (100+ concurrent workflows), deploy PgBouncer bet
 - **Azure** — Built-in PgBouncer in Flexible Server (enable via server parameters)
 
 If your provider doesn't include pooling, deploy PgBouncer as a sidecar container or separate service. See [Docker deployment](/guides/deployment/docker) for PgBouncer configuration.
-
-## Redis
-
-Optional but recommended for production. Wakes workers via LPUSH/BRPOP as soon as work is queued.
-
-| Provider | Service |
-|----------|---------|
-| AWS | ElastiCache for Redis |
-| GCP | Memorystore for Redis |
-| Azure | Azure Cache for Redis |
-
-Configuration recommendations:
-
-| Parameter | Recommendation | Rationale |
-|-----------|---------------|-----------|
-| Instance size | 1–2 GB | Dispatch queues are small; most data is in PostgreSQL |
-| Version | 7.0+ | Required for full feature support |
-| Persistence | AOF enabled | Survives restarts without losing pending dispatches |
-| Cluster mode | Disabled | Orcher uses simple key operations, not sharded |
-| High availability | Replica with automatic failover | Avoid dispatch interruptions |
-
-Connection string format:
-
-```bash
-REDIS_URL="redis://your-instance.region.cache.amazonaws.com:6379"
-```
-
-If Redis is unavailable, the orchestrator automatically falls back to PostgreSQL-based polling. The `orcher_postgres_fallback_total` metric tracks fallback events.
 
 ---
 

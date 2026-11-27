@@ -19,7 +19,6 @@ Recommended production topology:
 |-----------|----------|-----------|
 | Orchestrator | 3+ | Minimum for HPA and PDB (minAvailable: 2) |
 | PostgreSQL | 2 (primary + standby) | Multi-AZ for automated failover |
-| Redis | 2 (primary + replica) | Failover without dispatch interruption |
 
 ---
 
@@ -68,14 +67,14 @@ For production deployments, avoid plain Kubernetes secrets. Use your cloud provi
 | Azure | Key Vault | External Secrets Operator or CSI Secret Store Driver |
 | Multi-cloud | HashiCorp Vault | CSI driver or sidecar injector |
 
-The orchestrator reads `DATABASE_URL` and `REDIS_URL` from environment variables, so any mechanism that injects environment variables works.
+The orchestrator reads `DATABASE_URL` from environment variables, so any mechanism that injects environment variables works.
 
 ---
 
 ## Next Steps
 
 - [Cloud Platforms Overview](/guides/deployment/cloud) — Architecture and container image setup
-- [Managed Databases](/guides/deployment/cloud/managed-databases) — PostgreSQL, PgBouncer, and Redis configuration
+- [Managed Databases](/guides/deployment/cloud/managed-databases) — PostgreSQL and PgBouncer configuration
 - [Cloud Providers](/guides/deployment/cloud/providers) — AWS, GCP, and Azure deployment guides
 - [Configuration](/guides/deployment/configuration) — Full configuration reference
 - [Metrics](/guides/observability/metrics) — Prometheus metrics reference

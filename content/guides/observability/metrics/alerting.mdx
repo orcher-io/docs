@@ -60,15 +60,6 @@ groups:
           severity: warning
         annotations:
           summary: "Dead letter queue has {{ $value }} entries"
-
-      # PostgreSQL fallback active (Redis down)
-      - alert: RedisUnavailable
-        expr: rate(orcher_postgres_fallback_total[5m]) > 0
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Workers falling back to PostgreSQL polling (Redis may be down)"
 ```
 
 ---

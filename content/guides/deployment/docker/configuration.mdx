@@ -12,7 +12,6 @@ The orchestrator is configured entirely via environment variables and CLI flags.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DATABASE_URL` | — | PostgreSQL or PgBouncer connection string (required) |
-| `REDIS_URL` | — | Redis connection string (optional, enables fast dispatch) |
 | `GRPC_BIND_ADDR` | `0.0.0.0:50051` | gRPC server bind address |
 | `HTTP_BIND_ADDR` | `0.0.0.0:8080` | HTTP server bind address (health/metrics) |
 | `LOG_LEVEL` | `info` | Log level: `trace`, `debug`, `info`, `warn`, `error` |
@@ -51,7 +50,6 @@ heartbeat_timeout_secs = 90
 
 [storage]
 database_url = "postgresql://orcher:orcher@localhost:6432/orcher"
-redis_url = "redis://localhost:6379"
 
 [polling]
 claim_timeout_secs = 300

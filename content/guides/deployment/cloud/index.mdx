@@ -5,7 +5,7 @@ description: 'Deploy Orcher to AWS, GCP, and Azure using managed databases, cont
 sidebar_label: 'Cloud Platforms'
 ---
 
-Orcher runs on any cloud platform that supports containers and PostgreSQL. The orchestrator is a stateless gRPC/HTTP server — all state lives in PostgreSQL. This means you can run it on managed Kubernetes (EKS, GKE, AKS), container services (ECS, Cloud Run), or plain VMs, connecting to managed PostgreSQL and optionally managed Redis.
+Orcher runs on any cloud platform that supports containers and PostgreSQL. The orchestrator is a stateless gRPC/HTTP server — all state lives in PostgreSQL. This means you can run it on managed Kubernetes (EKS, GKE, AKS), container services (ECS, Cloud Run), or plain VMs, connecting to managed PostgreSQL.
 
 - **Stateless orchestrator** — No local state; scale horizontally behind a load balancer
 - **Managed databases** — Use RDS, Cloud SQL, or Azure Database for PostgreSQL instead of self-managed instances
@@ -16,11 +16,10 @@ Orcher runs on any cloud platform that supports containers and PostgreSQL. The o
 
 ## Architecture
 
-A cloud deployment consists of three components:
+A cloud deployment consists of two components:
 
 1. **Orchestrator** — Stateless container(s) running the `orchestrator` binary. Exposes gRPC (50051) for SDK workers and HTTP (8080) for health/metrics.
 2. **PostgreSQL** — Primary data store for workflow state, journal, task executions. Use a managed service with automated backups and failover.
-3. **Redis** (optional) — Fast-path dispatch with LPUSH/BRPOP. Workers learn of new work at once instead of at the next poll. Use a managed service or omit entirely — the system falls back to PostgreSQL polling.
 
 SDK workers run wherever your application code runs (ECS tasks, Kubernetes pods, serverless functions, VMs) and connect to the orchestrator's gRPC endpoint.
 
@@ -83,7 +82,7 @@ kubectl apply -k .
 
 ## Next Steps
 
-- [Managed Databases](/guides/deployment/cloud/managed-databases) — PostgreSQL, PgBouncer, and Redis configuration
+- [Managed Databases](/guides/deployment/cloud/managed-databases) — PostgreSQL and PgBouncer configuration
 - [Cloud Providers](/guides/deployment/cloud/providers) — AWS, GCP, and Azure deployment guides
 - [Operations](/guides/deployment/cloud/operations) — High availability, monitoring, and secrets management
 - [Docker](/guides/deployment/docker) — Docker Compose setup for local development

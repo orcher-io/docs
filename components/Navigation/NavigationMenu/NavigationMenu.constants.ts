@@ -677,7 +677,6 @@ export const operations: NavMenuConstant = {
           url: '/guides/operations/storage',
           items: [
             { name: 'Overview', url: '/guides/operations/storage' },
-            { name: 'Redis', url: '/guides/operations/storage/redis' },
             { name: 'Caching & Schema', url: '/guides/operations/storage/caching' },
             { name: 'Operations', url: '/guides/operations/storage/operations' },
           ],

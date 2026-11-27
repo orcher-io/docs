@@ -47,26 +47,14 @@ services:
     ports:
       - "6432:6432"
 
-  redis:
-    image: redis:7-alpine
-    command: redis-server --appendonly yes
-    ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-
 volumes:
   pgdata:
 ```
 
-Point the orchestrator at PgBouncer and Redis:
+Point the orchestrator at PgBouncer:
 
 ```bash
 DATABASE_URL=postgresql://orcher:orcher@localhost:6432/orcher
-REDIS_URL=redis://localhost:6379
 ```
 
 ---
@@ -124,24 +112,11 @@ LIMIT 10;
 
 The `workflow_execution_journal` and `events` tables typically grow the fastest. For long-running deployments, consider archiving completed workflow data.
 
-### Redis Connection Failures
-
-Workers automatically fall back to PostgreSQL polling when Redis is unavailable. Check Redis health:
-
-```bash
-redis-cli ping
-redis-cli info clients
-redis-cli info memory
-```
-
-No data is lost during Redis downtime — only dispatch latency increases.
-
 ---
 
 ## Next Steps
 
 - [Storage Overview](/guides/operations/storage) — PostgreSQL configuration and migrations
-- [Redis](/guides/operations/storage/redis) — Optional Redis configuration for fast queue notification
 - [Caching & Schema](/guides/operations/storage/caching) — In-memory cache tiers and database schema details
 - [Orchestrator Server](/guides/operations/orchestrator) — How the coordination engine works
 - [Workers](/guides/operations/workers) — Deploy and manage workers

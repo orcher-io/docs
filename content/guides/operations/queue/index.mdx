@@ -29,15 +29,9 @@ When a workflow step produces new tasks, the orchestrator inserts them atomicall
 
 This guarantees **at-least-once delivery** — no work is silently lost, even if the orchestrator crashes mid-dispatch.
 
-### Polling: Dual-Path System
+### Polling
 
-Workers poll for work using gRPC long-polling. Orcher supports two dispatch paths:
-
-**PostgreSQL path (default):**
-Workers call `poll_workflow_execution()` or `poll_task_execution()` with a 60-second long-polling timeout. The orchestrator uses `SELECT FOR UPDATE SKIP LOCKED` for atomic, contention-free claiming. When no work is available, the call blocks until notified or the timeout expires.
-
-**Redis fast path (optional):**
-When Redis is configured, the orchestrator pushes execution IDs to Redis lists via `LPUSH`. Workers use `BRPOP` to be told of it at once. The worker then claims the execution in PostgreSQL. If Redis is unavailable, workers automatically fall back to PostgreSQL polling.
+Workers poll for work using gRPC long-polling. They call `poll_workflow_execution()` or `poll_task_execution()` with a 60-second long-polling timeout. The orchestrator uses `SELECT FOR UPDATE SKIP LOCKED` for atomic, contention-free claiming. When no work is available, the call blocks until notified or the timeout expires.
 
 ### Eager Dispatch
 
@@ -48,5 +42,5 @@ When a task completes, the orchestrator can return the **next task** directly in
 ## Next Steps
 
 - [Configuring Queues](/guides/operations/queue/configuration) — Assign workers, isolate workloads, and use namespaces
-- [Polling & Dead Letter Queue](/guides/operations/queue/polling) — Tune pollers, configure retries, and enable Redis fast path
+- [Polling & Dead Letter Queue](/guides/operations/queue/polling) — Tune pollers and configure retries
 - [Monitoring & Troubleshooting](/guides/operations/queue/monitoring) — CLI commands, auto-scaling, and common issues

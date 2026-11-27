@@ -39,7 +39,6 @@ The minimum required for production:
 
 ```bash
 DATABASE_URL="postgresql://orcher:PASSWORD@pgbouncer:6432/orcher?sslmode=require" \
-REDIS_URL="redis://redis:6379" \
 LOG_FORMAT=json \
 ./orchestrator
 ```
@@ -61,7 +60,6 @@ heartbeat_timeout_secs = 90
 
 [storage]
 database_url = "postgresql://orcher:PASSWORD@pgbouncer:6432/orcher?sslmode=require"
-redis_url = "redis://redis:6379"
 
 [logging]
 level = "info"

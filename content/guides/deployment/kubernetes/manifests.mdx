@@ -53,12 +53,6 @@ spec:
                 secretKeyRef:
                   name: orcher-secrets
                   key: database-url
-            - name: REDIS_URL
-              valueFrom:
-                secretKeyRef:
-                  name: orcher-secrets
-                  key: redis-url
-                  optional: true
             - name: LOG_LEVEL
               value: "info"
             - name: LOG_FORMAT
@@ -173,7 +167,6 @@ data:
 
     [storage]
     database_url = "${DATABASE_URL}"
-    redis_url = "${REDIS_URL}"
 
     [logging]
     level = "info"
@@ -184,7 +177,7 @@ data:
     liveness_enabled = true
 ```
 
-Note: `DATABASE_URL` and `REDIS_URL` in the ConfigMap are overridden by the environment variables from the Secret, which take precedence.
+Note: `DATABASE_URL` in the ConfigMap is overridden by the environment variable from the Secret, which takes precedence.
 
 ### RBAC
 
