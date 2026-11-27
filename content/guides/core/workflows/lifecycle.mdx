@@ -104,51 +104,29 @@ async def order_workflow_v2(ctx: WorkflowContext, order_id: str, priority: int =
 
 Every workflow progresses through a set of states. Understanding these states helps you reason about what your workflow is doing at any point and how to handle different scenarios.
 
-<div className="not-prose my-8 max-w-md mx-auto border">
-  <div className="bg-surface-75 px-4 py-2 border-b text-center">
-    <div className="text-xs font-medium text-foreground">Workflow Lifecycle</div>
-  </div>
-  <div className="px-5 py-6 flex flex-col items-center">
-    <div className="border bg-background px-5 py-1.5">
-      <code className="text-[11px] text-foreground">Pending</code>
-    </div>
-    <div className="w-px h-3 bg-border-strong" />
-    <span className="text-[9px] font-mono uppercase tracking-wider text-foreground-muted mb-1">dispatched to a worker</span>
-    <div className="flex items-center gap-2">
-      <div className="border bg-surface-100 px-5 py-1.5">
-        <code className="text-[11px] text-foreground">Running</code>
-      </div>
-      <div className="flex flex-col items-center text-foreground-muted">
-        <span className="text-[9px] font-mono leading-tight">suspend →</span>
-        <div className="h-px w-6 bg-border-strong my-0.5" />
-        <span className="text-[9px] font-mono leading-tight">← resume</span>
-      </div>
-      <div className="border bg-surface-75 px-4 py-1.5">
-        <code className="text-[11px] text-foreground">Suspended</code>
-      </div>
-    </div>
-    <div className="w-px h-3 bg-border-strong" />
-    <span className="text-[9px] font-mono uppercase tracking-wider text-foreground-muted mb-2">reaches one terminal state</span>
-    <div className="flex flex-wrap justify-center gap-1.5 max-w-xs">
-      {[
-        { name: 'Completed', bad: false },
-        { name: 'Failed', bad: true },
-        { name: 'Timed Out', bad: true },
-        { name: 'Canceled', bad: false },
-        { name: 'Terminated', bad: false },
-        { name: 'Reset', bad: false },
-        { name: 'Restarted-Fresh', bad: false },
-      ].map((t) => (
-        <div key={t.name} className={`border px-2.5 py-1 ${t.bad ? 'bg-red-500/5 border-red-400/20' : 'bg-background'}`}>
-          <code className={`text-[10px] ${t.bad ? 'text-red-400' : 'text-foreground'}`}>{t.name}</code>
-        </div>
-      ))}
-    </div>
-  </div>
-  <div className="border-t px-4 py-2 bg-surface-75 text-center">
-    <span className="text-[10px] text-foreground-muted">A workflow runs — suspending and resuming as needed — until it settles into exactly one terminal state.</span>
-  </div>
-</div>
+<StatesDiagram
+  label="A workflow is pending, then running; it may suspend and resume any number of times; it ends in exactly one of seven terminal states"
+  caption="A workflow runs, suspending and resuming as needed, until it settles into exactly one terminal state."
+  states={[
+    { title: 'Pending', note: 'waiting for a worker' },
+    { title: 'Running', note: 'on a worker', accent: true },
+    { title: 'Suspended', note: 'timer, event or task' },
+  ]}
+  transitions={[{ forward: 'dispatched' }, { forward: 'suspend', back: 'resume' }]}
+  endings={{
+    name: 'reaches one terminal state',
+    from: 1,
+    items: [
+      { title: 'Completed' },
+      { title: 'Failed', failed: true },
+      { title: 'Timed Out' },
+      { title: 'Canceled' },
+      { title: 'Terminated' },
+      { title: 'Reset' },
+      { title: 'Restarted-Fresh' },
+    ],
+  }}
+/>
 
 - **Pending** — The workflow has been created (via `start_workflow`) but not yet picked up by a worker. It waits in a task queue for dispatch — typically brief unless every worker is busy.
 

@@ -1,0 +1,78 @@
+// The static diagrams (see svg.tsx). A figure is `.orx.orxd`: it takes its
+// colours from .orx, and everything here is scoped to .orxd.
+//
+// The palette is deliberately quiet: one grey for lines, the accent for the
+// path a diagram is about, and red only where something fails.
+
+.orx.orxd {
+  --edge: #6c797c;
+  border: 0.5px solid var(--edge);
+  background: var(--panel);
+  // 20px at the sides leaves the 760px canvas unscaled in the docs column
+  padding: 32px 20px 24px;
+
+  svg {
+    display: block;
+    width: 100%;
+    max-width: 760px;
+    margin: 0 auto;
+    height: auto;
+    overflow: visible;
+  }
+
+  figcaption {
+    margin: 18px 0 0;
+    max-width: 70ch;
+    font-size: 14px;
+    line-height: 22px;
+    color: var(--fg-2);
+  }
+
+  // boxes
+  .b rect { fill: var(--bg); stroke: var(--edge); stroke-width: 0.4; }
+  .b text { fill: var(--fg); font: 400 14px var(--font-rubik), sans-serif; }
+  .b text.m { fill: var(--fg-3); font: 400 10.5px var(--font-jetbrains-mono), monospace; letter-spacing: 0.3px; }
+  .b text.n { fill: var(--fg-3); font: 500 10.5px var(--font-jetbrains-mono), monospace; }
+  .b text.mk { fill: var(--fg-3); font: 500 12px var(--font-jetbrains-mono), monospace; }
+  .b.code text.t { font: 500 13px var(--font-jetbrains-mono), monospace; }
+  .b.end rect { fill: color-mix(in srgb, var(--fg) 5%, var(--bg)); }
+  .b.accent rect { stroke: var(--cyan); }
+  .b.failed rect { stroke: var(--red); fill: color-mix(in srgb, var(--red) 8%, var(--bg)); }
+  .b.failed text.mk, .b.failed.end text.t { fill: var(--red); }
+  .b.failed.end rect { stroke: var(--edge); fill: color-mix(in srgb, var(--fg) 5%, var(--bg)); }
+  .b.undo rect, .b.quiet rect { stroke-dasharray: 4 3; }
+  .b.quiet text.t { fill: var(--fg-3); }
+
+  // connectors
+  .w .line { fill: none; stroke: var(--edge); stroke-width: 0.5; }
+  .w .head { fill: var(--edge); }
+  .w.accent .line { stroke: var(--cyan); }
+  .w.accent .head { fill: var(--cyan); }
+  .w.undo .line, .w.quiet .line { stroke-dasharray: 4 3; }
+
+  // labels
+  .lab text { fill: var(--fg-2); font: 400 11px var(--font-jetbrains-mono), monospace; }
+  .lab rect { fill: var(--panel); stroke: var(--edge); stroke-width: 0.4; }
+  .lab.accent text { fill: var(--cyan); }
+  .lab.failed text { fill: var(--red); }
+  .lab.quiet text { fill: var(--fg-3); }
+
+  // groups
+  .grp .g-edge { fill: none; stroke: var(--edge); stroke-width: 0.4; stroke-dasharray: 2 4; }
+  .grp .g-gap { fill: var(--panel); }
+  .grp text { fill: var(--fg-2); font: 400 11px var(--font-jetbrains-mono), monospace; }
+
+  // numbered markers, and the list they match
+  .co circle { fill: var(--fg); }
+  .co text { fill: var(--bg); font: 500 10.5px var(--font-jetbrains-mono), monospace; }
+  ol.keyed { list-style: none; margin: 18px 0 0; padding: 0; counter-reset: k; display: grid; gap: 8px; }
+  ol.keyed li { counter-increment: k; display: grid; grid-template-columns: 18px 1fr; gap: 12px; font-size: 14px; line-height: 22px; color: var(--fg-2); }
+  ol.keyed li::before { content: counter(k); width: 18px; height: 18px; margin-top: 2px; border-radius: 50% !important; background: var(--fg); color: var(--bg); font: 500 10.5px/18px var(--font-jetbrains-mono), monospace; text-align: center; }
+}
+
+.dark .orx.orxd,
+[data-theme='dark'] .orx.orxd,
+[data-theme='deep-dark'] .orx.orxd,
+[data-theme='classic-dark'] .orx.orxd {
+  --edge: #7d8c90;
+}

@@ -7,74 +7,38 @@ sidebar_label: 'Overview'
 
 The Saga pattern enables you to implement distributed transactions across multiple services without using distributed locks or two-phase commit. A saga is a sequence of local transactions where each step updates a single service. If any step fails, the saga executes compensating transactions to undo the impact of all preceding steps — maintaining eventual consistency across your system. Key concepts include forward recovery (retrying failed steps until they succeed), backward recovery (undoing completed steps on failure), idempotent compensation actions (safe to retry), and eventual consistency (the system reaches a consistent state, though not immediately). Use sagas when you need to coordinate multiple services that each own their own data, handle long-running operations spanning minutes or hours, or avoid distributed locks and two-phase commit protocols.
 
-<div className="not-prose my-8 max-w-lg mx-auto grid grid-cols-1 md:grid-cols-2 gap-4">
-  {/* Success path */}
-  <div className="border">
-    <div className="bg-surface-75 px-4 py-2 border-b text-center">
-      <div className="text-xs font-medium text-foreground">Success Path</div>
-      <div className="text-[10px] text-foreground-muted">all steps complete</div>
-    </div>
-    {[
-      { step: 1, task: 'Reserve inventory' },
-      { step: 2, task: 'Charge payment' },
-      { step: 3, task: 'Ship order' },
-    ].map((s, i, arr) => (
-      <div key={s.step}>
-        <div className="px-4 py-2 flex items-center gap-3">
-          <span className="w-5 h-5 flex items-center justify-center border bg-background text-[10px] font-mono text-foreground-muted shrink-0">{s.step}</span>
-          <code className="text-[11px] text-foreground flex-1">{s.task}</code>
-          <span className="text-[10px] text-foreground-muted">✓</span>
-        </div>
-        {i < arr.length - 1 && <div className="flex justify-center"><div className="w-px h-2 bg-border-strong" /></div>}
-      </div>
-    ))}
-    <div className="flex justify-center"><div className="w-px h-2 bg-border-strong" /></div>
-    <div className="mx-3 mb-3 border bg-surface-100 py-2 text-center">
-      <div className="text-[10px] font-medium text-foreground">Done</div>
-    </div>
-  </div>
-
-  {/* Failure + compensation path */}
-  <div className="border">
-    <div className="bg-surface-75 px-4 py-2 border-b text-center">
-      <div className="text-xs font-medium text-foreground">Failure Path</div>
-      <div className="text-[10px] text-foreground-muted">step 3 fails → compensate</div>
-    </div>
-    {[
-      { step: 1, task: 'Reserve inventory', status: 'ok' },
-      { step: 2, task: 'Charge payment', status: 'ok' },
-      { step: 3, task: 'Ship order', status: 'fail' },
-    ].map((s, i, arr) => (
-      <div key={s.step}>
-        <div className={`px-4 py-2 flex items-center gap-3 ${s.status === 'fail' ? 'bg-red-500/5' : ''}`}>
-          <span className={`w-5 h-5 flex items-center justify-center border bg-background text-[10px] font-mono shrink-0 ${s.status === 'fail' ? 'border-red-400/30 text-red-400' : 'text-foreground-muted'}`}>{s.step}</span>
-          <code className="text-[11px] text-foreground flex-1">{s.task}</code>
-          <span className={`text-[10px] ${s.status === 'fail' ? 'text-red-400' : 'text-foreground-muted'}`}>{s.status === 'fail' ? '✗' : '✓'}</span>
-        </div>
-        {i < arr.length - 1 && <div className="flex justify-center"><div className="w-px h-2 bg-border-strong" /></div>}
-      </div>
-    ))}
-    <div className="flex justify-center"><div className="w-px h-2 bg-border-strong" /></div>
-    <div className="mx-3 mb-1 text-[10px] font-mono uppercase tracking-wider text-foreground-muted text-center">compensate ↩</div>
-    {[
-      { step: 2, task: 'Refund payment' },
-      { step: 1, task: 'Release inventory' },
-    ].map((s, i, arr) => (
-      <div key={s.step}>
-        <div className="px-4 py-2 flex items-center gap-3 opacity-70">
-          <span className="w-5 h-5 flex items-center justify-center border border-dashed bg-background text-[10px] font-mono text-foreground-muted shrink-0">{s.step}</span>
-          <code className="text-[11px] text-foreground flex-1">{s.task}</code>
-          <span className="text-[10px] text-foreground-muted">↩</span>
-        </div>
-        {i < arr.length - 1 && <div className="flex justify-center"><div className="w-px h-2 bg-border-strong" /></div>}
-      </div>
-    ))}
-    <div className="flex justify-center"><div className="w-px h-2 bg-border-strong" /></div>
-    <div className="mx-3 mb-3 border border-dashed bg-surface-75 py-2 text-center">
-      <div className="text-[10px] font-medium text-foreground">Rolled back</div>
-    </div>
-  </div>
-</div>
+<StepsDiagram
+  label="A saga: on the left three steps succeed; on the right the third fails and the first two are undone in reverse order"
+  caption="Each step has a compensation. When step 3 fails, the steps that finished are compensated in reverse order."
+  columns={[
+    {
+      title: 'Success path',
+      steps: [
+        { title: 'Reserve inventory', mark: 'done' },
+        { title: 'Charge payment', mark: 'done' },
+        { title: 'Ship order', mark: 'done' },
+      ],
+      end: 'Done',
+    },
+    {
+      title: 'Failure path',
+      failure: true,
+      steps: [
+        { title: 'Reserve inventory', mark: 'done' },
+        { title: 'Charge payment', mark: 'done' },
+        { title: 'Ship order', mark: 'failed', failed: true },
+      ],
+      undo: {
+        label: 'compensate, newest first',
+        steps: [
+          { n: 2, title: 'Refund payment', mark: 'undone' },
+          { n: 1, title: 'Release inventory', mark: 'undone' },
+        ],
+      },
+      end: 'Rolled back',
+    },
+  ]}
+/>
 
 ---
 

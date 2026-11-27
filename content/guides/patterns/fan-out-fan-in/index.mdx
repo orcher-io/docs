@@ -7,46 +7,15 @@ sidebar_label: 'Overview'
 
 The Fan-Out/Fan-In pattern splits work across multiple parallel operations (fan-out) and then collects and aggregates their results (fan-in). This maximizes throughput by executing independent operations concurrently — the total latency equals the slowest operation rather than the sum of all operations. Use this pattern when you need to process multiple items in a batch, call multiple APIs simultaneously, aggregate data from distributed sources, run independent validation checks in parallel, or perform map-reduce style dataset transformations.
 
-<div className="not-prose my-8 max-w-md mx-auto">
-  <div className="flex flex-col items-center">
-    {/* Workflow Start */}
-    <div className="border bg-surface-75 px-5 py-2 text-center">
-      <div className="text-xs font-medium text-foreground">Workflow Start</div>
-    </div>
-    <div className="w-px h-5 bg-border-strong" />
-    {/* Fan-Out: single point spreading to 5 columns */}
-    <div className="text-[10px] font-mono uppercase tracking-wider text-foreground-muted mb-1">fan-out</div>
-    <div className="relative w-full">
-      {/* Horizontal bar across all 5 columns */}
-      <div className="absolute top-0 h-px bg-border-strong" style={{ left: 'calc(10% - 0.2rem)', right: 'calc(10% - 0.2rem)' }} />
-      {/* 5 vertical drops + operation cards */}
-      <div className="grid grid-cols-5 gap-1.5">
-        {[1, 2, 3, 4, 5].map((n) => (
-          <div key={n} className="flex flex-col items-center">
-            <div className="w-px h-5 bg-border-strong" />
-            <div className="border bg-background w-full py-2 px-1 text-center">
-              <div className="text-[10px] font-medium text-foreground">Op {n}</div>
-            </div>
-            <div className="w-px h-5 bg-border-strong" />
-          </div>
-        ))}
-      </div>
-      {/* Bottom horizontal bar converging */}
-      <div className="absolute bottom-0 h-px bg-border-strong" style={{ left: 'calc(10% - 0.2rem)', right: 'calc(10% - 0.2rem)' }} />
-    </div>
-    <div className="text-[10px] font-mono uppercase tracking-wider text-foreground-muted mt-1">fan-in</div>
-    <div className="w-px h-5 bg-border-strong" />
-    {/* Aggregate */}
-    <div className="border bg-surface-100 px-5 py-2 text-center">
-      <div className="text-xs font-medium text-foreground">Aggregate Results</div>
-    </div>
-    <div className="w-px h-5 bg-border-strong" />
-    {/* Complete */}
-    <div className="border bg-surface-75 px-5 py-2 text-center">
-      <div className="text-xs font-medium text-foreground">Workflow Complete</div>
-    </div>
-  </div>
-</div>
+<FanOutDiagram
+  label="A workflow starts five operations at once, waits for all of them, aggregates the results, then completes"
+  start="Workflow start"
+  branches={[{ title: 'Op 1' }, { title: 'Op 2' }, { title: 'Op 3' }, { title: 'Op 4' }, { title: 'Op 5' }]}
+  join="Aggregate results"
+  out="fan-out"
+  back="fan-in"
+  after="workflow complete"
+/>
 
 ---
 
