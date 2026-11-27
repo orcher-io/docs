@@ -8,7 +8,7 @@ Orcher has three parts. The engine coordinates runs and keeps no state of its ow
 
 ## System Overview
 
-<ArchitectureDiagram />
+<SystemDiagram />
 
 - **Engine** — Serves the gRPC API on port `50051`, and the REST API, the dashboard, health checks and metrics on port `8080`. It dispatches runs and tasks to workers, records results in the journal, fires timers and starts scheduled runs.
 - **Workers** — Your processes. They call in to the engine and wait for work on a long poll; the engine never calls them. A worker runs your workflow code and your task code.
