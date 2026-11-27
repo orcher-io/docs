@@ -30,10 +30,9 @@ heartbeat_timeout_secs = 90        # Worker heartbeat timeout
 ```toml
 [storage]
 database_url = "postgresql://orcher:orcher@localhost:6432/orcher"
-redis_url = "redis://localhost:6379"   # Optional
 ```
 
-Environment variables `DATABASE_URL` and `REDIS_URL` override these values.
+The `DATABASE_URL` environment variable overrides this value.
 
 ## `[logging]`
 
@@ -79,11 +78,7 @@ enable_notifications = true
 # Reduces database contention with multiple workers. Recommended: 5-20.
 batch_claim_size = 10
 
-# Redis Streams (opt-in). Uses XADD/XREADGROUP instead of LPUSH/BRPOP.
-# Enables zero-config horizontal scaling with consumer groups.
-use_streams = false
-
-# Sync-match dispatch (opt-in, requires use_streams = true and redis_url).
+# Sync-match dispatch (opt-in).
 # Routes work directly to waiting workers via in-memory channels.
 use_sync_match = false
 
@@ -102,7 +97,6 @@ routing_cleanup_interval_secs = 30
 
 **Validation rules:**
 - `claim_timeout_secs` must be greater than `reclaim_interval_secs`
-- `use_sync_match` requires `use_streams = true` and `redis_url` to be configured
 - `affinity_max_lease_secs` must be >= `affinity_lease_secs`
 
 ## `[timeout_watcher]`
@@ -179,32 +173,6 @@ cert_path = "/etc/orchestrator/tls/server.crt"
 key_path = "/etc/orchestrator/tls/server.key"
 ca_cert_path = "/etc/orchestrator/tls/ca.crt"    # Required for client cert verification
 require_client_cert = true
-```
-
-## `[queue]` (Optional)
-
-Queue-based task dispatch. Uncomment to enable.
-
-```toml
-[queue]
-enabled = true
-dispatch_strategy = "direct"       # "direct", "queue", or "hybrid"
-
-# Queue provider — choose one:
-
-# Redis Streams
-[queue.provider]
-type = "redis"
-url = "redis://localhost:6379"
-pool_size = 10
-consumer_group = "orchestrator"
-
-# PostgreSQL-based queue
-# [queue.provider]
-# type = "postgres"
-# url = "postgresql://localhost:5432/orcher"
-# pool_size = 10
-# table_name = "task_queue"
 ```
 
 ---

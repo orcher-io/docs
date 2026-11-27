@@ -4,10 +4,9 @@ title: 'Storage'
 description: 'Configure PostgreSQL as the primary data store for the Orcher orchestrator'
 ---
 
-Orcher uses **PostgreSQL** as its durable, ACID-compliant primary data store. All workflow state, task execution records, journal entries, timers, and queue data live in PostgreSQL. **Redis** is optional — it provides fast queue notification and query caching but is not required for correctness.
+Orcher uses **PostgreSQL** as its durable, ACID-compliant primary data store. All workflow state, task execution records, journal entries, timers, and queue data live in PostgreSQL. It is the only external dependency.
 
 - **PostgreSQL is the source of truth** — Every workflow step, task result, and timer is persisted durably
-- **Redis is a performance optimization** — Notifies workers of new work at once and caches queries
 - **In-memory caching** — A Moka-based LRU cache (`HighPerfCache`) reduces database roundtrips for hot workflow state
 - **PgBouncer recommended** — Connection multiplexing for production deployments with many concurrent workflows
 
@@ -134,7 +133,6 @@ setup_database(&config).await?;
 
 ## Next Steps
 
-- [Redis](/guides/operations/storage/redis) — Optional Redis configuration for fast queue notification
 - [Caching & Schema](/guides/operations/storage/caching) — In-memory cache tiers and database schema details
 - [Operations & Troubleshooting](/guides/operations/storage/operations) — Docker Compose setup and troubleshooting
 - [Orchestrator Server](/guides/operations/orchestrator) — How the coordination engine works

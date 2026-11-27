@@ -1,7 +1,7 @@
 ---
 id: 'queue-polling'
 title: 'Polling Configuration'
-description: 'Configure pollers, dead letter queues, and the Redis fast path for task dispatch'
+description: 'Configure pollers and dead letter queues for task dispatch'
 sidebar_label: 'Polling'
 ---
 
@@ -141,38 +141,6 @@ class PaymentTasks {
 </TabPanel>
 
 </Tabs>
-
----
-
-## Redis Fast Path
-
-Redis is **optional** but recommended for high-throughput production deployments. It provides near-instant task notification instead of periodic PostgreSQL polling.
-
-### How It Works
-
-1. When new work is available, the orchestrator pushes the execution ID to a Redis list (`LPUSH`)
-2. Workers block on `BRPOP` — Redis handles the blocking efficiently at the connection level
-3. When an ID arrives, the worker claims the execution in PostgreSQL with `SELECT FOR UPDATE SKIP LOCKED`
-4. If Redis is unavailable, workers automatically fall back to PostgreSQL polling
-
-### Enabling Redis
-
-Configure the orchestrator with a Redis URL:
-
-```bash
-# Orchestrator environment variable
-REDIS_URL=redis://localhost:6379
-```
-
-No worker-side configuration is needed — the orchestrator handles the Redis integration.
-
-### Reliability
-
-Redis is used only as a **notification layer**. All durable state lives in PostgreSQL. If Redis goes down:
-
-- Workers fall back to PostgreSQL polling automatically
-- No work is lost — PostgreSQL is the source of truth
-- When Redis recovers, workers switch back to the fast path
 
 ---
 

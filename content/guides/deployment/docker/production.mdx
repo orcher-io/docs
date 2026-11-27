@@ -50,7 +50,6 @@ docker run -d \
   -p 50051:50051 \
   -p 8001:8001 \
   -e DATABASE_URL="postgresql://orcher:orcher@orcher-pgbouncer:5432/orcher" \
-  -e REDIS_URL="redis://orcher-redis:6379" \
   -e LOG_FORMAT=json \
   orcher-orchestrator
 ```
@@ -81,7 +80,6 @@ docker run -d \
   -p 50051:50051 \
   -p 8001:8001 \
   -e DATABASE_URL="postgresql://orcher:orcher@orcher-pgbouncer:5432/orcher" \
-  -e REDIS_URL="redis://orcher-redis:6379" \
   -e LOG_FORMAT=json \
   orcher-orchestrator
 ```

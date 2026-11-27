@@ -1,7 +1,7 @@
 ---
 id: 'docker-troubleshooting'
 title: 'Troubleshooting'
-description: 'Health checks, volume management, and troubleshooting common Docker deployment issues with PgBouncer, database connections, and Redis fallback'
+description: 'Health checks, volume management, and troubleshooting common Docker deployment issues with PgBouncer and database connections'
 sidebar_label: 'Troubleshooting'
 ---
 
@@ -13,7 +13,6 @@ All services include health checks:
 |---------|-------|----------|
 | PostgreSQL | `pg_isready -U orcher -d orcher` | 5s |
 | PgBouncer | `pg_isready -h localhost -p 5432 -U orcher` | 5s |
-| Redis | `redis-cli ping` | 5s |
 | Orchestrator | `curl -f http://localhost:8080/health/live` | 30s |
 
 ---
@@ -25,7 +24,6 @@ Docker Compose creates named volumes for data persistence:
 | Volume | Mount Point | Purpose |
 |--------|-------------|---------|
 | `orcher-postgres-data` | `/var/lib/postgresql/data` | Workflow state, journal, task executions |
-| `orcher-redis-data` | `/data` | Redis AOF persistence |
 | `orcher-prometheus-data` | `/prometheus` | Metrics history (30-day retention) |
 | `orcher-grafana-data` | `/var/lib/grafana` | Dashboard state |
 
@@ -62,14 +60,10 @@ psql postgresql://orcher:orcher@localhost:6432/orcher -c "SELECT 1"
 
 When running the orchestrator on the host, use `localhost` ports. When running in a container on `orcher-network`, use container names:
 
-| Context | PostgreSQL | PgBouncer | Redis |
-|---------|-----------|-----------|-------|
-| Host | `localhost:5432` | `localhost:6432` | `localhost:6379` |
-| Container (orcher-network) | `orcher-postgres:5432` | `orcher-pgbouncer:5432` | `orcher-redis:6379` |
-
-### Redis Optional — Fallback to PostgreSQL
-
-If Redis is unavailable, the orchestrator automatically falls back to PostgreSQL-based polling. You'll see the `orcher_postgres_fallback_total` metric incrementing. This works correctly but with higher dispatch latency: workers find work at their next poll.
+| Context | PostgreSQL | PgBouncer |
+|---------|-----------|-----------|
+| Host | `localhost:5432` | `localhost:6432` |
+| Container (orcher-network) | `orcher-postgres:5432` | `orcher-pgbouncer:5432` |
 
 ---
 

@@ -35,11 +35,6 @@ scrape_configs:
 For infrastructure metrics, add exporters for your backing services:
 
 ```yaml
-  # Redis (via redis_exporter)
-  - job_name: 'redis'
-    static_configs:
-      - targets: ['redis-exporter:9121']
-
   # PostgreSQL (via postgres_exporter)
   - job_name: 'postgres'
     static_configs:
@@ -137,9 +132,6 @@ orcher_queue_depth
 
 # Publish latency (p99)
 histogram_quantile(0.99, rate(orcher_queue_publish_latency_seconds_bucket[5m]))
-
-# End-to-end dispatch latency (LPUSH to BRPOP)
-histogram_quantile(0.99, rate(orcher_push_to_claim_latency_seconds_bucket[5m]))
 ```
 
 ### Database Health

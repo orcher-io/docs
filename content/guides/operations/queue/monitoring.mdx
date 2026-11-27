@@ -89,7 +89,6 @@ grpcurl -plaintext localhost:50051 list
 1. **Not enough pollers** — Increase `workflow_poller_count` / `task_poller_count` (default: 4 each)
 2. **Not enough concurrency** — Increase `max_concurrent_tasks` if tasks are I/O-bound
 3. **Not enough workers** — Add more Worker instances if queue depth is growing
-4. **No Redis** — Enable Redis so workers are notified of work instead of finding it at the next poll
 
 ### Queue Depth Growing
 
@@ -127,8 +126,8 @@ video-encoding    # Video transcoding
 
 - [Queues Overview](/guides/operations/queue) — How queues work in Orcher
 - [Configuring Queues](/guides/operations/queue/configuration) — Assign workers, isolate workloads, and use namespaces
-- [Polling & Dead Letter Queue](/guides/operations/queue/polling) — Tune pollers, configure retries, and enable Redis fast path
+- [Polling & Dead Letter Queue](/guides/operations/queue/polling) — Tune pollers and configure retries
 - [Workers](/guides/operations/workers) — Deploy and manage workers
 - [Orchestrator Server](/guides/operations/orchestrator) — How the coordination engine works
-- [Storage Setup](/guides/operations/storage) — Configure PostgreSQL and Redis
+- [Storage Setup](/guides/operations/storage) — Configure PostgreSQL
 - [Observability](/guides/observability/metrics) — Metrics, tracing, and logging

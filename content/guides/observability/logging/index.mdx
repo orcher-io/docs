@@ -145,7 +145,7 @@ From most to least verbose:
 
 | Level | Use Case | Example |
 |-------|----------|---------|
-| `trace` | Deep internals — poll loops, cache lookups, individual SQL queries | `Polling queue: attempting BRPOP on redis key` |
+| `trace` | Deep internals — poll loops, cache lookups, individual SQL queries | `Polling queue: attempting claim queue=payments` |
 | `debug` | Detailed operational info — execution steps, durations, state changes | `Workflow execution completed execution_id=abc duration_ms=1234` |
 | `info` | Normal operations — service startup, workflow starts, task completions | `Starting workflow execution workflow=order_processing` |
 | `warn` | Potential problems — high queue depth, retry attempts, degraded state | `Queue depth exceeds threshold queue=payments depth=5000` |

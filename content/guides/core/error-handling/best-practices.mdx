@@ -329,7 +329,7 @@ Below are common error handling issues you may encounter when building Orcher wo
 - Each workflow instance maintains its own counter instead of a shared one
 
 **Solutions**:
-- Use shared state (database, Redis, or workflow state) for the failure counter
+- Use shared state (a database or workflow state) for the failure counter
 - Lower the failure threshold to match your availability requirements
 - Consider implementing the circuit breaker as a separate workflow that other workflows query
 

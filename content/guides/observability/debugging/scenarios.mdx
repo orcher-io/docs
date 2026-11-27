@@ -105,7 +105,7 @@ Look at which task takes the most time. Common fixes:
 
 - **Sequential tasks that could be parallel** — Use fan-out/fan-in pattern
 - **Slow external API calls** — Consider caching or async patterns
-- **Queue latency** — Check queue depth and worker count. Enable Redis so workers are woken when work is queued.
+- **Queue latency** — Check queue depth and worker count.
 - **No eager dispatch** — Sequential workflows benefit from eager task return (enabled by default)
 
 ---

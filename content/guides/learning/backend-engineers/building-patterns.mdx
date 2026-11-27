@@ -976,7 +976,7 @@ Compare to traditional approaches:
 
 **Traditional:**
 - 200 lines of error handling
-- Redis for state management
+- A separate store for state management
 - Manual retry queues
 - Hope you got the idempotency logic right
 - Debugging requires checking 5 different systems
@@ -1012,7 +1012,7 @@ app.post('/webhooks/stripe', async (req, res) => {
   const event = req.body;
 
   // Quick check for duplicate
-  const exists = await redis.get('webhook:' + event.id);
+  const exists = await cache.get('webhook:' + event.id);
   if (exists) {
     return res.json({ received: true });
   }
@@ -1020,7 +1020,7 @@ app.post('/webhooks/stripe', async (req, res) => {
   // Process synchronously (blocks response)
   try {
     await processEvent(event);
-    await redis.set('webhook:' + event.id, 'processed', 'EX', 86400);
+    await cache.set('webhook:' + event.id, 'processed', 'EX', 86400);
     res.json({ received: true });
   } catch (error) {
     // Error - but webhook service already timed out
@@ -1032,8 +1032,8 @@ app.post('/webhooks/stripe', async (req, res) => {
 
 **Problems:**
 - Synchronous processing (slow response)
-- Redis dependency for deduplication
-- If Redis is down, duplicate processing
+- Cache dependency for deduplication
+- If the cache is down, duplicate processing
 - If processing is slow, webhook times out
 - No automatic retries on failure
 
@@ -1488,7 +1488,7 @@ async def get_db_pool():
 **Automatic Deduplication:**
 - `check_duplicate` prevents double-processing
 - Even if Stripe retries, we detect it
-- No Redis needed - PostgreSQL is your deduplication store
+- No separate cache needed - PostgreSQL is your deduplication store
 
 **Fault Tolerance:**
 - If processing fails, workflow retries automatically
