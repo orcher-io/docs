@@ -34,6 +34,13 @@ h1, h2, h3, h4, h5, h6 {
   @apply font-heading text-4xl;
 }
 
+// The hand-built diagrams opt out of prose styles but still inherit its line
+// height. Their small labels were drawn for a 20px line, which is what the
+// body had before it grew to 28px.
+.prose :where(.not-prose:not(.orx)) {
+  line-height: 1.25rem;
+}
+
 .prose h2,
 .prose h3,
 .prose h4,
