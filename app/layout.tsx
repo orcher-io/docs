@@ -2,6 +2,7 @@
 import '../styles/main.scss'
 import '../styles/new-docs.scss'
 import '../components/Diagrams/diagrams.scss'
+import '../components/Diagrams/svg.scss'
 
 import type { Metadata, Viewport } from 'next'
 import { Rubik, Manrope, JetBrains_Mono } from 'next/font/google'
