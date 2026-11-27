@@ -488,29 +488,33 @@ async def process_payment(ctx: WorkflowContext, input: PaymentInput) -> PaymentR
 
 ### Example 2: Multi-Step Saga with Replay
 
-<div className="not-prose my-8 max-w-2xl mx-auto border">
-  <div className="bg-surface-75 px-4 py-2 border-b text-[10px] font-mono uppercase tracking-wide text-foreground-muted">Scenario · e-commerce order processing</div>
-  <div className="p-4">
-    <div className="text-[10px] font-mono uppercase tracking-wide text-foreground-muted mb-2">First execution</div>
-    <div className="space-y-1 text-[11px]">
-      <div className="text-foreground-muted"><span className="font-mono text-foreground">1 · Validate Order</span> → journal <span className="font-mono">{'{ valid: true }'}</span></div>
-      <div className="text-foreground-muted"><span className="font-mono text-foreground">2 · Charge Payment</span> → journal <span className="font-mono">{'{ charge_id: "ch_123" }'}</span></div>
-      <div className="text-foreground-muted"><span className="font-mono text-foreground">3 · Reserve Inventory</span> → journal <span className="font-mono">{'{ reserved: true }'}</span></div>
-    </div>
-  </div>
-  <div className="bg-red-500/5 border-y px-4 py-2 text-[11px] font-mono text-red-400">💥 Crash</div>
-  <div className="p-4">
-    <div className="text-[10px] font-mono uppercase tracking-wide text-foreground-muted mb-2">Replay after crash</div>
-    <div className="space-y-1 text-[11px]">
-      <div className="text-foreground-muted"><span className="font-mono text-foreground">1 · Validate Order</span> — cache HIT, skip</div>
-      <div className="text-foreground-muted"><span className="font-mono text-foreground">2 · Charge Payment</span> — cache HIT, skip</div>
-      <div className="text-foreground-muted"><span className="font-mono text-foreground">3 · Reserve Inventory</span> — cache HIT, skip</div>
-      <div className="text-foreground"><span className="font-mono">4 · Arrange Shipment</span> — cache MISS, execute (new)</div>
-      <div className="text-foreground"><span className="font-mono">5 · Send Confirmation</span> — cache MISS, execute (new)</div>
-    </div>
-  </div>
-  <div className="bg-surface-75 px-4 py-3 border-t text-[11px] text-foreground-muted">Payment charged <span className="text-foreground">once</span> · inventory reserved <span className="text-foreground">once</span> · workflow completes successfully</div>
-</div>
+<StepsDiagram
+  label="An order workflow crashes after its third step; on replay the first three steps are answered from the journal and the last two run for the first time"
+  caption="Payment is charged once and inventory reserved once. The workflow completes."
+  columns={[
+    {
+      title: 'First execution, then a crash',
+      failure: true,
+      steps: [
+        { title: 'Validate order', mark: 'journaled' },
+        { title: 'Charge payment', mark: 'journaled' },
+        { title: 'Reserve inventory', mark: 'journaled' },
+      ],
+      end: 'Crash',
+    },
+    {
+      title: 'Replay after the crash',
+      steps: [
+        { title: 'Validate order', mark: 'from journal' },
+        { title: 'Charge payment', mark: 'from journal' },
+        { title: 'Reserve inventory', mark: 'from journal' },
+        { title: 'Arrange shipment', mark: 'runs', accent: true },
+        { title: 'Send confirmation', mark: 'runs', accent: true },
+      ],
+      end: 'Completed',
+    },
+  ]}
+/>
 
 ---
 

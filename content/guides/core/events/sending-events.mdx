@@ -228,31 +228,34 @@ async def parent_workflow(ctx: WorkflowContext, order_id: str) -> ParentResult:
 
 Events are automatically buffered if they arrive before the workflow calls `wait_for_event()`. This means the order of "send" and "wait" doesn't matter — the event is never lost. On replay, buffered events are replayed from the journal.
 
-<div className="not-prose my-8 max-w-2xl mx-auto space-y-3">
-  <div className="border">
-    <div className="bg-surface-75 px-3 py-2 border-b text-[10px] font-mono uppercase tracking-wide text-foreground-muted">Scenario 1 · event arrives before wait</div>
-    <div className="p-3 space-y-1 text-[11px] text-foreground-muted">
-      <div><span className="font-mono text-foreground">T0</span> · client sends <span className="font-mono">"approve"</span> → buffered in journal</div>
-      <div><span className="font-mono text-foreground">T1</span> · workflow calls <span className="font-mono">wait_for_event()</span> → returns immediately from buffer</div>
-    </div>
-  </div>
-  <div className="border">
-    <div className="bg-surface-75 px-3 py-2 border-b text-[10px] font-mono uppercase tracking-wide text-foreground-muted">Scenario 2 · event arrives after wait</div>
-    <div className="p-3 space-y-1 text-[11px] text-foreground-muted">
-      <div><span className="font-mono text-foreground">T0</span> · workflow calls <span className="font-mono">wait_for_event()</span> → suspends, claim released</div>
-      <div><span className="font-mono text-foreground">T1</span> · client sends <span className="font-mono">"approve"</span> → workflow re-queued, resumes</div>
-    </div>
-  </div>
-  <div className="border">
-    <div className="bg-surface-75 px-3 py-2 border-b text-[10px] font-mono uppercase tracking-wide text-foreground-muted">Scenario 3 · multiple events of the same name</div>
-    <div className="p-3 space-y-1 text-[11px] text-foreground-muted">
-      <div><span className="font-mono text-foreground">T0</span> · client sends event #1 → buffered</div>
-      <div><span className="font-mono text-foreground">T1</span> · client sends event #2 → buffered</div>
-      <div><span className="font-mono text-foreground">T2</span> · <span className="font-mono">wait_for_event()</span> → returns event #1</div>
-      <div><span className="font-mono text-foreground">T3</span> · <span className="font-mono">wait_for_event()</span> again → returns event #2</div>
-    </div>
-  </div>
-</div>
+<StepsDiagram
+  label="Three orderings of sending an event and waiting for it: the event first, the wait first, and two events of the same name"
+  columns={[
+    {
+      title: 'Event before the wait',
+      steps: [
+        { title: 'Client sends "approve"', note: 'kept in the journal' },
+        { title: 'wait_for_event()', note: 'returns at once', code: true, accent: true },
+      ],
+    },
+    {
+      title: 'Event after the wait',
+      steps: [
+        { title: 'wait_for_event()', note: 'the workflow suspends', code: true },
+        { title: 'Client sends "approve"', note: 'the workflow resumes', accent: true },
+      ],
+    },
+    {
+      title: 'Two events, one name',
+      steps: [
+        { title: 'Client sends event 1', note: 'kept' },
+        { title: 'Client sends event 2', note: 'kept' },
+        { title: 'wait_for_event()', note: 'returns event 1', code: true, accent: true },
+        { title: 'wait_for_event()', note: 'returns event 2', code: true, accent: true },
+      ],
+    },
+  ]}
+/>
 
 ---
 

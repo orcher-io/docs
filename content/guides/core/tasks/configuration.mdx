@@ -792,26 +792,30 @@ Heartbeats are periodic signals sent from long-running tasks to indicate they're
 
 **How Heartbeats Work:**
 
-<div className="not-prose my-8 max-w-2xl mx-auto grid grid-cols-1 sm:grid-cols-2 gap-4">
-  <div className="border">
-    <div className="bg-surface-75 px-3 py-2 border-b text-[10px] font-mono uppercase tracking-wide text-foreground-muted">Without heartbeats</div>
-    <div className="p-3 space-y-1.5 text-[11px] text-foreground-muted">
-      <div>Task starts</div>
-      <div>Process item 1 <span className="font-mono">· 60s+</span></div>
-      <div>Process item 2 …</div>
-    </div>
-    <div className="bg-red-500/5 px-3 py-2 border-t text-[11px] text-red-400">Orcher: “task looks stuck” → cancelled</div>
-  </div>
-  <div className="border">
-    <div className="bg-surface-75 px-3 py-2 border-b text-[10px] font-mono uppercase tracking-wide text-foreground-muted">With heartbeats</div>
-    <div className="p-3 space-y-1.5 text-[11px] text-foreground-muted">
-      <div>Task starts</div>
-      <div>Process item 1 → <span className="font-mono text-foreground">heartbeat()</span></div>
-      <div>Process item 2 → <span className="font-mono text-foreground">heartbeat()</span></div>
-    </div>
-    <div className="bg-surface-75 px-3 py-2 border-t text-[11px] text-foreground-muted">Orcher: “still working” → kept alive</div>
-  </div>
-</div>
+<StepsDiagram
+  label="Without heartbeats a long task looks stuck and its attempt is timed out; with heartbeats it is kept alive"
+  columns={[
+    {
+      title: 'Without heartbeats',
+      failure: true,
+      steps: [
+        { title: 'Task starts' },
+        { title: 'Process item 1', note: '60s or more, no word from the task' },
+        { title: 'Process item 2', mark: 'timed out', failed: true },
+      ],
+      end: 'Attempt timed out',
+    },
+    {
+      title: 'With heartbeats',
+      steps: [
+        { title: 'Task starts' },
+        { title: 'Process item 1', note: 'heartbeat()' },
+        { title: 'Process item 2', note: 'heartbeat()' },
+      ],
+      end: 'Kept alive',
+    },
+  ]}
+/>
 
 For long-running tasks, send periodic heartbeats to prevent timeout:
 
