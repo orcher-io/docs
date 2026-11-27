@@ -149,24 +149,31 @@ return Receipt(payment, inventory)
 
 **How Automatic Journaling Works:**
 
-<div className="not-prose my-8 max-w-2xl mx-auto border">
-  <div className="bg-surface-75 px-4 py-2 border-b text-[10px] font-mono uppercase tracking-wide text-foreground-muted">First execution</div>
-  <div className="p-4 space-y-1 text-[11px] text-foreground-muted">
-    <div>1 · <span className="font-mono text-foreground">ctx.execute("charge_card", …)</span> called</div>
-    <div>2 · check <span className="font-mono">execution_log</span> → no entry for <span className="font-mono">(workflow_id, "charge_card")</span></div>
-    <div>3 · execute the closure → <span className="font-mono">{'{ charge_id: "ch_123", amount: 5000 }'}</span></div>
-    <div>4 · <span className="font-mono">INSERT INTO execution_log …</span> → status <span className="font-mono">completed</span></div>
-    <div>5 · return result to the workflow</div>
-  </div>
-  <div className="bg-red-500/5 border-y px-4 py-2 text-[11px] font-mono text-red-400">💥 Workflow crashes and restarts</div>
-  <div className="p-4 space-y-1 text-[11px] text-foreground-muted">
-    <div>1 · <span className="font-mono text-foreground">ctx.execute("charge_card", …)</span> called again</div>
-    <div>2 · check <span className="font-mono">execution_log</span> → entry <span className="text-foreground">exists</span></div>
-    <div>3 · return cached result from the journal — closure <span className="text-foreground">not</span> executed</div>
-    <div>4 · no duplicate Stripe charge</div>
-    <div>5 · workflow continues from the next step</div>
-  </div>
-</div>
+<StepsDiagram
+  label="A step is run and recorded on the first execution; after a crash the same call finds the record and returns it without running the step again"
+  columns={[
+    {
+      title: 'First execution',
+      steps: [
+        { title: 'ctx.execute("charge_card", …)', note: 'called', code: true },
+        { title: 'Check the execution log', note: 'no entry for this step' },
+        { title: 'Run the closure', note: 'returns the charge', accent: true },
+        { title: 'Record the result', note: 'status completed' },
+        { title: 'Return it to the workflow' },
+      ],
+    },
+    {
+      title: 'After the workflow crashes and restarts',
+      steps: [
+        { title: 'ctx.execute("charge_card", …)', note: 'called again', code: true },
+        { title: 'Check the execution log', note: 'the entry exists' },
+        { title: 'Return the recorded result', note: 'the closure does not run', accent: true },
+        { title: 'No second charge' },
+        { title: 'Carry on from the next step' },
+      ],
+    },
+  ]}
+/>
 
 **Benefits:**
 - **Automatic Journaling** — Every step is automatically saved to PostgreSQL

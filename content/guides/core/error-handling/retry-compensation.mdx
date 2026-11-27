@@ -411,29 +411,37 @@ async def booking_saga(ctx: WorkflowContext, input: dict) -> dict:
 
 The following diagrams illustrate how a saga executes forward steps and triggers compensations on failure. When a step fails, all previously completed steps are compensated in reverse order to maintain data consistency.
 
-<div className="not-prose my-8 max-w-2xl mx-auto grid grid-cols-1 sm:grid-cols-2 gap-4">
-  <div className="border">
-    <div className="bg-surface-75 px-3 py-2 border-b text-[10px] font-mono uppercase tracking-wide text-foreground-muted">Successful saga</div>
-    <div className="p-3 space-y-1.5 text-[11px]">
-      <div className="text-foreground-muted"><span className="text-foreground">Book Hotel</span> → success</div>
-      <div className="text-foreground-muted"><span className="text-foreground">Book Flight</span> → success</div>
-      <div className="text-foreground-muted"><span className="text-foreground">Book Car</span> → success</div>
-    </div>
-    <div className="bg-surface-75 px-3 py-2 border-t text-[11px] text-foreground-muted">All bookings confirmed</div>
-  </div>
-  <div className="border">
-    <div className="bg-surface-75 px-3 py-2 border-b text-[10px] font-mono uppercase tracking-wide text-foreground-muted">Failed saga · with compensation</div>
-    <div className="p-3 space-y-1.5 text-[11px]">
-      <div className="text-foreground-muted"><span className="text-foreground">Book Hotel</span> → success</div>
-      <div className="text-foreground-muted"><span className="text-foreground">Book Flight</span> → success</div>
-      <div className="text-red-400"><span className="font-medium">Book Car</span> → failure</div>
-      <div className="pt-1 text-[10px] font-mono uppercase tracking-wide text-red-400">compensation · reverse order</div>
-      <div className="text-red-400/90">Cancel Flight → done</div>
-      <div className="text-red-400/90">Cancel Hotel → done</div>
-    </div>
-    <div className="bg-red-500/5 px-3 py-2 border-t text-[11px] text-red-400">All bookings rolled back</div>
-  </div>
-</div>
+<StepsDiagram
+  label="A saga: on the left three bookings succeed; on the right the third fails and the first two are cancelled in reverse order"
+  columns={[
+    {
+      title: 'Successful saga',
+      steps: [
+        { title: 'Book hotel', mark: 'success' },
+        { title: 'Book flight', mark: 'success' },
+        { title: 'Book car', mark: 'success' },
+      ],
+      end: 'All bookings confirmed',
+    },
+    {
+      title: 'Failed saga, with compensation',
+      failure: true,
+      steps: [
+        { title: 'Book hotel', mark: 'success' },
+        { title: 'Book flight', mark: 'success' },
+        { title: 'Book car', mark: 'failure', failed: true },
+      ],
+      undo: {
+        label: 'compensation, reverse order',
+        steps: [
+          { n: 2, title: 'Cancel flight', mark: 'done' },
+          { n: 1, title: 'Cancel hotel', mark: 'done' },
+        ],
+      },
+      end: 'All bookings rolled back',
+    },
+  ]}
+/>
 
 ---
 

@@ -23,40 +23,22 @@ Think of it like a bookmark in a book. Every time you finish a page (a step), th
 
 - **Resumable** — When a workflow calls `sleep` or `wait_for_event`, it releases its worker. The workflow isn't holding a thread or a connection while waiting — it's fully suspended. When the timer fires or the event arrives, the server re-dispatches the workflow to any available worker, which replays the journal and continues.
 
-<div className="not-prose my-8 max-w-md mx-auto border">
-  <div className="bg-surface-75 px-4 py-2 border-b text-center">
-    <div className="text-xs font-medium text-foreground">Workflow Lifecycle</div>
-  </div>
-  {[
-    { label: 'Queued', detail: 'Waiting for a worker', icon: '○' },
-    { label: 'Running', detail: 'Executing steps on a worker', icon: '►' },
-    { label: 'Suspended', detail: 'Waiting on sleep / event — zero resources', icon: '⏸' },
-    { label: 'Running', detail: 'Timer fired or event arrived — resumed', icon: '►' },
-    { label: 'Completed', detail: 'All steps finished — result stored', icon: '✓' },
-  ].map((state, i, arr) => (
-    <div key={i}>
-      <div className={`px-4 py-2 flex items-center gap-3 ${state.label === 'Suspended' ? 'bg-surface-75' : ''}`}>
-        <span className="w-5 h-5 flex items-center justify-center text-[10px] text-foreground-muted shrink-0">{state.icon}</span>
-        <div className="flex-1">
-          <span className="text-xs font-medium text-foreground">{state.label}</span>
-          <span className="text-[10px] text-foreground-muted ml-2">{state.detail}</span>
-        </div>
-      </div>
-      {i < arr.length - 1 && (
-        <div className="flex justify-start pl-6">
-          <div className="w-px h-2 bg-border-strong" />
-        </div>
-      )}
-    </div>
-  ))}
-  <div className="border-t px-4 py-2 bg-red-500/5 flex items-center gap-3">
-    <span className="w-5 h-5 flex items-center justify-center text-[10px] text-red-400 shrink-0">✗</span>
-    <div className="flex-1">
-      <span className="text-xs font-medium text-foreground">Failed</span>
-      <span className="text-[10px] text-foreground-muted ml-2">Max retries exceeded — error stored</span>
-    </div>
-  </div>
-</div>
+<StepsDiagram
+  label="A workflow is pending, runs on a worker, suspends while it waits, runs again when it is resumed, and completes"
+  caption="A workflow holds no worker while it is suspended. If a task runs out of attempts, the workflow ends as Failed and the error is stored."
+  columns={[
+    {
+      title: 'Workflow lifecycle',
+      steps: [
+        { title: 'Pending', note: 'waiting for a worker' },
+        { title: 'Running', note: 'executing steps on a worker', accent: true },
+        { title: 'Suspended', note: 'waiting on a sleep or an event' },
+        { title: 'Running', note: 'timer fired or event arrived: resumed', accent: true },
+      ],
+      end: 'Completed',
+    },
+  ]}
+/>
 
 ---
 

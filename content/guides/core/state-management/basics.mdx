@@ -178,31 +178,32 @@ State is stored in-memory during workflow execution and reconstructed from the j
 
 The diagram below shows how state is consistent across first execution and replay. Since workflows are deterministic and task results are journaled, every `set_state()` call produces the same value on replay.
 
-<div className="not-prose my-8 max-w-2xl mx-auto">
-  <div className="grid grid-cols-2 gap-px bg-border-default border">
-    <div className="bg-surface-75 p-3">
-      <div className="text-[10px] font-mono uppercase tracking-wide text-foreground-muted mb-2">First execution</div>
-      <div className="space-y-1.5 text-[11px]">
-        <div><span className="font-mono text-foreground">set_state("order_id", "order_123")</span><br /><span className="text-foreground-muted">stored in memory</span></div>
-        <div><span className="font-mono text-foreground">set_state("status", "processing")</span><br /><span className="text-foreground-muted">stored in memory</span></div>
-        <div><span className="font-mono text-foreground">execute_task("process_payment")</span><br /><span className="text-foreground-muted">task executes → result journaled</span></div>
-        <div><span className="font-mono text-foreground">set_state("payment_id", "pay_456")</span><br /><span className="text-foreground-muted">stored in memory</span></div>
-        <div><span className="font-mono text-foreground">set_state("status", "paid")</span><br /><span className="text-foreground-muted">stored in memory</span></div>
-      </div>
-    </div>
-    <div className="bg-background p-3">
-      <div className="text-[10px] font-mono uppercase tracking-wide text-foreground-muted mb-2">Replay after crash</div>
-      <div className="space-y-1.5 text-[11px]">
-        <div><span className="font-mono text-foreground">set_state("order_id", "order_123")</span><br /><span className="text-foreground-muted">same value · deterministic</span></div>
-        <div><span className="font-mono text-foreground">set_state("status", "processing")</span><br /><span className="text-foreground-muted">same value · deterministic</span></div>
-        <div><span className="font-mono text-foreground">execute_task("process_payment")</span><br /><span className="text-foreground-muted">skipped → returns journaled result</span></div>
-        <div><span className="font-mono text-foreground">set_state("payment_id", "pay_456")</span><br /><span className="text-foreground-muted">same value · from journaled result</span></div>
-        <div><span className="font-mono text-foreground">set_state("status", "paid")</span><br /><span className="text-foreground-muted">same value · deterministic</span></div>
-      </div>
-    </div>
-  </div>
-  <p className="text-xs text-foreground-muted text-center mt-2">Every <span className="font-mono">set_state()</span> produces the same value on replay — state stays consistent across crashes.</p>
-</div>
+<StepsDiagram
+  label="The same five steps on a first execution and on a replay: every set_state call produces the same value, and the task returns its journaled result"
+  caption="Every set_state() produces the same value on replay, so state stays consistent across crashes."
+  columns={[
+    {
+      title: 'First execution',
+      steps: [
+        { title: 'set_state("order_id", …)', note: 'stored in memory', code: true },
+        { title: 'set_state("status", "processing")', note: 'stored in memory', code: true },
+        { title: 'execute_task("process_payment")', note: 'task runs, result journaled', code: true, accent: true },
+        { title: 'set_state("payment_id", …)', note: 'stored in memory', code: true },
+        { title: 'set_state("status", "paid")', note: 'stored in memory', code: true },
+      ],
+    },
+    {
+      title: 'Replay after a crash',
+      steps: [
+        { title: 'set_state("order_id", …)', note: 'same value', code: true },
+        { title: 'set_state("status", "processing")', note: 'same value', code: true },
+        { title: 'execute_task("process_payment")', note: 'skipped, returns the journaled result', code: true, accent: true },
+        { title: 'set_state("payment_id", …)', note: 'same value, from the journaled result', code: true },
+        { title: 'set_state("status", "paid")', note: 'same value', code: true },
+      ],
+    },
+  ]}
+/>
 
 ---
 
