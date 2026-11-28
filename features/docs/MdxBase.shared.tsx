@@ -31,7 +31,6 @@ import { Admonition, type AdmonitionProps } from 'ui-patterns/admonition'
 import { GlassPanel } from 'ui-patterns/GlassPanel'
 import { IconPanel } from 'ui-patterns/IconPanel'
 import { GlassPanelWithIconPicker } from '~/features/ui/GlassPanelWithIconPicker'
-import ArchitectureDiagram from '~/components/Diagrams/ArchitectureDiagram'
 import SystemDiagram from '~/components/Diagrams/SystemDiagram'
 import RunCrashDiagram from '~/components/Diagrams/RunCrashDiagram'
 import { RoutingDiagram, StatesDiagram } from '~/components/Diagrams/StatesDiagram'
@@ -119,7 +118,6 @@ const components = {
   IconPanel,
   ReplayTimeline,
   RunCrashDiagram,
-  ArchitectureDiagram,
   SystemDiagram,
   StepsDiagram,
   FanOutDiagram,

@@ -447,27 +447,21 @@ class GoodWorkflow:
 
 ## Architecture
 
-Orcher follows a client-server model with three components:
+Orcher has three parts: the engine, your workers and PostgreSQL. The [Architecture](/guides/getting-started/architecture) page covers each one.
 
-<ArchitectureDiagram />
-
-**Orchestrator** — A stateless server (gRPC on port 50051, REST API on port 8080) that coordinates workflow execution, task scheduling, and worker polling. All state lives in PostgreSQL, so you can run multiple orchestrator instances for high availability.
-
-**SDK Workers** — Your application processes running the Orcher SDK. Workers register with the orchestrator, poll for work via gRPC long-polling, execute your workflow and task handlers, and report results. Workers are stateless — if one crashes, another picks up the work.
-
-**PostgreSQL** — The primary data store for workflow state, journal entries, task executions, and the work queue (`SELECT FOR UPDATE SKIP LOCKED`).
+<SystemDiagram />
 
 ### Execution Flow
 
-1. **Start workflow** — Your application calls the orchestrator's `StartWorkflowExecution` gRPC endpoint (or `POST /api/v1/workflows/execute` on the orchestrator's REST API). The orchestrator creates a workflow execution record in PostgreSQL.
+1. **Start workflow** — Your application calls the engine's `StartWorkflow` gRPC method (or `POST /api/v1/workflows/execute` on its REST API). The engine records the new run in PostgreSQL before it answers.
 
-2. **Worker polls** — SDK workers long-poll the orchestrator via `PollWorkflowExecution`. When work is available, the orchestrator assigns the workflow to a worker using `SELECT FOR UPDATE SKIP LOCKED`.
+2. **Worker polls** — Workers long-poll the engine with `PollWorkflowExecution`. When a run is ready, the engine claims it for one worker with `SELECT FOR UPDATE SKIP LOCKED` and sends the run's journal with it.
 
-3. **Replay and execute** — The worker loads the journal from the orchestrator, replays completed steps (returning cached results), and executes the next pending step. Each `ctx.execute_task()` call schedules a task on the orchestrator.
+3. **Replay and execute** — The worker runs your workflow code from the top. Each step already in the journal returns its recorded result; when the code reaches a task with no result yet, the worker reports it back to the engine, which schedules it.
 
-4. **Task dispatch** — The orchestrator places the task on the worker's task queue. A worker polls via `PollTaskExecution`, executes the task handler, and reports the result via `CompleteTaskExecution`.
+4. **Task dispatch** — A worker polling that task queue with `PollTaskExecution` receives the task, runs your task code and reports the result with `CompleteTaskExecution`. The engine records the result in the journal.
 
-5. **Continue or complete** — After a task completes, the orchestrator re-queues the workflow for the next step. This repeats until the workflow finishes or fails.
+5. **Continue or complete** — The engine hands the run to a worker again, which replays it to the next step. This repeats until the workflow completes or fails.
 
 ---
 

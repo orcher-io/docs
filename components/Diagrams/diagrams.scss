@@ -117,44 +117,6 @@
   .stat .v { font: 500 22px/28px var(--font-jetbrains-mono), monospace; color: var(--fg); display: block; }
   .stat .v i { font-style: normal; color: var(--teal); }
 
-  /* ---------- figure 2: architecture ---------- */
-  .arch { display: grid; gap: 0; }
-  .arch .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; align-items: end; }
-  .arch .one { display: grid; justify-items: center; }
-  .arch .one .pt.node { max-width: 380px; }
-  .col { display: grid; gap: 10px; align-content: start; }
-  .col > .label { margin-bottom: 2px; }
-  .card { border: 1px solid var(--line-2); background: var(--bg); box-shadow: 0 18px 50px -28px rgba(0,0,0,.6); }
-  .card.big { border-color: color-mix(in srgb, var(--teal) 55%, var(--line-2)); }
-  .ports { margin-left: auto; font: 400 10.5px/16px var(--font-jetbrains-mono), monospace; color: var(--fg-3); }
-  .ports b { font-weight: 500; color: var(--cyan); margin-left: 8px; }
-  .grp { padding: 10px 10px 2px; }
-  .grp + .grp { border-top: 1px solid var(--line); }
-  .grp > .label { display: block; margin-bottom: 7px; font-size: 10px; }
-  .pts { display: grid; gap: 6px; padding: 10px; }
-  .grp .pts { padding: 0 0 10px; }
-  .pts.two { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-  .pt { all: unset; box-sizing: border-box; display: block; cursor: default; border: 1px solid var(--line); background: var(--panel); padding: 7px 10px; transition: border-color .2s, background .2s, opacity .2s; min-width: 0; }
-  .pt span { display: block; font: 400 13.5px/18px var(--font-rubik), sans-serif; color: var(--fg); overflow-wrap: anywhere; }
-  .pt small { display: block; font: 400 10.5px/15px var(--font-jetbrains-mono), monospace; color: var(--fg-3); margin-top: 1px; }
-  .pt:hover, .pt:focus-visible, .pt.hot { border-color: var(--cyan); background: color-mix(in srgb, var(--cyan) 9%, var(--panel)); outline: none; }
-  .arch.focus .pt:not(.hot) { opacity: .38; }
-  .pt.node { padding: 16px 16px 18px; border-color: var(--line-2); background: var(--bg); box-shadow: 0 18px 50px -28px rgba(0,0,0,.6); position: relative; z-index: 1; width: 100%; }
-  .pt.node .who { font: 500 10.5px/16px var(--font-jetbrains-mono), monospace; letter-spacing: .6px; text-transform: uppercase; color: var(--fg-3); margin-bottom: 8px; }
-  .pt.node span:not(.who) { font-size: 16px; line-height: 22px; }
-  .pt.node small { margin-top: 4px; line-height: 16px; }
-  .stack { position: relative; }
-  .stack::before, .stack::after { content: ''; position: absolute; inset: 0; border: 1px solid var(--line-2); background: var(--bg); }
-  .stack::before { transform: translate(10px, -10px); opacity: .35; }
-  .stack::after { transform: translate(5px, -5px); opacity: .6; }
-  .stack .card { position: relative; z-index: 1; }
-  .vc { justify-self: center; display: flex; align-items: center; gap: 12px; height: 54px; font: 500 10px/14px var(--font-jetbrains-mono), monospace; letter-spacing: .5px; text-transform: uppercase; color: var(--fg-3); transition: color .2s; }
-  .vc i { display: block; width: 1px; height: 100%; background: repeating-linear-gradient(180deg, var(--line-2) 0 4px, transparent 4px 9px); background-size: 1px 9px; animation: orx-slidev 1.1s linear infinite; }
-  .vc.hot { color: var(--cyan); }
-  .vc.hot i { background-image: repeating-linear-gradient(180deg, var(--cyan) 0 4px, transparent 4px 9px); }
-  .detail { border-top: 1px solid var(--line); padding-top: 16px; min-height: 76px; }
-  .detail .ph { min-width: 150px; }
-  @media (max-width: 700px) { .pts.two { grid-template-columns: 1fr 1fr; } .arch .pair { gap: 12px; } .vc span { display: none; } }
   @media (max-width: 860px) { .f1 { grid-template-columns: 1fr; gap: 16px; } .wire { display: none; } }
   @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 }
@@ -173,6 +135,5 @@
 @keyframes orx-shake { 0%,100% { transform: none } 15% { transform: translate(-5px,1px) } 30% { transform: translate(4px,-1px) } 45% { transform: translate(-3px,0) } 60% { transform: translate(2px,1px) } 80% { transform: translate(-1px,0) } }
 @keyframes orx-blink { 50% { opacity: .25 } }
 @keyframes orx-slide { to { background-position: 9px 0 } }
-@keyframes orx-slidev { to { background-position: 0 9px } }
 
 .orx .stat .v.hit { color: var(--teal); }
