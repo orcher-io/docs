@@ -160,7 +160,7 @@ docker run -d --name orcher --network orcher \
   -p 127.0.0.1:50051:50051 -p 127.0.0.1:8080:8080 \
   -e DATABASE_URL=postgresql://orcher:orcher@orcher-postgres:5432/orcher \
   -e ORCHER_INSECURE=true \
-  ghcr.io/orcher-io/orcher:0.7.5
+  ghcr.io/orcher-io/orcher:0.7.7
 until curl -fsS localhost:8080/health/ready >/dev/null 2>&1; do sleep 1; done; echo ready
 ```
 
